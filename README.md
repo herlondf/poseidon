@@ -1,7 +1,9 @@
-# AsyncIO
+# Poseidon
+
+> *God of the seas — raw transport, the force of the waves.*
 
 <p align="center">
-  <img src="docs/logo.png" alt="AsyncIO" width="180"/>
+  <img src="docs/logo.png" alt="Poseidon" width="180"/>
 </p>
 
 <p align="center">
@@ -13,7 +15,7 @@
 
 ## Overview
 
-AsyncIO is a standalone Delphi library that provides a native async I/O HTTP server.
+Poseidon (AsyncIO) is a standalone Delphi library that provides a native async I/O HTTP server.
 It is used as the transport layer for [Pegasus](https://github.com/herlondf/pegasus) and
 [Horse](https://github.com/HashLoad/horse) when the `HORSE_ASYNCIO` define is active.
 
@@ -93,6 +95,22 @@ providers/                             ← framework integrations (optional)
   horse/
     Horse.Provider.AsyncIO.pas         ← Horse provider (requires Horse ≥ 3.1.9)
 ```
+
+## The Olympian Family
+
+> *Poseidon commands the seas — raw transport, the force of the waves.*
+> *Triton guards his father's waters — manages what flows, holds what must not be lost.*
+> *Pegasus flies through the skies — born from Medusa's blood, by the sword Hermes gave to Perseus.*
+> *Hermes runs between all realms — carries messages between gods, mortals and monsters, faster than any wave.*
+
+| Project | Myth | Role |
+|---------|------|------|
+| **Poseidon** (this lib) | God of the seas | Async transport layer — IOCP/epoll, raw I/O |
+| [**Triton**](https://github.com/herlondf/triton) | Son of Poseidon, guardian of the depths | Generic resource pool — connections, clients, SMTP |
+| [**Pegasus**](https://github.com/herlondf/pegasus) | Born from Poseidon's blood, ridden by heroes | HTTP framework — routing, middleware, providers |
+| **Hermes** *(Redis4D)* | Messenger of the gods, guide between realms | Redis client — fast key-value, pub/sub, messaging |
+
+---
 
 ## License
 
