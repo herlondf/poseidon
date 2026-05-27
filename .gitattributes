@@ -1,0 +1,18 @@
+# Normalize line endings
+* text=auto
+
+# Delphi source — keep as-is (already UTF-8 BOM)
+*.pas text eol=crlf
+*.dpr text eol=crlf
+*.dproj text eol=crlf
+*.res binary
+
+# Docs — LF
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+
+# Images
+*.png binary
+*.jpg binary
+*.ico binary

@@ -1,0 +1,66 @@
+# WebSocket
+
+Handlers de WebSocket são registrados por caminho via `RegisterWSHandler`.
+A mesma instância de servidor lida com tráfego HTTP e WebSocket na mesma porta.
+
+## Registrando um handler
+
+```pascal
+uses AsyncIO.Net.WebSocket;
+
+LServer.RegisterWSHandler('/ws',
+  procedure(AConn: IAsyncIOWSConn; const AFrame: TWebSocketFrame)
+  begin
+    if AFrame.Opcode = OPCODE_TEXT then
+      AConn.Send('echo: ' + TEncoding.UTF8.GetString(AFrame.Payload))
+    else if AFrame.Opcode = OPCODE_BINARY then
+      AConn.SendBinary(AFrame.Payload)
+    else if AFrame.Opcode = OPCODE_CLOSE then
+      AConn.Close(1000);
+  end);
+```
+
+## Campos de TWebSocketFrame
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `Opcode` | `Byte` | Tipo do frame — use as constantes `OPCODE_*` |
+| `Payload` | `TBytes` | Payload bruto do frame |
+| `FinFlag` | `Boolean` | True quando este é o fragmento final |
+
+## Constantes OPCODE
+
+| Constante | Valor | Significado |
+|-----------|-------|-------------|
+| `OPCODE_TEXT`   | `$1` | Mensagem de texto UTF-8 |
+| `OPCODE_BINARY` | `$2` | Mensagem binária |
+| `OPCODE_CLOSE`  | `$8` | Encerramento da conexão |
+| `OPCODE_PING`   | `$9` | Ping (tratado automaticamente) |
+| `OPCODE_PONG`   | `$A` | Pong (tratado automaticamente) |
+
+## Métodos de IAsyncIOWSConn
+
+| Método | Descrição |
+|--------|-----------|
+| `Send(AText: string)` | Envia um frame de texto UTF-8 |
+| `SendBinary(AData: TBytes)` | Envia um frame binário |
+| `Close(ACode: Word = 1000)` | Envia frame de close e encerra a conexão |
+| `RemoteAddr: string` | Endereço IP remoto (propriedade somente leitura) |
+| `Closed: Boolean` | True se a conexão já foi encerrada (propriedade somente leitura) |
+
+## Trabalhando com payloads de texto
+
+`Payload` é sempre `TBytes`. Decodifique para string explicitamente:
+
+```pascal
+LText := TEncoding.UTF8.GetString(AFrame.Payload);
+```
+
+## Observações
+
+- Frames Ping são respondidos automaticamente com Pong — seu handler não é chamado para Ping.
+- Frames Close: chame `AConn.Close(1000)` para completar o handshake. Após essa chamada, a
+  conexão é encerrada e qualquer envio posterior em `AConn` é ignorado.
+- O handler é chamado a partir de um worker thread; estado compartilhado deve ser protegido.
+- `TWebSocketUtils` expõe os helpers de protocolo bruto (`ParseFrame`, `BuildFrame`,
+  `HandshakeAccept`) para controle de nível mais baixo.

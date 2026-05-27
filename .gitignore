@@ -1,0 +1,45 @@
+# ─── Delphi compiled output ───────────────────────────────────────────────────
+*.dcu
+*.dcuil
+*.dcuttc
+*.exe
+*.dll
+*.bpl
+*.bpi
+*.dcp
+*.map
+*.lib
+*.a
+*.o
+*.obj
+*.res
+
+# ─── Delphi build output folders ──────────────────────────────────────────────
+bin/
+dcu/
+__history/
+__recovery/
+
+# ─── Delphi IDE / project local settings ──────────────────────────────────────
+*.dproj.local
+*.deployproj
+*.identcache
+*.local
+*.stat
+*.vlb
+*.dsk
+
+# ─── Temp / backup files ──────────────────────────────────────────────────────
+~*
+*.~*
+*.bak
+*.tmp
+
+# ─── AI assistant config (not for public consumption) ─────────────────────────
+CLAUDE.md
+AGENTS.md
+
+# ─── OS noise ─────────────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
