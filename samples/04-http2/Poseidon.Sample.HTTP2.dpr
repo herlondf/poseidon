@@ -1,4 +1,4 @@
-program AsyncIO.Sample.HTTP2;
+﻿program Poseidon.Sample.HTTP2;
 
 // Sample 04 — HTTP/2 (h2 via ALPN)
 // Demonstrates HTTP/2 enabled via ALPN negotiation over TLS.
@@ -12,7 +12,7 @@ program AsyncIO.Sample.HTTP2;
 //     openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"
 //
 // Run:
-//   AsyncIO.Sample.HTTP2.exe
+//   Poseidon.Sample.HTTP2.exe
 //   curl -k --http2 https://localhost:9444/ping           # HTTP/2
 //   curl -k --http1.1 https://localhost:9444/ping         # HTTP/1.1 fallback
 
@@ -21,7 +21,7 @@ program AsyncIO.Sample.HTTP2;
 uses
   System.SysUtils,
   System.Generics.Collections,
-  AsyncIO.Net.HttpServer;
+  Poseidon.Net.HttpServer;
 
 const
   SERVER_PORT  = 9444;
@@ -29,7 +29,7 @@ const
   SERVER_KEY   = 'server.key';
 
 procedure HandleRequest(
-  const AReq:          TAsyncIONativeRequest;
+  const AReq:          TPoseidonNativeRequest;
   out   AStatus:       Integer;
   out   AContentType:  string;
   out   ABody:         TBytes;
@@ -44,15 +44,15 @@ begin
 end;
 
 var
-  LServer: TAsyncIONativeServer;
+  LServer: TPoseidonNativeServer;
 begin
-  LServer := TAsyncIONativeServer.Create;
+  LServer := TPoseidonNativeServer.Create;
   try
     // Order: ConfigureSSL → HTTP2Enabled → Listen
     LServer.ConfigureSSL(SERVER_CERT, SERVER_KEY);
     LServer.HTTP2Enabled := True;
 
-    Writeln('AsyncIO Sample 04 — HTTP/2');
+    Writeln('Poseidon Sample 04 — HTTP/2');
     Writeln('Listening on https://0.0.0.0:', SERVER_PORT, '  (h2 + http/1.1)');
     Writeln;
 

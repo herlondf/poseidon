@@ -1,4 +1,4 @@
-﻿unit AsyncIO.Net.Pool.Buffer;
+﻿unit Poseidon.Net.Pool.Buffer;
 
 // Object pool for per-connection AccumBuf buffers.
 // Eliminates the SetLength(AccumBuf, 8192) heap allocation that happens on

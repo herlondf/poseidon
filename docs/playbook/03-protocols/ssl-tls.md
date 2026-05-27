@@ -1,12 +1,12 @@
-# SSL/TLS + SNI
+﻿# SSL/TLS + SNI
 
-AsyncIO uses OpenSSL via direct bindings in `AsyncIO.Net.SSL`.
+Poseidon uses OpenSSL via direct bindings in `Poseidon.Net.SSL`.
 `libssl` and `libcrypto` must be in PATH (or the same directory as the binary).
 
 ## Basic HTTPS setup
 
 ```pascal
-LServer := TAsyncIONativeServer.Create;
+LServer := TPoseidonNativeServer.Create;
 LServer.ConfigureSSL('cert.pem', 'key.pem');
 LServer.Listen('0.0.0.0', 443, @HandleRequest, nil);
 ```
@@ -29,4 +29,4 @@ Clients with no SNI (or an unrecognised hostname) receive the default cert.
 
 - PEM format only (cert + key as separate files).
 - Intermediate chain: concatenate into the cert PEM file.
-- Call order: `ConfigureSSL` → `AddSSLCert` → `Listen`. Any other order raises `EAsyncIOSSL`.
+- Call order: `ConfigureSSL` → `AddSSLCert` → `Listen`. Any other order raises `EPoseidonSSL`.

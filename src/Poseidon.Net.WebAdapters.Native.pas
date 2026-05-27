@@ -1,12 +1,12 @@
-﻿unit AsyncIO.Net.WebAdapters.Native;
+﻿unit Poseidon.Net.WebAdapters.Native;
 
-// Concrete TWebRequest / TWebResponse adapters for TAsyncIONativeServer.
-// Bridges TAsyncIONativeRequest (record from the IOCP layer) to the WebBroker
-// abstract interface expected by TAsyncIOCore.Routes.Execute.
+// Concrete TWebRequest / TWebResponse adapters for TPoseidonNativeServer.
+// Bridges TPoseidonNativeRequest (record from the IOCP layer) to the WebBroker
+// abstract interface expected by TPoseidonCore.Routes.Execute.
 //
 // TNativeWebResponse.CommitResponse invokes FOnFlush, writing response data
-// back to the out-parameters of TAsyncIOProviderNative.HandleRequest.
-// The socket is never touched here — all socket I/O is in AsyncIO.Net.HttpServer.
+// back to the out-parameters of TPoseidonProviderNative.HandleRequest.
+// The socket is never touched here — all socket I/O is in Poseidon.Net.HttpServer.
 
 interface
 
@@ -15,7 +15,7 @@ uses
   System.Classes,
   System.Generics.Collections,
   Web.HTTPApp,
-  AsyncIO.Net.HttpServer;
+  Poseidon.Net.HttpServer;
 
 type
   TNativeFlushProc = reference to procedure(
@@ -24,7 +24,7 @@ type
 
   TNativeWebRequest = class(TWebRequest)
   private
-    FReq: TAsyncIONativeRequest;  // value copy — safe for pool reuse
+    FReq: TPoseidonNativeRequest;  // value copy — safe for pool reuse
     function _Header(const AName: string): string;
   protected
     function GetStringVariable(Index: Integer): string; override;
@@ -35,8 +35,8 @@ type
     function GetInternalScriptName: string; override;
     function GetRawPathInfo: string; override;
   public
-    constructor Create(const AReq: TAsyncIONativeRequest);
-    procedure Reset(const AReq: TAsyncIONativeRequest);
+    constructor Create(const AReq: TPoseidonNativeRequest);
+    procedure Reset(const AReq: TPoseidonNativeRequest);
     function GetFieldByName(const Name: string): string; override;
     function ReadClient(var Buffer; Count: Integer): Integer; override;
     function ReadString(Count: Integer): string; override;
@@ -84,13 +84,13 @@ uses
 // TNativeWebRequest
 // ---------------------------------------------------------------------------
 
-constructor TNativeWebRequest.Create(const AReq: TAsyncIONativeRequest);
+constructor TNativeWebRequest.Create(const AReq: TPoseidonNativeRequest);
 begin
   FReq := AReq;    // copies managed array refs (TBytes, TArray<TPair>)
   inherited Create;
 end;
 
-procedure TNativeWebRequest.Reset(const AReq: TAsyncIONativeRequest);
+procedure TNativeWebRequest.Reset(const AReq: TPoseidonNativeRequest);
 begin
   FReq := AReq;
   UpdateMethodType;  // FMethodType must reflect the new request — pool reuse retains stale value otherwise

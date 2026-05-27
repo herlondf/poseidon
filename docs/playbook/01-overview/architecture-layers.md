@@ -1,28 +1,28 @@
-# Architecture layers
+﻿# Architecture layers
 
 ```
 ┌──────────────────────────────────────────────┐
 │  Consumer (Pegasus / Horse / your app)        │
-│  TAsyncIONativeServer.Listen(host, port, cb)  │
+│  TPoseidonNativeServer.Listen(host, port, cb)  │
 └───────────────────┬──────────────────────────┘
                     │ callback: HandleRequest
 ┌───────────────────▼──────────────────────────┐
 │  Protocol adapters                            │
-│  AsyncIO.Net.WebAdapters.Native               │  WebBroker bridge
-│  AsyncIO.Net.WebSocket                        │  WS frame codec
-│  AsyncIO.Net.HTTP2                            │  h2 ALPN negotiation
-│  AsyncIO.Net.SSL                              │  OpenSSL bindings + SNI
+│  Poseidon.Net.WebAdapters.Native               │  WebBroker bridge
+│  Poseidon.Net.WebSocket                        │  WS frame codec
+│  Poseidon.Net.HTTP2                            │  h2 ALPN negotiation
+│  Poseidon.Net.SSL                              │  OpenSSL bindings + SNI
 └───────────────────┬──────────────────────────┘
                     │
 ┌───────────────────▼──────────────────────────┐
 │  Memory pools                                 │
-│  AsyncIO.Net.Pool.Buffer   (TBufferPool)      │  lock-free byte buffers
-│  AsyncIO.Net.Pool.Native   (TNativeContextPool│  per-request adapters
+│  Poseidon.Net.Pool.Buffer   (TBufferPool)      │  lock-free byte buffers
+│  Poseidon.Net.Pool.Native   (TNativeContextPool│  per-request adapters
 └───────────────────┬──────────────────────────┘
                     │
 ┌───────────────────▼──────────────────────────┐
-│  Core server  — AsyncIO.Net.HttpServer        │
-│  TAsyncIONativeServer                         │
+│  Core server  — Poseidon.Net.HttpServer        │
+│  TPoseidonNativeServer                         │
 │  epoll (Linux) / IOCP (Windows) syscalls only │
 └──────────────────────────────────────────────┘
 ```

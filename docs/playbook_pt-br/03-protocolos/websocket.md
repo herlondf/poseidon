@@ -1,4 +1,4 @@
-# WebSocket
+﻿# WebSocket
 
 Handlers de WebSocket são registrados por caminho via `RegisterWSHandler`.
 A mesma instância de servidor lida com tráfego HTTP e WebSocket na mesma porta.
@@ -6,10 +6,10 @@ A mesma instância de servidor lida com tráfego HTTP e WebSocket na mesma porta
 ## Registrando um handler
 
 ```pascal
-uses AsyncIO.Net.WebSocket;
+uses Poseidon.Net.WebSocket;
 
 LServer.RegisterWSHandler('/ws',
-  procedure(AConn: IAsyncIOWSConn; const AFrame: TWebSocketFrame)
+  procedure(AConn: IPoseidonWSConn; const AFrame: TWebSocketFrame)
   begin
     if AFrame.Opcode = OPCODE_TEXT then
       AConn.Send('echo: ' + TEncoding.UTF8.GetString(AFrame.Payload))
@@ -38,7 +38,7 @@ LServer.RegisterWSHandler('/ws',
 | `OPCODE_PING`   | `$9` | Ping (tratado automaticamente) |
 | `OPCODE_PONG`   | `$A` | Pong (tratado automaticamente) |
 
-## Métodos de IAsyncIOWSConn
+## Métodos de IPoseidonWSConn
 
 | Método | Descrição |
 |--------|-----------|

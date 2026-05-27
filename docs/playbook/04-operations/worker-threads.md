@@ -1,7 +1,7 @@
-# Worker threads
+﻿# Worker threads
 
-AsyncIO dispatches incoming requests to a thread pool. The default pool size is **200 workers**
-(`WorkerCount` property on `TAsyncIONativeServer`).
+Poseidon dispatches incoming requests to a thread pool. The default pool size is **200 workers**
+(`WorkerCount` property on `TPoseidonNativeServer`).
 
 ## Sizing guidance
 
@@ -17,7 +17,7 @@ For handlers that hit a database (blocking I/O): keep the default 200 or match y
 Must be set **before** `Listen`:
 
 ```pascal
-LServer := TAsyncIONativeServer.Create;
+LServer := TPoseidonNativeServer.Create;
 LServer.WorkerCount := 50;
 LServer.Listen('0.0.0.0', 9000, @HandleRequest, nil);
 ```

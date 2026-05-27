@@ -1,11 +1,11 @@
-program AsyncIO.Sample.BasicHttp;
+﻿program Poseidon.Sample.BasicHttp;
 
 // Sample 01 — Basic HTTP Server
-// Demonstrates the minimal setup to run TAsyncIONativeServer.
+// Demonstrates the minimal setup to run TPoseidonNativeServer.
 // Covers: server creation, Listen, graceful Stop on Enter.
 //
 // Run:
-//   AsyncIO.Sample.BasicHttp.exe
+//   Poseidon.Sample.BasicHttp.exe
 //   curl http://localhost:9001/ping
 //   curl http://localhost:9001/hello/world
 
@@ -15,13 +15,13 @@ uses
   System.SysUtils,
   System.StrUtils,
   System.Generics.Collections,
-  AsyncIO.Net.HttpServer;
+  Poseidon.Net.HttpServer;
 
 const
   SERVER_PORT = 9001;
 
 procedure HandleRequest(
-  const AReq:          TAsyncIONativeRequest;
+  const AReq:          TPoseidonNativeRequest;
   out   AStatus:       Integer;
   out   AContentType:  string;
   out   ABody:         TBytes;
@@ -57,11 +57,11 @@ begin
 end;
 
 var
-  LServer: TAsyncIONativeServer;
+  LServer: TPoseidonNativeServer;
 begin
-  LServer := TAsyncIONativeServer.Create;
+  LServer := TPoseidonNativeServer.Create;
   try
-    Writeln('AsyncIO Sample 01 — Basic HTTP Server');
+    Writeln('Poseidon Sample 01 — Basic HTTP Server');
     Writeln('Listening on http://0.0.0.0:', SERVER_PORT);
     Writeln('  GET /ping        → {"message":"pong"}');
     Writeln('  GET /hello/:name → {"hello":"<name>"}');

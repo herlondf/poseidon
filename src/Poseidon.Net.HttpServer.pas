@@ -1,4 +1,4 @@
-﻿unit AsyncIO.Net.HttpServer;
+﻿unit Poseidon.Net.HttpServer;
 
 // Native HTTP/1.1 server.
 // Windows: IOCP — WSARecv + single WSASend per response.
@@ -21,11 +21,11 @@ uses
   System.DateUtils,
   System.ZLib,
   System.Generics.Collections,
-  AsyncIO.Net.WebSocket,
-  AsyncIO.Net.HTTP2;
+  Poseidon.Net.WebSocket,
+  Poseidon.Net.HTTP2;
 
 type
-  TAsyncIONativeRequest = record
+  TPoseidonNativeRequest = record
     Method:      string;
     Path:        string;
     QueryString: string;
@@ -36,13 +36,13 @@ type
   end;
 
   TOnNativeRequest = reference to procedure(
-    const AReq:          TAsyncIONativeRequest;
+    const AReq:          TPoseidonNativeRequest;
     out   AStatus:       Integer;
     out   AContentType:  string;
     out   ABody:         TBytes;
     out   AExtraHeaders: TArray<TPair<string,string>>);
 
-  TAsyncIONativeServer = class
+  TPoseidonNativeServer = class
   private
     FOnRequest:       TOnNativeRequest;
     FActive:          Boolean;
@@ -80,7 +80,7 @@ type
     procedure _WorkerLoop;
     procedure _ProcessRecv(AConn: Pointer; const ABuf: PByte; ALen: Cardinal);
     function  _TryParseRequest(AConn: Pointer;
-      out AReq: TAsyncIONativeRequest; out ABadRequest: Boolean): Boolean;
+      out AReq: TPoseidonNativeRequest; out ABadRequest: Boolean): Boolean;
     function  _DecodeChunked(ABuf: PByte; ABufLen: Integer;
       out ABody: TBytes; out AConsumed: Integer; out AMalformed: Boolean): Boolean;
     function  _BuildResponse(AStatus: Integer; const AContentType: string;
@@ -91,10 +91,10 @@ type
     procedure _IdleSweepLoop;
     function  _AdmitAndRegister(AConn: Pointer): Boolean;
     procedure _UnregisterIP(const ARemoteAddr: string);
-    procedure _TryGzipResponse(const AReq: TAsyncIONativeRequest;
+    procedure _TryGzipResponse(const AReq: TPoseidonNativeRequest;
       const AContentType: string; var ABody: TBytes;
       var AExtra: TArray<TPair<string,string>>);
-    procedure _UpgradeToWS(AConn: Pointer; const AReq: TAsyncIONativeRequest);
+    procedure _UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     function  _DispatchWSFrames(AConn: Pointer): Boolean;
     // HTTP/2 helpers — called from _ProcessRecv and used as TH2Conn callbacks
     procedure _H2Send(AConn: Pointer; const AData: TBytes);
@@ -148,8 +148,8 @@ implementation
 uses
   Winapi.Windows,
   Winapi.Winsock2,
-  AsyncIO.Net.SSL,
-  AsyncIO.Net.Pool.Buffer;
+  Poseidon.Net.SSL,
+  Poseidon.Net.Pool.Buffer;
 {$ELSE}
 uses
   Posix.SysSocket,
@@ -158,8 +158,8 @@ uses
   Posix.ArpaInet,
   Posix.Unistd,
   Posix.Errno,
-  AsyncIO.Net.SSL,
-  AsyncIO.Net.Pool.Buffer;
+  Poseidon.Net.SSL,
+  Poseidon.Net.Pool.Buffer;
 {$ENDIF}
 
 // ===========================================================================
@@ -199,7 +199,7 @@ type
     SSLHandshook:  Boolean;
     WSMode:        Byte;
     WSPath:        string;
-    WSConn:        IAsyncIOWSConn;
+    WSConn:        IPoseidonWSConn;
     H2Conn:        TH2Conn;     // non-nil when connection uses HTTP/2 (via ALPN)
 {$IFNDEF MSWINDOWS}
     PendingSend:   TBytes;
@@ -242,8 +242,8 @@ end;
 // Shared: _TryParseRequest
 // ===========================================================================
 
-function TAsyncIONativeServer._TryParseRequest(AConn: Pointer;
-  out AReq: TAsyncIONativeRequest; out ABadRequest: Boolean): Boolean;
+function TPoseidonNativeServer._TryParseRequest(AConn: Pointer;
+  out AReq: TPoseidonNativeRequest; out ABadRequest: Boolean): Boolean;
 // Zero-Split parser: scans AccumBuf byte-by-byte using indices, materializing
 // strings only for the final Method/Path/Headers values. Eliminates the big
 // LData GetString + 2 Split TArray allocations per request.
@@ -463,7 +463,7 @@ end;
 // Result=False, AMalformed=True  → malformed chunk encoding → close conn
 // ===========================================================================
 
-function TAsyncIONativeServer._DecodeChunked(ABuf: PByte; ABufLen: Integer;
+function TPoseidonNativeServer._DecodeChunked(ABuf: PByte; ABufLen: Integer;
   out ABody: TBytes; out AConsumed: Integer; out AMalformed: Boolean): Boolean;
 var
   LPos:       Integer;
@@ -553,7 +553,7 @@ end;
 // Shared: SSL helpers — encrypt-and-send + handshake write-BIO flush
 // ===========================================================================
 
-procedure TAsyncIONativeServer._EncryptAndSend(AConn: Pointer;
+procedure TPoseidonNativeServer._EncryptAndSend(AConn: Pointer;
   const AAppData: TBytes);
 var
   LConn:    TNativeConn absolute AConn;
@@ -569,7 +569,7 @@ begin
 
   if Length(AAppData) > 0 then
   begin
-    if TAsyncIOSSL.SSL_Write(LConn.SSLHandle, @AAppData[0],
+    if TPoseidonSSL.SSL_Write(LConn.SSLHandle, @AAppData[0],
          Length(AAppData)) <= 0 then
     begin
       _CloseConn(AConn);
@@ -577,7 +577,7 @@ begin
     end;
   end;
 
-  LPending := TAsyncIOSSL.BIO_Pending(LConn.SSLWriteBio);
+  LPending := TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio);
   if LPending <= 0 then
   begin
     _PostSend(AConn, nil);
@@ -585,7 +585,7 @@ begin
   end;
 
   SetLength(LEnc, LPending);
-  LN := TAsyncIOSSL.BIO_Read(LConn.SSLWriteBio, @LEnc[0], LPending);
+  LN := TPoseidonSSL.BIO_Read(LConn.SSLWriteBio, @LEnc[0], LPending);
   if LN <= 0 then
   begin
     _CloseConn(AConn);
@@ -595,7 +595,7 @@ begin
   _PostSend(AConn, LEnc);
 end;
 
-procedure TAsyncIONativeServer._SSLFlushWriteBio(AConn: Pointer);
+procedure TPoseidonNativeServer._SSLFlushWriteBio(AConn: Pointer);
 var
   LConn:    TNativeConn absolute AConn;
   LPending: Integer;
@@ -603,10 +603,10 @@ var
   LN:       Integer;
 begin
   if LConn.SSLWriteBio = nil then Exit;
-  LPending := TAsyncIOSSL.BIO_Pending(LConn.SSLWriteBio);
+  LPending := TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio);
   if LPending <= 0 then Exit;
   SetLength(LEnc, LPending);
-  LN := TAsyncIOSSL.BIO_Read(LConn.SSLWriteBio, @LEnc[0], LPending);
+  LN := TPoseidonSSL.BIO_Read(LConn.SSLWriteBio, @LEnc[0], LPending);
   if LN <= 0 then Exit;
   if LN < LPending then SetLength(LEnc, LN);
   _PostSend(AConn, LEnc);
@@ -616,7 +616,7 @@ end;
 // Shared: _TryGzipResponse — opt-in gzip Content-Encoding negotiation
 // ===========================================================================
 
-procedure TAsyncIONativeServer._TryGzipResponse(const AReq: TAsyncIONativeRequest;
+procedure TPoseidonNativeServer._TryGzipResponse(const AReq: TPoseidonNativeRequest;
   const AContentType: string; var ABody: TBytes;
   var AExtra: TArray<TPair<string,string>>);
 const
@@ -678,49 +678,49 @@ end;
 
 // SNI callback — invoked during TLS handshake when client sends Server Name.
 // Looks up the hostname in FCertCtxByHost and switches the SSL_CTX so the
-// matching certificate is presented. AArg carries the TAsyncIONativeServer.
-function AsyncIOSNIServernameCallback(ASSL: Pointer; AD: PInteger; AArg: Pointer): Integer; cdecl;
+// matching certificate is presented. AArg carries the TPoseidonNativeServer.
+function PoseidonSNIServernameCallback(ASSL: Pointer; AD: PInteger; AArg: Pointer): Integer; cdecl;
 var
-  LServer: TAsyncIONativeServer;
+  LServer: TPoseidonNativeServer;
   LHost:   string;
   LCtx:    Pointer;
 begin
   Result := SSL_TLSEXT_ERR_NOACK;
   if AArg = nil then Exit;
-  LServer := TAsyncIONativeServer(AArg);
+  LServer := TPoseidonNativeServer(AArg);
   if LServer.FCertCtxByHost = nil then Exit;
-  LHost := LowerCase(TAsyncIOSSL.SSL_GetServername(ASSL));
+  LHost := LowerCase(TPoseidonSSL.SSL_GetServername(ASSL));
   if LHost = '' then Exit;
   if LServer.FCertCtxByHost.TryGetValue(LHost, LCtx) and (LCtx <> nil) then
   begin
-    TAsyncIOSSL.SSL_SetCTX(ASSL, LCtx);
+    TPoseidonSSL.SSL_SetCTX(ASSL, LCtx);
     Result := SSL_TLSEXT_ERR_OK;
   end;
 end;
 
-procedure TAsyncIONativeServer.ConfigureSSL(const ACertFile, AKeyFile: string);
+procedure TPoseidonNativeServer.ConfigureSSL(const ACertFile, AKeyFile: string);
 begin
   if FActive then
     raise Exception.Create('ConfigureSSL must be called before Listen()');
   if FSSLCtx <> nil then
   begin
-    TAsyncIOSSL.CTX_Free(FSSLCtx);
+    TPoseidonSSL.CTX_Free(FSSLCtx);
     FSSLCtx := nil;
   end;
-  TAsyncIOSSL.EnsureLoaded;
-  FSSLCtx := TAsyncIOSSL.CTX_New;
-  TAsyncIOSSL.CTX_LoadCert(FSSLCtx, ACertFile);
-  TAsyncIOSSL.CTX_LoadKey(FSSLCtx, AKeyFile);
-  TAsyncIOSSL.CTX_VerifyKey(FSSLCtx);
+  TPoseidonSSL.EnsureLoaded;
+  FSSLCtx := TPoseidonSSL.CTX_New;
+  TPoseidonSSL.CTX_LoadCert(FSSLCtx, ACertFile);
+  TPoseidonSSL.CTX_LoadKey(FSSLCtx, AKeyFile);
+  TPoseidonSSL.CTX_VerifyKey(FSSLCtx);
   // Register SNI callback so hostnames registered via AddSSLCert can switch CTX.
-  TAsyncIOSSL.CTX_SetSNICallback(FSSLCtx, @AsyncIOSNIServernameCallback, Self);
+  TPoseidonSSL.CTX_SetSNICallback(FSSLCtx, @PoseidonSNIServernameCallback, Self);
   // Register ALPN callback to negotiate "h2" when HTTP2Enabled is True.
   if FH2Enabled then
-    TAsyncIOSSL.CTX_SetALPN(FSSLCtx, Self);
+    TPoseidonSSL.CTX_SetALPN(FSSLCtx, Self);
   FSSLEnabled := True;
 end;
 
-procedure TAsyncIONativeServer.AddSSLCert(const AHostName, ACertFile, AKeyFile: string);
+procedure TPoseidonNativeServer.AddSSLCert(const AHostName, ACertFile, AKeyFile: string);
 var
   LCtx: Pointer;
 begin
@@ -731,20 +731,20 @@ begin
   if FCertCtxByHost = nil then
     FCertCtxByHost := TDictionary<string, Pointer>.Create;
 
-  TAsyncIOSSL.EnsureLoaded;
-  LCtx := TAsyncIOSSL.CTX_New;
+  TPoseidonSSL.EnsureLoaded;
+  LCtx := TPoseidonSSL.CTX_New;
   try
-    TAsyncIOSSL.CTX_LoadCert(LCtx, ACertFile);
-    TAsyncIOSSL.CTX_LoadKey(LCtx, AKeyFile);
-    TAsyncIOSSL.CTX_VerifyKey(LCtx);
+    TPoseidonSSL.CTX_LoadCert(LCtx, ACertFile);
+    TPoseidonSSL.CTX_LoadKey(LCtx, AKeyFile);
+    TPoseidonSSL.CTX_VerifyKey(LCtx);
   except
-    TAsyncIOSSL.CTX_Free(LCtx);
+    TPoseidonSSL.CTX_Free(LCtx);
     raise;
   end;
 
   // If hostname already had a CTX, free the old one.
   if FCertCtxByHost.ContainsKey(LowerCase(AHostName)) then
-    TAsyncIOSSL.CTX_Free(FCertCtxByHost[LowerCase(AHostName)]);
+    TPoseidonSSL.CTX_Free(FCertCtxByHost[LowerCase(AHostName)]);
   FCertCtxByHost.AddOrSetValue(LowerCase(AHostName), LCtx);
 end;
 
@@ -861,7 +861,7 @@ begin
   end;
 end;
 
-function TAsyncIONativeServer._BuildResponse(AStatus: Integer;
+function TPoseidonNativeServer._BuildResponse(AStatus: Integer;
   const AContentType: string; const ABody: TBytes; AKeepAlive: Boolean;
   const AExtra: TArray<TPair<string,string>>): TBytes;
 // Hot path: pre-cached fragments are Move()'d into Result. Common
@@ -944,11 +944,11 @@ end;
 // Calls _PostRecv (platform-specific re-arm) when parse is incomplete.
 // ===========================================================================
 
-procedure TAsyncIONativeServer._ProcessRecv(AConn: Pointer;
+procedure TPoseidonNativeServer._ProcessRecv(AConn: Pointer;
   const ABuf: PByte; ALen: Cardinal);
 var
   LConn:    TNativeConn absolute AConn;
-  LReq:     TAsyncIONativeRequest;
+  LReq:     TPoseidonNativeRequest;
   AStatus:  Integer;
   ACT:      string;
   ABody:    TBytes;
@@ -966,7 +966,7 @@ begin
   begin
     // --- SSL path: feed encrypted bytes into ReadBio, then SSL_read application data ---
     if (ALen > 0) and
-       (TAsyncIOSSL.BIO_Write(LConn.SSLReadBio, ABuf, ALen) <= 0) then
+       (TPoseidonSSL.BIO_Write(LConn.SSLReadBio, ABuf, ALen) <= 0) then
     begin
       _CloseConn(AConn);
       Exit;
@@ -974,12 +974,12 @@ begin
 
     if not LConn.SSLHandshook then
     begin
-      LHsRet := TAsyncIOSSL.Do_Handshake(LConn.SSLHandle);
+      LHsRet := TPoseidonSSL.Do_Handshake(LConn.SSLHandle);
       if LHsRet = 1 then
       begin
         LConn.SSLHandshook := True;
         // ALPN: if client negotiated "h2", create TH2Conn for this connection.
-        if FH2Enabled and (TAsyncIOSSL.SSL_GetSelectedProtocol(LConn.SSLHandle) = 'h2') then
+        if FH2Enabled and (TPoseidonSSL.SSL_GetSelectedProtocol(LConn.SSLHandle) = 'h2') then
         begin
           LConn.H2Conn := TH2Conn.Create(AConn, _H2Send, _H2Close, _H2OnRequest);
           LConn.H2Conn.SendInitialSettings;
@@ -988,11 +988,11 @@ begin
       end
       else
       begin
-        LErr := TAsyncIOSSL.Get_Error(LConn.SSLHandle, LHsRet);
+        LErr := TPoseidonSSL.Get_Error(LConn.SSLHandle, LHsRet);
         if LErr = SSL_ERROR_WANT_READ then
         begin
           _SSLFlushWriteBio(AConn);
-          if TAsyncIOSSL.BIO_Pending(LConn.SSLWriteBio) <= 0 then
+          if TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio) <= 0 then
             _PostRecv(AConn);
           Exit;
         end;
@@ -1000,12 +1000,12 @@ begin
         Exit;
       end;
       _SSLFlushWriteBio(AConn);
-      if TAsyncIOSSL.BIO_Pending(LConn.SSLWriteBio) > 0 then Exit;
+      if TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio) > 0 then Exit;
     end;
 
     // Drain decrypted application data
     repeat
-      LDecN := TAsyncIOSSL.SSL_Read(LConn.SSLHandle, @LDecBuf[0], RECV_BUF_SIZE);
+      LDecN := TPoseidonSSL.SSL_Read(LConn.SSLHandle, @LDecBuf[0], RECV_BUF_SIZE);
       if LDecN > 0 then
       begin
         if LConn.AccumLen + LDecN > Length(LConn.AccumBuf) then
@@ -1016,7 +1016,7 @@ begin
       end
       else
       begin
-        LErr := TAsyncIOSSL.Get_Error(LConn.SSLHandle, LDecN);
+        LErr := TPoseidonSSL.Get_Error(LConn.SSLHandle, LDecN);
         if LErr = SSL_ERROR_WANT_READ then Break;
         _CloseConn(AConn);
         Exit;
@@ -1141,7 +1141,7 @@ begin
     Result := ARemoteAddr;
 end;
 
-function TAsyncIONativeServer._AdmitAndRegister(AConn: Pointer): Boolean;
+function TPoseidonNativeServer._AdmitAndRegister(AConn: Pointer): Boolean;
 var
   LConn:  TNativeConn absolute AConn;
   LIP:    string;
@@ -1166,7 +1166,7 @@ begin
   end;
 end;
 
-procedure TAsyncIONativeServer._UnregisterIP(const ARemoteAddr: string);
+procedure TPoseidonNativeServer._UnregisterIP(const ARemoteAddr: string);
 var
   LIP:    string;
   LCount: Integer;
@@ -1185,7 +1185,7 @@ end;
 // Shared: lifecycle (constructor/destructor) — must precede any Listen path
 // ===========================================================================
 
-constructor TAsyncIONativeServer.Create;
+constructor TPoseidonNativeServer.Create;
 begin
   inherited Create;
   FIdleTimeoutMs       := 10000;   // 10s default; set 0 to disable
@@ -1196,7 +1196,7 @@ begin
   FWSLock              := TCriticalSection.Create;
 end;
 
-destructor TAsyncIONativeServer.Destroy;
+destructor TPoseidonNativeServer.Destroy;
 var
   LPair: TPair<string, Pointer>;
 begin
@@ -1205,12 +1205,12 @@ begin
   if FCertCtxByHost <> nil then
   begin
     for LPair in FCertCtxByHost do
-      if LPair.Value <> nil then TAsyncIOSSL.CTX_Free(LPair.Value);
+      if LPair.Value <> nil then TPoseidonSSL.CTX_Free(LPair.Value);
     FreeAndNil(FCertCtxByHost);
   end;
   if FSSLCtx <> nil then
   begin
-    TAsyncIOSSL.CTX_Free(FSSLCtx);
+    TPoseidonSSL.CTX_Free(FSSLCtx);
     FSSLCtx := nil;
   end;
   FreeAndNil(FPerIPCount);
@@ -1223,8 +1223,8 @@ end;
 // Shared: WebSocket — upgrade, frame dispatch, handler registration
 // ===========================================================================
 
-procedure TAsyncIONativeServer._UpgradeToWS(AConn: Pointer;
-  const AReq: TAsyncIONativeRequest);
+procedure TPoseidonNativeServer._UpgradeToWS(AConn: Pointer;
+  const AReq: TPoseidonNativeRequest);
 var
   LConn:  TNativeConn absolute AConn;
   LKey:   string;
@@ -1251,7 +1251,7 @@ begin
   LConn.WSPath   := AReq.Path;
   LConn.AccumLen := 0;
 
-  LConn.WSConn := TAsyncIOWSConn.Create(
+  LConn.WSConn := TPoseidonWSConn.Create(
     LConn.RemoteAddr,
     procedure(const AData: TBytes)
     begin
@@ -1267,7 +1267,7 @@ begin
   _PostRecv(AConn);
 end;
 
-function TAsyncIONativeServer._DispatchWSFrames(AConn: Pointer): Boolean;
+function TPoseidonNativeServer._DispatchWSFrames(AConn: Pointer): Boolean;
 var
   LConn:       TNativeConn absolute AConn;
   LFrame:      TWebSocketFrame;
@@ -1328,21 +1328,21 @@ end;
 // HTTP/2 helpers
 // ===========================================================================
 
-procedure TAsyncIONativeServer._H2Send(AConn: Pointer; const AData: TBytes);
+procedure TPoseidonNativeServer._H2Send(AConn: Pointer; const AData: TBytes);
 begin
   _EncryptAndSend(AConn, AData);
 end;
 
-procedure TAsyncIONativeServer._H2Close(AConn: Pointer);
+procedure TPoseidonNativeServer._H2Close(AConn: Pointer);
 begin
   _CloseConn(AConn);
 end;
 
-procedure TAsyncIONativeServer._H2OnRequest(const AReq: TH2RequestData;
+procedure TPoseidonNativeServer._H2OnRequest(const AReq: TH2RequestData;
   var AStatus: Integer; var AContentType: string; var ABody: TBytes;
   var AExtra: TArray<TPair<string,string>>);
 var
-  LNativeReq: TAsyncIONativeRequest;
+  LNativeReq: TPoseidonNativeRequest;
   LQPos:      Integer;
   LStatus:    Integer;
   LCT:        string;
@@ -1394,7 +1394,7 @@ begin
   AExtra       := LExtra;
 end;
 
-procedure TAsyncIONativeServer.RegisterWSHandler(const APath: string;
+procedure TPoseidonNativeServer.RegisterWSHandler(const APath: string;
   AHandler: TWSMessageCallback);
 begin
   FWSLock.Enter;
@@ -1412,7 +1412,7 @@ end;
 // normal worker path tears the connection down via _CloseConn.
 // ===========================================================================
 
-procedure TAsyncIONativeServer._IdleSweepLoop;
+procedure TPoseidonNativeServer._IdleSweepLoop;
 const
   SWEEP_INTERVAL_MS = 1000;
 var
@@ -1512,7 +1512,7 @@ type
 // allocator path; a per-worker (thread-local) pool would be the next
 // experiment if pursued.
 
-procedure TAsyncIONativeServer.Listen(const AHost: string; APort: Integer;
+procedure TPoseidonNativeServer.Listen(const AHost: string; APort: Integer;
   AOnRequest: TOnNativeRequest; AOnListen: TProc);
 var
   LAddr:       TSockAddrIn;
@@ -1520,7 +1520,7 @@ var
   LWorkers, I: Integer;
 begin
   if FActive then
-    raise Exception.Create('TAsyncIONativeServer: already listening');
+    raise Exception.Create('TPoseidonNativeServer: already listening');
 
   var LWsaData: TWSAData;
   if WSAStartup($0202, LWsaData) <> 0 then
@@ -1582,7 +1582,7 @@ begin
     AOnListen();
 end;
 
-procedure TAsyncIONativeServer.Stop;
+procedure TPoseidonNativeServer.Stop;
 const
   DRAIN_MS = 30000;
   POLL_MS  = 50;
@@ -1634,7 +1634,7 @@ begin
       FConnList.Delete(0);
       if LConn.SSLHandle <> nil then
       begin
-        TAsyncIOSSL.Free_SSL(LConn.SSLHandle);
+        TPoseidonSSL.Free_SSL(LConn.SSLHandle);
         LConn.SSLHandle   := nil;
         LConn.SSLReadBio  := nil;
         LConn.SSLWriteBio := nil;
@@ -1662,7 +1662,7 @@ begin
   WSACleanup;
 end;
 
-procedure TAsyncIONativeServer._Accept;
+procedure TPoseidonNativeServer._Accept;
 var
   LClient:   TSocket;
   LAddr:     TSockAddrIn;
@@ -1685,7 +1685,7 @@ begin
   end;
 end;
 
-procedure TAsyncIONativeServer._OnNewSocket(ASocket: NativeUInt;
+procedure TPoseidonNativeServer._OnNewSocket(ASocket: NativeUInt;
   const ARemoteAddr: string);
 var
   LOne:  Integer;
@@ -1706,8 +1706,8 @@ begin
   if FSSLEnabled then
   begin
     try
-      LConn.SSLHandle := TAsyncIOSSL.New_SSL(FSSLCtx);
-      TAsyncIOSSL.Setup_Server(LConn.SSLHandle,
+      LConn.SSLHandle := TPoseidonSSL.New_SSL(FSSLCtx);
+      TPoseidonSSL.Setup_Server(LConn.SSLHandle,
         LConn.SSLReadBio, LConn.SSLWriteBio);
     except
       LConn.Free;
@@ -1718,7 +1718,7 @@ begin
   // Connection limit + per-IP enforcement (atomic under FConnLock)
   if not _AdmitAndRegister(LConn) then
   begin
-    if LConn.SSLHandle <> nil then TAsyncIOSSL.Free_SSL(LConn.SSLHandle);
+    if LConn.SSLHandle <> nil then TPoseidonSSL.Free_SSL(LConn.SSLHandle);
     LConn.Free;
     closesocket(TSocket(ASocket));
     Exit;
@@ -1726,7 +1726,7 @@ begin
   _PostRecv(LConn);
 end;
 
-procedure TAsyncIONativeServer._PostRecv(AConn: Pointer);
+procedure TPoseidonNativeServer._PostRecv(AConn: Pointer);
 var
   LConn:  TNativeConn absolute AConn;
   LCtx:   PRecvCtx;
@@ -1752,7 +1752,7 @@ begin
   end;
 end;
 
-procedure TAsyncIONativeServer._PostSend(AConn: Pointer; const AResponse: TBytes);
+procedure TPoseidonNativeServer._PostSend(AConn: Pointer; const AResponse: TBytes);
 var
   LConn:  TNativeConn absolute AConn;
   LCtx:   PSendCtx;
@@ -1785,7 +1785,7 @@ begin
   end;
 end;
 
-procedure TAsyncIONativeServer._CloseConn(AConn: Pointer);
+procedure TPoseidonNativeServer._CloseConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
   LIdx:  Integer;
@@ -1805,13 +1805,13 @@ begin
   if LConn.WSMode = CM_WEBSOCKET then
   begin
     if LConn.WSConn <> nil then
-      (LConn.WSConn as TAsyncIOWSConn).Invalidate;
+      (LConn.WSConn as TPoseidonWSConn).Invalidate;
     LConn.WSConn := nil;
   end;
   FreeAndNil(LConn.H2Conn);
   if LConn.SSLHandle <> nil then
   begin
-    TAsyncIOSSL.Free_SSL(LConn.SSLHandle);  // also frees both BIOs
+    TPoseidonSSL.Free_SSL(LConn.SSLHandle);  // also frees both BIOs
     LConn.SSLHandle   := nil;
     LConn.SSLReadBio  := nil;
     LConn.SSLWriteBio := nil;
@@ -1820,7 +1820,7 @@ begin
   LConn.Free;
 end;
 
-procedure TAsyncIONativeServer._WorkerLoop;
+procedure TPoseidonNativeServer._WorkerLoop;
 var
   LBytes: DWORD;
   LKey:   NativeUInt;
@@ -1958,7 +1958,7 @@ function _LinuxSend(sockfd: Integer; buf: Pointer; len: NativeUInt; flags: Integ
 // Listen
 // ---------------------------------------------------------------------------
 
-procedure TAsyncIONativeServer.Listen(const AHost: string; APort: Integer;
+procedure TPoseidonNativeServer.Listen(const AHost: string; APort: Integer;
   AOnRequest: TOnNativeRequest; AOnListen: TProc);
 var
   LAddr:       sockaddr_in;
@@ -1968,7 +1968,7 @@ var
   LPipe:       array[0..1] of Integer;
 begin
   if FActive then
-    raise Exception.Create('TAsyncIONativeServer: already listening');
+    raise Exception.Create('TPoseidonNativeServer: already listening');
 
   FOnRequest := AOnRequest;
   FActive    := True;
@@ -2043,7 +2043,7 @@ end;
 // Stop
 // ---------------------------------------------------------------------------
 
-procedure TAsyncIONativeServer.Stop;
+procedure TPoseidonNativeServer.Stop;
 const
   DRAIN_MS = 30000;
   POLL_MS  = 50;
@@ -2095,7 +2095,7 @@ begin
       FConnList.Delete(0);
       if LConn.SSLHandle <> nil then
       begin
-        TAsyncIOSSL.Free_SSL(LConn.SSLHandle);
+        TPoseidonSSL.Free_SSL(LConn.SSLHandle);
         LConn.SSLHandle   := nil;
         LConn.SSLReadBio  := nil;
         LConn.SSLWriteBio := nil;
@@ -2135,7 +2135,7 @@ end;
 // Accept thread — blocking accept4 produces non-blocking client fds
 // ---------------------------------------------------------------------------
 
-procedure TAsyncIONativeServer._Accept;
+procedure TPoseidonNativeServer._Accept;
 var
   LFd:      Integer;
   LAddr:    sockaddr_in;
@@ -2167,7 +2167,7 @@ end;
 // New connection setup
 // ---------------------------------------------------------------------------
 
-procedure TAsyncIONativeServer._OnNewSocket(ASocket: NativeUInt;
+procedure TPoseidonNativeServer._OnNewSocket(ASocket: NativeUInt;
   const ARemoteAddr: string);
 var
   LOne:  Integer;
@@ -2184,8 +2184,8 @@ begin
   if FSSLEnabled then
   begin
     try
-      LConn.SSLHandle := TAsyncIOSSL.New_SSL(FSSLCtx);
-      TAsyncIOSSL.Setup_Server(LConn.SSLHandle,
+      LConn.SSLHandle := TPoseidonSSL.New_SSL(FSSLCtx);
+      TPoseidonSSL.Setup_Server(LConn.SSLHandle,
         LConn.SSLReadBio, LConn.SSLWriteBio);
     except
       LConn.Free;
@@ -2196,7 +2196,7 @@ begin
   // Connection limit + per-IP enforcement (atomic under FConnLock)
   if not _AdmitAndRegister(LConn) then
   begin
-    if LConn.SSLHandle <> nil then TAsyncIOSSL.Free_SSL(LConn.SSLHandle);
+    if LConn.SSLHandle <> nil then TPoseidonSSL.Free_SSL(LConn.SSLHandle);
     LConn.Free;
     _LinuxClose(Integer(ASocket));
     Exit;
@@ -2212,7 +2212,7 @@ end;
 // _PostRecv — re-arm EPOLLIN|EPOLLONESHOT for next read event
 // ---------------------------------------------------------------------------
 
-procedure TAsyncIONativeServer._PostRecv(AConn: Pointer);
+procedure TPoseidonNativeServer._PostRecv(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
   LEv:   epoll_event;
@@ -2227,7 +2227,7 @@ end;
 // _PostSend — store response bytes, kick off non-blocking send loop
 // ---------------------------------------------------------------------------
 
-procedure TAsyncIONativeServer._PostSend(AConn: Pointer; const AResponse: TBytes);
+procedure TPoseidonNativeServer._PostSend(AConn: Pointer; const AResponse: TBytes);
 var
   LConn: TNativeConn absolute AConn;
 begin
@@ -2246,7 +2246,7 @@ end;
 // _FlushSend — send() loop; arms EPOLLOUT on EAGAIN (partial send)
 // ---------------------------------------------------------------------------
 
-procedure TAsyncIONativeServer._FlushSend(AConn: Pointer);
+procedure TPoseidonNativeServer._FlushSend(AConn: Pointer);
 var
   LConn:   TNativeConn absolute AConn;
   LRemain: Integer;
@@ -2296,7 +2296,7 @@ end;
 // _DoRecv — reads one chunk and hands it to _ProcessRecv
 // ---------------------------------------------------------------------------
 
-procedure TAsyncIONativeServer._DoRecv(AConn: Pointer);
+procedure TPoseidonNativeServer._DoRecv(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
   LBuf:  array[0..RECV_BUF_SIZE - 1] of Byte;
@@ -2317,7 +2317,7 @@ end;
 // _CloseConn — guarded against double-close from Stop()
 // ---------------------------------------------------------------------------
 
-procedure TAsyncIONativeServer._CloseConn(AConn: Pointer);
+procedure TPoseidonNativeServer._CloseConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
   LIdx:  Integer;
@@ -2337,13 +2337,13 @@ begin
   if LConn.WSMode = CM_WEBSOCKET then
   begin
     if LConn.WSConn <> nil then
-      (LConn.WSConn as TAsyncIOWSConn).Invalidate;
+      (LConn.WSConn as TPoseidonWSConn).Invalidate;
     LConn.WSConn := nil;
   end;
   FreeAndNil(LConn.H2Conn);
   if LConn.SSLHandle <> nil then
   begin
-    TAsyncIOSSL.Free_SSL(LConn.SSLHandle);  // also frees both BIOs
+    TPoseidonSSL.Free_SSL(LConn.SSLHandle);  // also frees both BIOs
     LConn.SSLHandle   := nil;
     LConn.SSLReadBio  := nil;
     LConn.SSLWriteBio := nil;
@@ -2357,7 +2357,7 @@ end;
 // Worker loop — epoll_wait dispatcher
 // ---------------------------------------------------------------------------
 
-procedure TAsyncIONativeServer._WorkerLoop;
+procedure TPoseidonNativeServer._WorkerLoop;
 var
   LEvents: array[0..MAX_EVENTS - 1] of epoll_event;
   LN, I:   Integer;

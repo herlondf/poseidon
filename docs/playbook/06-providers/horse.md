@@ -1,6 +1,6 @@
-# Horse Provider
+﻿# Horse Provider
 
-`Horse.Provider.AsyncIO` replaces Horse's default Indy transport with AsyncIO's
+`Horse.Provider.Poseidon` replaces Horse's default Indy transport with Poseidon's
 IOCP/epoll engine. The application code stays exactly the same — only the define changes.
 
 ## Why use it
@@ -9,7 +9,7 @@ The default Horse/Indy provider creates **one OS thread per connection**.
 At 700–800 concurrent connections: 800 threads × 8 MB stack = 6.4 GB virtual memory,
 which corrupts the glibc heap on Linux → double free → crash.
 
-AsyncIO uses IOCP/epoll: all connections share a bounded worker pool (`WorkerCount`,
+Poseidon uses IOCP/epoll: all connections share a bounded worker pool (`WorkerCount`,
 default 200). Thread count is **fixed regardless of concurrent connections**.
 200 workers × 8 MB = 1.6 GB — safe at any scale.
 
@@ -30,7 +30,7 @@ Add both paths to your project's search path:
 Add `HORSE_ASYNCIO` to your project's conditional defines
 (Project Options → Delphi Compiler → Conditional defines).
 
-That's it. `Horse.pas` picks up `Horse.Provider.AsyncIO` automatically when the define is set.
+That's it. `Horse.pas` picks up `Horse.Provider.Poseidon` automatically when the define is set.
 No changes to application code.
 
 ### 3. Optional tuning (before `THorse.Listen`)
@@ -74,7 +74,7 @@ See full runnable project at [`samples/05-horse-provider/`](../../../samples/05-
 
 ## Compatibility
 
-| | AsyncIO provider | Indy (default) |
+| | Poseidon provider | Indy (default) |
 |---|---|---|
 | Thread model | Fixed pool (IOCP/epoll) | 1 thread per connection |
 | 800 concurrent conns | ~1.6 GB RAM | ~6.4 GB RAM |

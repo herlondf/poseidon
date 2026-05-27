@@ -1,6 +1,6 @@
-# What is AsyncIO
+﻿# What is Poseidon
 
-AsyncIO is a native async I/O HTTP server library for Delphi.
+Poseidon is a native async I/O HTTP server library for Delphi.
 It bypasses the Delphi-Cross-Socket and Indy stacks in favour of direct OS syscalls:
 
 - **Windows**: I/O Completion Ports (IOCP) via `WSARecv` / `WSASend`

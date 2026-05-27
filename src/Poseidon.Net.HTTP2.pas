@@ -1,7 +1,7 @@
-﻿unit AsyncIO.Net.HTTP2;
+﻿unit Poseidon.Net.HTTP2;
 
-// HTTP/2 (RFC 7540) + HPACK (RFC 7541) implementation for the AsyncIO framework.
-// One TH2Conn instance per connection, driven by TAsyncIONativeServer._ProcessRecv.
+// HTTP/2 (RFC 7540) + HPACK (RFC 7541) implementation for the Poseidon framework.
+// One TH2Conn instance per connection, driven by TPoseidonNativeServer._ProcessRecv.
 //
 // Design decisions:
 //   - No server push (ENABLE_PUSH = 0)

@@ -1,4 +1,4 @@
-program AsyncIO.Tests;
+﻿program Poseidon.Tests;
 
 {$APPTYPE CONSOLE}
 
@@ -8,7 +8,7 @@ uses
   DUnitX.TestRunner,
   DUnitX.Loggers.Console,
   DUnitX.Loggers.XML.NUnit,
-  AsyncIO.Tests.WebSocket;
+  Poseidon.Tests.WebSocket;
 
 var
   LRunner:  ITestRunner;

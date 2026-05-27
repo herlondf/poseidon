@@ -1,6 +1,6 @@
-﻿unit Horse.Provider.AsyncIO;
+﻿unit Horse.Provider.Poseidon;
 
-// Horse provider backed by AsyncIO Native HTTP server (IOCP/Windows, epoll/Linux).
+// Horse provider backed by Poseidon Native HTTP server (IOCP/Windows, epoll/Linux).
 //
 // Problem solved:
 //   The default Horse/Indy provider creates ONE OS thread per HTTP connection.
@@ -8,18 +8,18 @@
 //   virtual memory, corrupting the glibc heap → double free → process crash.
 //
 // Solution:
-//   AsyncIO manages all connections via IOCP/epoll (a few kernel file descriptors).
+//   Poseidon manages all connections via IOCP/epoll (a few kernel file descriptors).
 //   A bounded worker pool (WorkerCount, default 200) handles blocking route handlers
 //   (ACBr, DB, etc.). Thread count is FIXED regardless of concurrent connections.
 //   200 workers × 8MB = 1.6GB — well within safe limits.
 //
 // Usage (project defines):
-//   Add {$DEFINE HORSE_AsyncIO} in project options (Delphi Compiler > Conditional defines).
-//   Horse.pas picks this provider automatically when HORSE_AsyncIO is set.
+//   Add {$DEFINE HORSE_Poseidon} in project options (Delphi Compiler > Conditional defines).
+//   Horse.pas picks this provider automatically when HORSE_Poseidon is set.
 //
 // Optional tuning (before Listen):
 //   THorse.WorkerCount := 200;   // parallel processing threads (default 200)
-//   THorse.MaxConnections := 0;  // 0 = unlimited at TCP level (AsyncIO handles backpressure)
+//   THorse.MaxConnections := 0;  // 0 = unlimited at TCP level (Poseidon handles backpressure)
 
 interface
 
@@ -32,12 +32,12 @@ uses
   Horse.Request,
   Horse.Response,
   Horse.Exception.Interrupted,
-  AsyncIO.Net.HttpServer,
-  AsyncIO.Net.WebAdapters.Native,
-  AsyncIO.Net.Pool.Native;
+  Poseidon.Net.HttpServer,
+  Poseidon.Net.WebAdapters.Native,
+  Poseidon.Net.Pool.Native;
 
 type
-  THorseProviderAsyncIONative = class(THorseProviderAbstract)
+  THorseProviderPoseidonNative = class(THorseProviderAbstract)
   private const
     DEFAULT_HOST         = '0.0.0.0';
     DEFAULT_PORT         = 9000;
@@ -47,16 +47,16 @@ type
     class var FHost:         string;
     class var FRunning:      Boolean;
     class var FEvent:        TEvent;
-    class var FServer:       TAsyncIONativeServer;
+    class var FServer:       TPoseidonNativeServer;
     class var FWorkerCount:  Integer;
     class var FMaxConns:     Integer;
     class var FKeepAlive:    Boolean;
     class var FListenQueue:  Integer;
 
     class function  GetDefaultEvent: TEvent; static;
-    class function  GetDefaultServer: TAsyncIONativeServer; static;
+    class function  GetDefaultServer: TPoseidonNativeServer; static;
     class procedure HandleRequest(
-      const AReq:          TAsyncIONativeRequest;
+      const AReq:          TPoseidonNativeRequest;
       out   AStatus:       Integer;
       out   AContentType:  string;
       out   ABody:         TBytes;
@@ -68,7 +68,7 @@ type
     class property MaxConnections:      Integer read FMaxConns    write FMaxConns;
     class property ListenQueue:         Integer read FListenQueue write FListenQueue;
     class property KeepConnectionAlive: Boolean read FKeepAlive   write FKeepAlive;
-    // AsyncIO-specific: number of worker threads for request processing.
+    // Poseidon-specific: number of worker threads for request processing.
     // Increase for high-concurrency blocking workloads (ACBr, DB calls).
     class property WorkerCount: Integer read FWorkerCount write FWorkerCount;
     class property IsRunning:   Boolean read FRunning;
@@ -92,24 +92,24 @@ uses
   Horse.Core.RouterTree,
   Web.HTTPApp;
 
-{ THorseProviderAsyncIONative }
+{ THorseProviderPoseidonNative }
 
-class function THorseProviderAsyncIONative.GetDefaultEvent: TEvent;
+class function THorseProviderPoseidonNative.GetDefaultEvent: TEvent;
 begin
   if FEvent = nil then
     FEvent := TEvent.Create(nil, True, False, '');
   Result := FEvent;
 end;
 
-class function THorseProviderAsyncIONative.GetDefaultServer: TAsyncIONativeServer;
+class function THorseProviderPoseidonNative.GetDefaultServer: TPoseidonNativeServer;
 begin
   if FServer = nil then
-    FServer := TAsyncIONativeServer.Create;
+    FServer := TPoseidonNativeServer.Create;
   Result := FServer;
 end;
 
-class procedure THorseProviderAsyncIONative.HandleRequest(
-  const AReq:          TAsyncIONativeRequest;
+class procedure THorseProviderPoseidonNative.HandleRequest(
+  const AReq:          TPoseidonNativeRequest;
   out   AStatus:       Integer;
   out   AContentType:  string;
   out   ABody:         TBytes;
@@ -131,7 +131,7 @@ begin
   SetLength(LEHdrs, 0);
   LFlushed := False;
 
-  // Acquire pooled TWebRequest/TWebResponse adapters backed by the AsyncIO native request
+  // Acquire pooled TWebRequest/TWebResponse adapters backed by the Poseidon native request
   TNativeContextPool.Acquire(
     AReq,
     procedure(S: Integer; const CT: string; const B: TBytes;
@@ -180,9 +180,9 @@ begin
   AExtraHeaders := LEHdrs;
 end;
 
-class procedure THorseProviderAsyncIONative.Listen;
+class procedure THorseProviderPoseidonNative.Listen;
 var
-  LServer: TAsyncIONativeServer;
+  LServer: TPoseidonNativeServer;
   LWC:     Integer;
 begin
   inherited;  // Calls THorseProviderAbstract.Listen (does nothing but satisfies abstract)
@@ -197,7 +197,7 @@ begin
   if LWC <= 0 then LWC := DEFAULT_WORKER_COUNT;
   LServer.WorkerCount := LWC;
 
-  // MaxConnections at TCP level — 0 means unlimited (AsyncIO backpressure via worker pool)
+  // MaxConnections at TCP level — 0 means unlimited (Poseidon backpressure via worker pool)
   if FMaxConns > 0 then
     LServer.MaxConnections := FMaxConns;
 
@@ -207,7 +207,7 @@ begin
   FRunning := True;
 
   LServer.Listen(FHost, FPort,
-    procedure(const AReq: TAsyncIONativeRequest;
+    procedure(const AReq: TPoseidonNativeRequest;
               out   AStatus: Integer;
               out   AContentType: string;
               out   ABody: TBytes;
@@ -226,7 +226,7 @@ begin
       GetDefaultEvent.WaitFor(500);
 end;
 
-class procedure THorseProviderAsyncIONative.Listen(const APort: Integer;
+class procedure THorseProviderPoseidonNative.Listen(const APort: Integer;
   const AHost: string; const ACallbackListen, ACallbackStopListen: TProc);
 begin
   FPort        := APort;
@@ -236,27 +236,27 @@ begin
   Listen;
 end;
 
-class procedure THorseProviderAsyncIONative.Listen(const APort: Integer;
+class procedure THorseProviderPoseidonNative.Listen(const APort: Integer;
   const ACallbackListen, ACallbackStopListen: TProc);
 begin
   Listen(APort, DEFAULT_HOST, ACallbackListen, ACallbackStopListen);
 end;
 
-class procedure THorseProviderAsyncIONative.Listen(const ACallbackListen,
+class procedure THorseProviderPoseidonNative.Listen(const ACallbackListen,
   ACallbackStopListen: TProc);
 begin
   Listen(FPort, FHost, ACallbackListen, ACallbackStopListen);
 end;
 
-class procedure THorseProviderAsyncIONative.Listen(const APort: Integer);
+class procedure THorseProviderPoseidonNative.Listen(const APort: Integer);
 begin
   Listen(APort, DEFAULT_HOST, nil, nil);
 end;
 
-class procedure THorseProviderAsyncIONative.StopListen;
+class procedure THorseProviderPoseidonNative.StopListen;
 begin
   if FServer = nil then
-    raise Exception.Create('THorseProviderAsyncIONative is not listening');
+    raise Exception.Create('THorseProviderPoseidonNative is not listening');
 
   FRunning := False;
   FServer.Stop;
@@ -264,7 +264,7 @@ begin
   GetDefaultEvent.SetEvent;
 end;
 
-class destructor THorseProviderAsyncIONative.UnInitialize;
+class destructor THorseProviderPoseidonNative.UnInitialize;
 begin
   if FServer <> nil then
   begin
@@ -275,14 +275,14 @@ begin
 end;
 
 initialization
-  THorseProviderAsyncIONative.FPort        := 0;
-  THorseProviderAsyncIONative.FHost        := '';
-  THorseProviderAsyncIONative.FWorkerCount := THorseProviderAsyncIONative.DEFAULT_WORKER_COUNT;
-  THorseProviderAsyncIONative.FMaxConns    := 0;
-  THorseProviderAsyncIONative.FKeepAlive   := True;
-  THorseProviderAsyncIONative.FListenQueue := 0;
-  THorseProviderAsyncIONative.FRunning     := False;
-  THorseProviderAsyncIONative.FServer      := nil;
-  THorseProviderAsyncIONative.FEvent       := nil;
+  THorseProviderPoseidonNative.FPort        := 0;
+  THorseProviderPoseidonNative.FHost        := '';
+  THorseProviderPoseidonNative.FWorkerCount := THorseProviderPoseidonNative.DEFAULT_WORKER_COUNT;
+  THorseProviderPoseidonNative.FMaxConns    := 0;
+  THorseProviderPoseidonNative.FKeepAlive   := True;
+  THorseProviderPoseidonNative.FListenQueue := 0;
+  THorseProviderPoseidonNative.FRunning     := False;
+  THorseProviderPoseidonNative.FServer      := nil;
+  THorseProviderPoseidonNative.FEvent       := nil;
 
 end.

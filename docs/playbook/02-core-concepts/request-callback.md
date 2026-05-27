@@ -1,11 +1,11 @@
-# Request callback contract
+﻿# Request callback contract
 
-The sole integration point between your code and AsyncIO is the request callback
-passed to `TAsyncIONativeServer.Listen`:
+The sole integration point between your code and Poseidon is the request callback
+passed to `TPoseidonNativeServer.Listen`:
 
 ```pascal
 procedure(
-  const AReq:          TAsyncIONativeRequest;
+  const AReq:          TPoseidonNativeRequest;
   out   AStatus:       Integer;
   out   AContentType:  string;
   out   ABody:         TBytes;
@@ -16,14 +16,14 @@ procedure(
 ## Rules
 
 - The callback is called from a worker thread. It **must** be thread-safe.
-- `ABody` must be UTF-8 encoded (or binary). AsyncIO writes it verbatim — no re-encoding.
-- `AExtraHeaders` must not include `Content-Type` or `Content-Length` — AsyncIO sets those.
+- `ABody` must be UTF-8 encoded (or binary). Poseidon writes it verbatim — no re-encoding.
+- `AExtraHeaders` must not include `Content-Type` or `Content-Length` — Poseidon sets those.
 - Raising an unhandled exception from the callback results in a 500 response with the
   exception message in the body. Prefer catching and setting `AStatus := 500` explicitly.
 - The callback must return before the connection write completes.
   Do **not** hold a reference to `AReq` after the callback returns.
 
-## TAsyncIONativeRequest fields
+## TPoseidonNativeRequest fields
 
 | Field | Type | Description |
 |-------|------|-------------|

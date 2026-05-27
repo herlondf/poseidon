@@ -1,4 +1,4 @@
-program AsyncIO.Sample.SSL;
+﻿program Poseidon.Sample.SSL;
 
 // Sample 02 — SSL/TLS + SNI
 // Demonstrates HTTPS setup with a primary certificate and SNI-based
@@ -11,7 +11,7 @@ program AsyncIO.Sample.SSL;
 //     openssl req -x509 -newkey rsa:2048 -keyout api.key    -out api.crt    -days 365 -nodes -subj "/CN=api.example.com"
 //
 // Run:
-//   AsyncIO.Sample.SSL.exe
+//   Poseidon.Sample.SSL.exe
 //   curl -k https://localhost:9443/ping
 //   curl -k --resolve api.example.com:9443:127.0.0.1 https://api.example.com:9443/ping
 
@@ -20,7 +20,7 @@ program AsyncIO.Sample.SSL;
 uses
   System.SysUtils,
   System.Generics.Collections,
-  AsyncIO.Net.HttpServer;
+  Poseidon.Net.HttpServer;
 
 const
   SERVER_PORT    = 9443;
@@ -31,7 +31,7 @@ const
   API_HOSTNAME   = 'api.example.com';
 
 procedure HandleRequest(
-  const AReq:          TAsyncIONativeRequest;
+  const AReq:          TPoseidonNativeRequest;
   out   AStatus:       Integer;
   out   AContentType:  string;
   out   ABody:         TBytes;
@@ -49,9 +49,9 @@ begin
 end;
 
 var
-  LServer: TAsyncIONativeServer;
+  LServer: TPoseidonNativeServer;
 begin
-  LServer := TAsyncIONativeServer.Create;
+  LServer := TPoseidonNativeServer.Create;
   try
     // Default certificate — used when no SNI matches or client sends no SNI
     LServer.ConfigureSSL(DEFAULT_CERT, DEFAULT_KEY);
@@ -60,7 +60,7 @@ begin
     if FileExists(API_CERT) then
       LServer.AddSSLCert(API_HOSTNAME, API_CERT, API_KEY);
 
-    Writeln('AsyncIO Sample 02 — SSL/TLS + SNI');
+    Writeln('Poseidon Sample 02 — SSL/TLS + SNI');
     Writeln('Listening on https://0.0.0.0:', SERVER_PORT);
     Writeln;
 

@@ -1,6 +1,6 @@
-﻿unit AsyncIO.Net.SSL;
+﻿unit Poseidon.Net.SSL;
 
-// Lazy OpenSSL DLL wrapper for AsyncIO Native provider.
+// Lazy OpenSSL DLL wrapper for Poseidon Native provider.
 // Loads libssl + libcrypto on first ConfigureSSL call (no compile-time dependency).
 // Uses memory BIOs so IOCP/epoll recv/send remain async.
 
@@ -30,7 +30,7 @@ const
   SSL_TLSEXT_ERR_NOACK               = 3;
 
 type
-  EAsyncIOSSL = class(Exception);
+  EPoseidonSSL = class(Exception);
 
   TFn_method      = function: Pointer; cdecl;
   TFn_ctx_new     = function(meth: Pointer): Pointer; cdecl;
@@ -58,14 +58,14 @@ type
   TFn_ctx_alpn_cb     = procedure(ctx: Pointer; cb: Pointer; arg: Pointer); cdecl;
   TFn_ssl_get0_alpn   = procedure(ssl: Pointer; dataptr: Pointer; lenptr: Pointer); cdecl;
 
-  TAsyncIOLibHandle = NativeUInt;
+  TPoseidonLibHandle = NativeUInt;
 
-  TAsyncIOSSL = class
+  TPoseidonSSL = class
   private
     class var FLock:      TCriticalSection;
     class var FLoaded:    Boolean;
-    class var FLibSSL:    TAsyncIOLibHandle;
-    class var FLibCrypto: TAsyncIOLibHandle;
+    class var FLibSSL:    TPoseidonLibHandle;
+    class var FLibCrypto: TPoseidonLibHandle;
 
     class var f_TLS_server_method:            TFn_method;
     class var f_SSL_CTX_new:                  TFn_ctx_new;
@@ -96,8 +96,8 @@ type
     class var f_SSL_CTX_set_alpn_select_cb:   TFn_ctx_alpn_cb;
     class var f_SSL_get0_alpn_selected:       TFn_ssl_get0_alpn;
 
-    class function  TryLoadLib(const AName: string): TAsyncIOLibHandle;
-    class function  RequireProc(ALib: TAsyncIOLibHandle; const AName: string): Pointer;
+    class function  TryLoadLib(const AName: string): TPoseidonLibHandle;
+    class function  RequireProc(ALib: TPoseidonLibHandle; const AName: string): Pointer;
     class procedure DoLoad;
     class constructor Create;
     class destructor  Destroy;
@@ -144,7 +144,7 @@ uses
   Posix.Dlfcn;
 {$ENDIF}
 
-class constructor TAsyncIOSSL.Create;
+class constructor TPoseidonSSL.Create;
 begin
   FLock      := TCriticalSection.Create;
   FLoaded    := False;
@@ -152,7 +152,7 @@ begin
   FLibCrypto := 0;
 end;
 
-class destructor TAsyncIOSSL.Destroy;
+class destructor TPoseidonSSL.Destroy;
 begin
   FLoaded := False;
 {$IFDEF MSWINDOWS}
@@ -165,7 +165,7 @@ begin
   FLock.Free;
 end;
 
-class function TAsyncIOSSL.TryLoadLib(const AName: string): TAsyncIOLibHandle;
+class function TPoseidonSSL.TryLoadLib(const AName: string): TPoseidonLibHandle;
 begin
 {$IFDEF MSWINDOWS}
   Result := LoadLibrary(PChar(AName));
@@ -174,7 +174,7 @@ begin
 {$ENDIF}
 end;
 
-class function TAsyncIOSSL.RequireProc(ALib: TAsyncIOLibHandle;
+class function TPoseidonSSL.RequireProc(ALib: TPoseidonLibHandle;
   const AName: string): Pointer;
 begin
 {$IFDEF MSWINDOWS}
@@ -183,10 +183,10 @@ begin
   Result := dlsym(ALib, MarshaledAString(AnsiString(AName)));
 {$ENDIF}
   if Result = nil then
-    raise EAsyncIOSSL.CreateFmt('OpenSSL: missing symbol "%s"', [AName]);
+    raise EPoseidonSSL.CreateFmt('OpenSSL: missing symbol "%s"', [AName]);
 end;
 
-class procedure TAsyncIOSSL.DoLoad;
+class procedure TPoseidonSSL.DoLoad;
 var
   LInit: procedure; cdecl;
 begin
@@ -196,7 +196,7 @@ begin
   if FLibSSL = 0 then FLibSSL := TryLoadLib('libssl-1_1-x64.dll');
   if FLibSSL = 0 then FLibSSL := TryLoadLib('libssl.dll');
   if FLibSSL = 0 then
-    raise EAsyncIOSSL.Create(
+    raise EPoseidonSSL.Create(
       'OpenSSL libssl not found. Install OpenSSL 3.x or 1.1.x and ensure DLLs are in PATH.');
 
   FLibCrypto := TryLoadLib('libcrypto-3-x64.dll');
@@ -204,20 +204,20 @@ begin
   if FLibCrypto = 0 then FLibCrypto := TryLoadLib('libcrypto-1_1-x64.dll');
   if FLibCrypto = 0 then FLibCrypto := TryLoadLib('libcrypto.dll');
   if FLibCrypto = 0 then
-    raise EAsyncIOSSL.Create('OpenSSL libcrypto not found.');
+    raise EPoseidonSSL.Create('OpenSSL libcrypto not found.');
 {$ELSE}
   FLibSSL := TryLoadLib('libssl.so.3');
   if FLibSSL = 0 then FLibSSL := TryLoadLib('libssl.so.1.1');
   if FLibSSL = 0 then FLibSSL := TryLoadLib('libssl.so');
   if FLibSSL = 0 then
-    raise EAsyncIOSSL.Create(
+    raise EPoseidonSSL.Create(
       'OpenSSL libssl not found. Install libssl-dev (apt install libssl-dev).');
 
   FLibCrypto := TryLoadLib('libcrypto.so.3');
   if FLibCrypto = 0 then FLibCrypto := TryLoadLib('libcrypto.so.1.1');
   if FLibCrypto = 0 then FLibCrypto := TryLoadLib('libcrypto.so');
   if FLibCrypto = 0 then
-    raise EAsyncIOSSL.Create('OpenSSL libcrypto not found.');
+    raise EPoseidonSSL.Create('OpenSSL libcrypto not found.');
 {$ENDIF}
 
 {$IFDEF MSWINDOWS}
@@ -266,7 +266,7 @@ begin
   FLoaded := True;
 end;
 
-class procedure TAsyncIOSSL.EnsureLoaded;
+class procedure TPoseidonSSL.EnsureLoaded;
 begin
   if FLoaded then Exit;
   FLock.Enter;
@@ -277,14 +277,14 @@ begin
   end;
 end;
 
-class function TAsyncIOSSL.IsAvailable: Boolean;
+class function TPoseidonSSL.IsAvailable: Boolean;
 begin
   if not FLoaded then
     try EnsureLoaded except Result := False; Exit; end;
   Result := FLoaded;
 end;
 
-class function TAsyncIOSSL.LastError: string;
+class function TPoseidonSSL.LastError: string;
 var
   LCode: NativeUInt;
   LBuf:  array[0..255] of AnsiChar;
@@ -297,47 +297,47 @@ begin
   Result := string(f_ERR_error_string(LCode, @LBuf[0]));
 end;
 
-class function TAsyncIOSSL.CTX_New: Pointer;
+class function TPoseidonSSL.CTX_New: Pointer;
 begin
   EnsureLoaded;
   Result := f_SSL_CTX_new(f_TLS_server_method);
   if Result = nil then
-    raise EAsyncIOSSL.Create('SSL_CTX_new failed: ' + LastError);
+    raise EPoseidonSSL.Create('SSL_CTX_new failed: ' + LastError);
 end;
 
-class procedure TAsyncIOSSL.CTX_Free(ACtx: Pointer);
+class procedure TPoseidonSSL.CTX_Free(ACtx: Pointer);
 begin
   if (ACtx <> nil) and FLoaded then f_SSL_CTX_free(ACtx);
 end;
 
-class procedure TAsyncIOSSL.CTX_LoadCert(ACtx: Pointer; const AFile: string);
+class procedure TPoseidonSSL.CTX_LoadCert(ACtx: Pointer; const AFile: string);
 begin
   if f_SSL_CTX_use_certificate_file(ACtx, PAnsiChar(AnsiString(AFile)),
        SSL_FILETYPE_PEM) <> 1 then
-    raise EAsyncIOSSL.Create('SSL_CTX_use_certificate_file failed: ' + LastError);
+    raise EPoseidonSSL.Create('SSL_CTX_use_certificate_file failed: ' + LastError);
 end;
 
-class procedure TAsyncIOSSL.CTX_LoadKey(ACtx: Pointer; const AFile: string);
+class procedure TPoseidonSSL.CTX_LoadKey(ACtx: Pointer; const AFile: string);
 begin
   if f_SSL_CTX_use_PrivateKey_file(ACtx, PAnsiChar(AnsiString(AFile)),
        SSL_FILETYPE_PEM) <> 1 then
-    raise EAsyncIOSSL.Create('SSL_CTX_use_PrivateKey_file failed: ' + LastError);
+    raise EPoseidonSSL.Create('SSL_CTX_use_PrivateKey_file failed: ' + LastError);
 end;
 
-class procedure TAsyncIOSSL.CTX_VerifyKey(ACtx: Pointer);
+class procedure TPoseidonSSL.CTX_VerifyKey(ACtx: Pointer);
 begin
   if f_SSL_CTX_check_private_key(ACtx) <> 1 then
-    raise EAsyncIOSSL.Create('SSL key/cert mismatch: ' + LastError);
+    raise EPoseidonSSL.Create('SSL key/cert mismatch: ' + LastError);
 end;
 
-class function TAsyncIOSSL.New_SSL(ACtx: Pointer): Pointer;
+class function TPoseidonSSL.New_SSL(ACtx: Pointer): Pointer;
 begin
   Result := f_SSL_new(ACtx);
   if Result = nil then
-    raise EAsyncIOSSL.Create('SSL_new failed: ' + LastError);
+    raise EPoseidonSSL.Create('SSL_new failed: ' + LastError);
 end;
 
-class procedure TAsyncIOSSL.Setup_Server(ASSL: Pointer; out AReadBIO, AWriteBIO: Pointer);
+class procedure TPoseidonSSL.Setup_Server(ASSL: Pointer; out AReadBIO, AWriteBIO: Pointer);
 var
   LType: Pointer;
 begin
@@ -345,47 +345,47 @@ begin
   AReadBIO  := f_BIO_new(LType);
   AWriteBIO := f_BIO_new(LType);
   if (AReadBIO = nil) or (AWriteBIO = nil) then
-    raise EAsyncIOSSL.Create('BIO_new failed');
+    raise EPoseidonSSL.Create('BIO_new failed');
   f_SSL_set_bio(ASSL, AReadBIO, AWriteBIO);
   f_SSL_set_accept_state(ASSL);
 end;
 
-class procedure TAsyncIOSSL.Free_SSL(ASSL: Pointer);
+class procedure TPoseidonSSL.Free_SSL(ASSL: Pointer);
 begin
   if (ASSL <> nil) and FLoaded then f_SSL_free(ASSL);
 end;
 
-class function TAsyncIOSSL.Do_Handshake(ASSL: Pointer): Integer;
+class function TPoseidonSSL.Do_Handshake(ASSL: Pointer): Integer;
 begin Result := f_SSL_do_handshake(ASSL); end;
 
-class function TAsyncIOSSL.Get_Error(ASSL: Pointer; ARet: Integer): Integer;
+class function TPoseidonSSL.Get_Error(ASSL: Pointer; ARet: Integer): Integer;
 begin Result := f_SSL_get_error(ASSL, ARet); end;
 
-class function TAsyncIOSSL.SSL_Read(ASSL, ABuf: Pointer; ALen: Integer): Integer;
+class function TPoseidonSSL.SSL_Read(ASSL, ABuf: Pointer; ALen: Integer): Integer;
 begin Result := f_SSL_read(ASSL, ABuf, ALen); end;
 
-class function TAsyncIOSSL.SSL_Write(ASSL: Pointer; const ABuf: Pointer; ALen: Integer): Integer;
+class function TPoseidonSSL.SSL_Write(ASSL: Pointer; const ABuf: Pointer; ALen: Integer): Integer;
 begin Result := f_SSL_write(ASSL, ABuf, ALen); end;
 
-class function TAsyncIOSSL.SSL_Pending(ASSL: Pointer): Integer;
+class function TPoseidonSSL.SSL_Pending(ASSL: Pointer): Integer;
 begin Result := f_SSL_pending(ASSL); end;
 
-class function TAsyncIOSSL.BIO_Write(ABIO, ABuf: Pointer; ALen: Integer): Integer;
+class function TPoseidonSSL.BIO_Write(ABIO, ABuf: Pointer; ALen: Integer): Integer;
 begin Result := f_BIO_write(ABIO, ABuf, ALen); end;
 
-class function TAsyncIOSSL.BIO_Read(ABIO, ABuf: Pointer; ALen: Integer): Integer;
+class function TPoseidonSSL.BIO_Read(ABIO, ABuf: Pointer; ALen: Integer): Integer;
 begin Result := f_BIO_read(ABIO, ABuf, ALen); end;
 
-class function TAsyncIOSSL.BIO_Pending(ABIO: Pointer): Integer;
+class function TPoseidonSSL.BIO_Pending(ABIO: Pointer): Integer;
 begin Result := f_BIO_ctrl(ABIO, BIO_CTRL_PENDING, 0, nil); end;
 
-class procedure TAsyncIOSSL.CTX_SetSNICallback(ACtx, ACallback, AArg: Pointer);
+class procedure TPoseidonSSL.CTX_SetSNICallback(ACtx, ACallback, AArg: Pointer);
 begin
   f_SSL_CTX_callback_ctrl(ACtx, SSL_CTRL_SET_TLSEXT_SERVERNAME_CB, ACallback);
   f_SSL_CTX_ctrl(ACtx, SSL_CTRL_SET_TLSEXT_SERVERNAME_ARG, 0, AArg);
 end;
 
-class function TAsyncIOSSL.SSL_GetServername(ASSL: Pointer): string;
+class function TPoseidonSSL.SSL_GetServername(ASSL: Pointer): string;
 var
   P: PAnsiChar;
 begin
@@ -396,7 +396,7 @@ begin
     Result := string(AnsiString(P));
 end;
 
-class procedure TAsyncIOSSL.SSL_SetCTX(ASSL, ACtx: Pointer);
+class procedure TPoseidonSSL.SSL_SetCTX(ASSL, ACtx: Pointer);
 begin
   f_SSL_set_SSL_CTX(ASSL, ACtx);
 end;
@@ -405,7 +405,7 @@ end;
 // ALPN select callback — always prefers "h2" over "http/1.1"
 // ---------------------------------------------------------------------------
 
-function AsyncIOALPNSelectCallback(ASSL: Pointer; AOutPP, AOutlenP: Pointer;
+function PoseidonALPNSelectCallback(ASSL: Pointer; AOutPP, AOutlenP: Pointer;
   AIn: PByte; AInLen: Cardinal; AArg: Pointer): Integer; cdecl;
 var
   I: Cardinal;
@@ -441,14 +441,14 @@ begin
   end;
 end;
 
-class procedure TAsyncIOSSL.CTX_SetALPN(ACtx: Pointer; AArg: Pointer);
+class procedure TPoseidonSSL.CTX_SetALPN(ACtx: Pointer; AArg: Pointer);
 begin
   if not FLoaded then Exit;
   if not Assigned(f_SSL_CTX_set_alpn_select_cb) then Exit;
-  f_SSL_CTX_set_alpn_select_cb(ACtx, @AsyncIOALPNSelectCallback, AArg);
+  f_SSL_CTX_set_alpn_select_cb(ACtx, @PoseidonALPNSelectCallback, AArg);
 end;
 
-class function TAsyncIOSSL.SSL_GetSelectedProtocol(ASSL: Pointer): string;
+class function TPoseidonSSL.SSL_GetSelectedProtocol(ASSL: Pointer): string;
 var
   LData: PByte;
   LLen:  Cardinal;

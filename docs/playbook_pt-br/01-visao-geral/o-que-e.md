@@ -1,6 +1,6 @@
-# O que é o AsyncIO
+﻿# O que é o Poseidon
 
-AsyncIO é uma biblioteca Delphi nativa de I/O assíncrono para servidores HTTP.
+Poseidon é uma biblioteca Delphi nativa de I/O assíncrono para servidores HTTP.
 Ela ignora os stacks Delphi-Cross-Socket e Indy em favor de syscalls diretas do SO:
 
 - **Windows**: I/O Completion Ports (IOCP) via `WSARecv` / `WSASend`

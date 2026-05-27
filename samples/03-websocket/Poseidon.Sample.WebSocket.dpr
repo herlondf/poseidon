@@ -1,11 +1,11 @@
-program AsyncIO.Sample.WebSocket;
+﻿program Poseidon.Sample.WebSocket;
 
 // Sample 03 — WebSocket Echo Server
 // Demonstrates WebSocket handler registration alongside a regular HTTP endpoint.
 // The /ws path upgrades to WebSocket; /ping stays as plain HTTP.
 //
 // Run:
-//   AsyncIO.Sample.WebSocket.exe
+//   Poseidon.Sample.WebSocket.exe
 //   # HTTP
 //   curl http://localhost:9002/ping
 //   # WebSocket (requires wscat or similar)
@@ -18,15 +18,15 @@ program AsyncIO.Sample.WebSocket;
 uses
   System.SysUtils,
   System.Generics.Collections,
-  AsyncIO.Net.HttpServer,
-  AsyncIO.Net.WebSocket;
+  Poseidon.Net.HttpServer,
+  Poseidon.Net.WebSocket;
 
 const
   SERVER_PORT = 9002;
   WS_PATH     = '/ws';
 
 procedure HandleRequest(
-  const AReq:          TAsyncIONativeRequest;
+  const AReq:          TPoseidonNativeRequest;
   out   AStatus:       Integer;
   out   AContentType:  string;
   out   ABody:         TBytes;
@@ -40,7 +40,7 @@ begin
 end;
 
 procedure HandleWebSocket(
-  AConn:        IAsyncIOWSConn;
+  AConn:        IPoseidonWSConn;
   const AFrame: TWebSocketFrame);
 begin
   if AFrame.Opcode = OPCODE_TEXT then
@@ -52,14 +52,14 @@ begin
 end;
 
 var
-  LServer: TAsyncIONativeServer;
+  LServer: TPoseidonNativeServer;
 begin
-  LServer := TAsyncIONativeServer.Create;
+  LServer := TPoseidonNativeServer.Create;
   try
     // Register WebSocket handler — upgrades connections on WS_PATH
     LServer.RegisterWSHandler(WS_PATH, HandleWebSocket);
 
-    Writeln('AsyncIO Sample 03 — WebSocket Echo');
+    Writeln('Poseidon Sample 03 — WebSocket Echo');
     Writeln('HTTP  : http://0.0.0.0:', SERVER_PORT, '/ping');
     Writeln('WS    : ws://0.0.0.0:',  SERVER_PORT, WS_PATH);
     Writeln;

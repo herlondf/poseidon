@@ -1,7 +1,7 @@
-<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
-    <ProjectGuid>{2E08C476-131B-48A3-966C-3EFA153D744F}</ProjectGuid>
-    <MainSource>AsyncIO.Sample.WebSocket.dpr</MainSource>
+    <ProjectGuid>{863DAEB8-CA0A-4A5F-9182-70BBD6911F6D}</ProjectGuid>
+    <MainSource>Poseidon.Sample.HTTP2.dpr</MainSource>
     <Base>True</Base>
     <Config Condition="'$(Config)'==''">Debug</Config>
     <Platform Condition="'$(Platform)'==''">Win64</Platform>
@@ -17,7 +17,7 @@
     <DCC_K>false</DCC_K>
     <DCC_N>false</DCC_N>
     <DCC_S>false</DCC_S>
-    <SanitizedProjectName>AsyncIOSampleWebSocket</SanitizedProjectName>
+    <SanitizedProjectName>PoseidonSampleHTTP2</SanitizedProjectName>
     <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;$(DCC_Namespace)</DCC_Namespace>
     <VerInfo_Locale>1046</VerInfo_Locale>
     <DCC_UnitSearchPath>.\;..\..\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
@@ -56,7 +56,7 @@
     <BorlandProject>
       <Delphi.Personality>
         <Source>
-          <Source Name="MainSource">AsyncIO.Sample.WebSocket.dpr</Source>
+          <Source Name="MainSource">Poseidon.Sample.HTTP2.dpr</Source>
         </Source>
       </Delphi.Personality>
       <Platforms>

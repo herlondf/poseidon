@@ -1,6 +1,6 @@
-﻿unit AsyncIO.Net.WebSocket;
+﻿unit Poseidon.Net.WebSocket;
 
-// WebSocket (RFC 6455) protocol utilities for the AsyncIO Native provider.
+// WebSocket (RFC 6455) protocol utilities for the Poseidon Native provider.
 // This unit provides the protocol-level building blocks:
 //   - HandshakeAccept: derives the Sec-WebSocket-Accept response value
 //   - ParseFrame:      decodes a single inbound frame from a byte buffer
@@ -9,7 +9,7 @@
 //
 // Integration: the application code (provider/middleware) detects the
 // `Upgrade: websocket` header in the HTTP request, sends the handshake
-// response via TAsyncIONativeServer raw send hooks, and from that point on
+// response via TPoseidonNativeServer raw send hooks, and from that point on
 // drives ParseFrame/BuildFrame on the raw socket bytes.
 
 interface
@@ -64,7 +64,7 @@ type
   TWSRawSendProc = reference to procedure(const AData: TBytes);
   TWSCloseProc   = reference to procedure;
 
-  IAsyncIOWSConn = interface
+  IPoseidonWSConn = interface
     ['{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}']
     procedure Send(const AText: string);
     procedure SendBinary(const AData: TBytes);
@@ -75,10 +75,10 @@ type
     property Closed: Boolean read GetClosed;
   end;
 
-  TWSMessageCallback = reference to procedure(AConn: IAsyncIOWSConn; const AFrame: TWebSocketFrame);
-  TWSCloseCallback   = reference to procedure(AConn: IAsyncIOWSConn);
+  TWSMessageCallback = reference to procedure(AConn: IPoseidonWSConn; const AFrame: TWebSocketFrame);
+  TWSCloseCallback   = reference to procedure(AConn: IPoseidonWSConn);
 
-  TAsyncIOWSConn = class(TInterfacedObject, IAsyncIOWSConn)
+  TPoseidonWSConn = class(TInterfacedObject, IPoseidonWSConn)
   private
     FRemoteAddr: string;
     FSend:       TWSRawSendProc;
@@ -103,9 +103,9 @@ uses
   System.NetEncoding,
   System.Hash;
 
-{ TAsyncIOWSConn }
+{ TPoseidonWSConn }
 
-constructor TAsyncIOWSConn.Create(const ARemoteAddr: string;
+constructor TPoseidonWSConn.Create(const ARemoteAddr: string;
   const ASend: TWSRawSendProc; const AClose: TWSCloseProc);
 begin
   inherited Create;
@@ -116,13 +116,13 @@ begin
   FLock       := TCriticalSection.Create;
 end;
 
-destructor TAsyncIOWSConn.Destroy;
+destructor TPoseidonWSConn.Destroy;
 begin
   FLock.Free;
   inherited Destroy;
 end;
 
-procedure TAsyncIOWSConn.Invalidate;
+procedure TPoseidonWSConn.Invalidate;
 begin
   FLock.Enter;
   try
@@ -134,7 +134,7 @@ begin
   end;
 end;
 
-procedure TAsyncIOWSConn.Send(const AText: string);
+procedure TPoseidonWSConn.Send(const AText: string);
 var
   LData: TBytes;
   LSend: TWSRawSendProc;
@@ -150,7 +150,7 @@ begin
   LSend(LData);
 end;
 
-procedure TAsyncIOWSConn.SendBinary(const AData: TBytes);
+procedure TPoseidonWSConn.SendBinary(const AData: TBytes);
 var
   LData: TBytes;
   LSend: TWSRawSendProc;
@@ -166,7 +166,7 @@ begin
   LSend(LData);
 end;
 
-procedure TAsyncIOWSConn.Close(ACode: Word);
+procedure TPoseidonWSConn.Close(ACode: Word);
 var
   LData:  TBytes;
   LSend:  TWSRawSendProc;
@@ -192,12 +192,12 @@ begin
     LClose;
 end;
 
-function TAsyncIOWSConn.GetRemoteAddr: string;
+function TPoseidonWSConn.GetRemoteAddr: string;
 begin
   Result := FRemoteAddr;
 end;
 
-function TAsyncIOWSConn.GetClosed: Boolean;
+function TPoseidonWSConn.GetClosed: Boolean;
 begin
   FLock.Enter;
   try

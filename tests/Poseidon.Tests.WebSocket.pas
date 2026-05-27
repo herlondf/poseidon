@@ -1,4 +1,4 @@
-unit AsyncIO.Tests.WebSocket;
+﻿unit Poseidon.Tests.WebSocket;
 
 // DUnitX tests for TWebSocketUtils.
 // These tests exercise pure protocol functions — no network I/O required.
@@ -12,7 +12,7 @@ uses
 type
   {$M+}
   [TestFixture]
-  TAsyncIOWebSocketTests = class
+  TPoseidonWebSocketTests = class
   public
     // HandshakeAccept
     [Test]
@@ -55,11 +55,11 @@ implementation
 uses
   System.SysUtils,
   System.NetEncoding,
-  AsyncIO.Net.WebSocket;
+  Poseidon.Net.WebSocket;
 
-{ TAsyncIOWebSocketTests }
+{ TPoseidonWebSocketTests }
 
-procedure TAsyncIOWebSocketTests.HandshakeAccept_RFC6455TestVector_ReturnsExpectedBase64;
+procedure TPoseidonWebSocketTests.HandshakeAccept_RFC6455TestVector_ReturnsExpectedBase64;
 const
   // RFC 6455 §1.3 example
   CLIENT_KEY = 'dGhlIHNhbXBsZSBub25jZQ==';
@@ -68,7 +68,7 @@ begin
   Assert.AreEqual(EXPECTED, TWebSocketUtils.HandshakeAccept(CLIENT_KEY));
 end;
 
-procedure TAsyncIOWebSocketTests.BuildFrame_TextOpcode_FirstByteIs81Hex;
+procedure TPoseidonWebSocketTests.BuildFrame_TextOpcode_FirstByteIs81Hex;
 var
   LFrame: TBytes;
 begin
@@ -77,7 +77,7 @@ begin
   Assert.AreEqual(Byte($81), LFrame[0]);
 end;
 
-procedure TAsyncIOWebSocketTests.BuildFrame_BinaryOpcode_FirstByteIs82Hex;
+procedure TPoseidonWebSocketTests.BuildFrame_BinaryOpcode_FirstByteIs82Hex;
 var
   LFrame: TBytes;
 begin
@@ -86,7 +86,7 @@ begin
   Assert.AreEqual(Byte($82), LFrame[0]);
 end;
 
-procedure TAsyncIOWebSocketTests.BuildFrame_CloseOpcode_FirstByteIs88Hex;
+procedure TPoseidonWebSocketTests.BuildFrame_CloseOpcode_FirstByteIs88Hex;
 var
   LFrame: TBytes;
 begin
@@ -95,7 +95,7 @@ begin
   Assert.AreEqual(Byte($88), LFrame[0]);
 end;
 
-procedure TAsyncIOWebSocketTests.BuildFrame_PayloadUnder126_UsesOneByteLengthField;
+procedure TPoseidonWebSocketTests.BuildFrame_PayloadUnder126_UsesOneByteLengthField;
 var
   LPayload: TBytes;
   LFrame:   TBytes;
@@ -107,7 +107,7 @@ begin
   Assert.AreEqual(Byte(10), LFrame[1]);  // length byte = 10 (no mask bit for server frames)
 end;
 
-procedure TAsyncIOWebSocketTests.BuildFrame_Payload126Bytes_Uses16BitLengthEncoding;
+procedure TPoseidonWebSocketTests.BuildFrame_Payload126Bytes_Uses16BitLengthEncoding;
 var
   LPayload: TBytes;
   LFrame:   TBytes;
@@ -121,7 +121,7 @@ begin
   Assert.AreEqual(Byte(126), LFrame[3]);           // low byte
 end;
 
-procedure TAsyncIOWebSocketTests.TextFrame_EncodesTextAsUTF8WithOpcodeText;
+procedure TPoseidonWebSocketTests.TextFrame_EncodesTextAsUTF8WithOpcodeText;
 var
   LFrame:  TBytes;
   LParsed: TWebSocketFrame;
@@ -133,7 +133,7 @@ begin
   Assert.AreEqual('hello', TEncoding.UTF8.GetString(LParsed.Payload));
 end;
 
-procedure TAsyncIOWebSocketTests.BinaryFrame_PreservesPayloadWithOpcodeBinary;
+procedure TPoseidonWebSocketTests.BinaryFrame_PreservesPayloadWithOpcodeBinary;
 var
   LInput:    TBytes;
   LFrame:    TBytes;
@@ -149,7 +149,7 @@ begin
   Assert.AreEqual(Byte(40), LParsed.Payload[3]);
 end;
 
-procedure TAsyncIOWebSocketTests.CloseFrame_Code1000_PayloadContainsBigEndianCode;
+procedure TPoseidonWebSocketTests.CloseFrame_Code1000_PayloadContainsBigEndianCode;
 var
   LFrame:    TBytes;
   LParsed:   TWebSocketFrame;
@@ -164,21 +164,21 @@ begin
   Assert.AreEqual(Byte($E8), LParsed.Payload[1]);
 end;
 
-procedure TAsyncIOWebSocketTests.ParseFrame_UnmaskedTextFrame_RoundTripMatchesOriginal;
+procedure TPoseidonWebSocketTests.ParseFrame_UnmaskedTextFrame_RoundTripMatchesOriginal;
 var
   LFrame:    TBytes;
   LParsed:   TWebSocketFrame;
   LConsumed: Integer;
 begin
-  LFrame := TWebSocketUtils.TextFrame('AsyncIO');
+  LFrame := TWebSocketUtils.TextFrame('Poseidon');
   Assert.IsTrue(TWebSocketUtils.ParseFrame(@LFrame[0], Length(LFrame), LParsed, LConsumed));
   Assert.AreEqual(Length(LFrame), LConsumed);
   Assert.IsTrue(LParsed.FinFlag);
   Assert.AreEqual(OPCODE_TEXT, LParsed.Opcode);
-  Assert.AreEqual('AsyncIO', TEncoding.UTF8.GetString(LParsed.Payload));
+  Assert.AreEqual('Poseidon', TEncoding.UTF8.GetString(LParsed.Payload));
 end;
 
-procedure TAsyncIOWebSocketTests.ParseFrame_MaskedFrame_UnmasksPayloadCorrectly;
+procedure TPoseidonWebSocketTests.ParseFrame_MaskedFrame_UnmasksPayloadCorrectly;
 var
   // Manually built masked frame: FIN+Text, payload "Hi", mask key = [1,2,3,4]
   // "H"=$48 xor 1=$49; "i"=$69 xor 2=$6B
@@ -197,7 +197,7 @@ begin
   Assert.AreEqual(8, LConsumed);
 end;
 
-procedure TAsyncIOWebSocketTests.ParseFrame_InsufficientBytes_ReturnsFalse;
+procedure TPoseidonWebSocketTests.ParseFrame_InsufficientBytes_ReturnsFalse;
 var
   LRaw:      TBytes;
   LParsed:   TWebSocketFrame;

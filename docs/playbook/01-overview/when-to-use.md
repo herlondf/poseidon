@@ -1,4 +1,4 @@
-# When to use AsyncIO
+﻿# When to use Poseidon
 
 ## Good fit
 
@@ -12,11 +12,11 @@
 - 32-bit targets (epoll/IOCP implementation is 64-bit only)
 - macOS / ARM targets (not implemented)
 - Applications that need full WebBroker middleware pipeline without Horse or Pegasus
-  (use `AsyncIO.Net.WebAdapters.Native` as bridge, but the glue code is your responsibility)
+  (use `Poseidon.Net.WebAdapters.Native` as bridge, but the glue code is your responsibility)
 
 ## Comparison
 
-| | AsyncIO | Indy | Delphi-Cross-Socket |
+| | Poseidon | Indy | Delphi-Cross-Socket |
 |---|---|---|---|
 | External deps | none | none | CnPack (crypto) |
 | Linux epoll | ✅ | ❌ | ✅ |

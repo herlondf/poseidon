@@ -1,4 +1,4 @@
-# Quando usar o AsyncIO
+﻿# Quando usar o Poseidon
 
 ## Bom encaixe
 
@@ -15,7 +15,7 @@
 
 ## Comparação
 
-| | AsyncIO | Indy | Delphi-Cross-Socket |
+| | Poseidon | Indy | Delphi-Cross-Socket |
 |---|---|---|---|
 | Dependências externas | nenhuma | nenhuma | CnPack (crypto) |
 | epoll Linux | ✅ | ❌ | ✅ |

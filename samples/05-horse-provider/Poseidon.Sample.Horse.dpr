@@ -1,16 +1,16 @@
-program AsyncIO.Sample.Horse;
+﻿program Poseidon.Sample.Horse;
 
 // Sample 05 — Horse Provider
-// Demonstrates using AsyncIO as the HTTP transport for the Horse framework.
+// Demonstrates using Poseidon as the HTTP transport for the Horse framework.
 //
 // How it works:
-//   {$DEFINE HORSE_ASYNCIO} in project options selects Horse.Provider.AsyncIO
+//   {$DEFINE HORSE_ASYNCIO} in project options selects Horse.Provider.Poseidon
 //   as THorseProvider. All THorse.* calls (routes, middleware, Listen) dispatch
-//   through AsyncIO's IOCP/epoll engine instead of Indy's blocking thread-per-conn.
+//   through Poseidon's IOCP/epoll engine instead of Indy's blocking thread-per-conn.
 //
 // Search path required:
-//   <asyncio>\src\               — AsyncIO core
-//   <asyncio>\providers\horse\  — Horse.Provider.AsyncIO
+//   <asyncio>\src\               — Poseidon core
+//   <asyncio>\providers\horse\  — Horse.Provider.Poseidon
 //   <horse>\src\                — Horse framework
 //
 // Run:
@@ -83,7 +83,7 @@ begin
   THorse.Listen(SERVER_PORT,
     procedure
     begin
-      Writeln(Format('AsyncIO/Horse running on http://0.0.0.0:%d', [SERVER_PORT]));
+      Writeln(Format('Poseidon/Horse running on http://0.0.0.0:%d', [SERVER_PORT]));
       Writeln('Press Enter to stop...');
       Readln;
       THorse.StopListen;

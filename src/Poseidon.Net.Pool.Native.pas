@@ -1,11 +1,11 @@
-﻿unit AsyncIO.Net.Pool.Native;
+﻿unit Poseidon.Net.Pool.Native;
 
 // Thread-safe object pool for TNativeWebRequest / TNativeWebResponse pairs.
 //
 // Eliminates per-request heap allocation of the native adapter wrappers.
-// Complements TAsyncIORequestPool (pools TAsyncIORequest/Response layer).
+// Complements TPoseidonRequestPool (pools TPoseidonRequest/Response layer).
 //
-// Usage (handled internally by TAsyncIOProviderNative):
+// Usage (handled internally by TPoseidonProviderNative):
 //   TNativeContextPool.Acquire(AReq, AFlush, LWebReq, LWebRes);
 //   try
 //     ... handle request ...
@@ -18,14 +18,14 @@
 interface
 
 uses
-  AsyncIO.Net.HttpServer,
-  AsyncIO.Net.WebAdapters.Native;
+  Poseidon.Net.HttpServer,
+  Poseidon.Net.WebAdapters.Native;
 
 type
   TNativeContextPool = class
   public
     class procedure Acquire(
-      const AReq:   TAsyncIONativeRequest;
+      const AReq:   TPoseidonNativeRequest;
       const AFlush: TNativeFlushProc;
       out   AWebReq: TNativeWebRequest;
       out   AWebRes: TNativeWebResponse); static;
@@ -53,7 +53,7 @@ var
   GPool: TStack<TNativePair>;
 
 class procedure TNativeContextPool.Acquire(
-  const AReq:   TAsyncIONativeRequest;
+  const AReq:   TPoseidonNativeRequest;
   const AFlush: TNativeFlushProc;
   out   AWebReq: TNativeWebRequest;
   out   AWebRes: TNativeWebResponse);

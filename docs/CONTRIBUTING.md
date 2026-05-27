@@ -1,8 +1,8 @@
-# Contributing to AsyncIO
+﻿# Contributing to Poseidon
 
 ## Scope
 
-AsyncIO aims to be a zero-dependency Delphi async I/O library focused on:
+Poseidon aims to be a zero-dependency Delphi async I/O library focused on:
 
 - **Native syscalls only** — epoll on Linux, IOCP on Windows; no third-party transport layer
 - **Single WSASend per response** — eliminates Nagle stall from double-write patterns
@@ -11,11 +11,11 @@ AsyncIO aims to be a zero-dependency Delphi async I/O library focused on:
 
 ## Technical guidelines
 
-- `AsyncIO.Net.HttpServer` is the **only** unit that makes direct syscalls (epoll/IOCP). All other units are adapters.
-- Never add `uses` of third-party libraries to any `AsyncIO.Net.*` unit — zero external dependencies is a hard constraint.
-- New units follow the naming convention `AsyncIO.Net.<Module>.pas`.
+- `Poseidon.Net.HttpServer` is the **only** unit that makes direct syscalls (epoll/IOCP). All other units are adapters.
+- Never add `uses` of third-party libraries to any `Poseidon.Net.*` unit — zero external dependencies is a hard constraint.
+- New units follow the naming convention `Poseidon.Net.<Module>.pas`.
 - Platform compatibility: Linux 64-bit (epoll) **and** Windows 64-bit (IOCP). Any `{$IFDEF}` block must cover both.
-- `class var` shared between threads → protect with `TMonitor` or `TCriticalSection`. See `AsyncIO.Net.Pool.Buffer` as reference.
+- `class var` shared between threads → protect with `TMonitor` or `TCriticalSection`. See `Poseidon.Net.Pool.Buffer` as reference.
 - `try/finally` mandatory whenever an object is allocated and must be freed.
 - No empty `except` blocks. Log or re-raise.
 
@@ -39,7 +39,7 @@ Always validate:
 
 ## Adding a new protocol feature
 
-1. If it requires new syscalls, add them to `AsyncIO.Net.HttpServer.pas` with `{$IFDEF MSWINDOWS}` / `{$IFDEF LINUX}` guards.
-2. Create a dedicated unit `AsyncIO.Net.<Feature>.pas` for the protocol logic.
-3. Expose it via a method on `TAsyncIONativeServer` — callers should not need to reference the new unit directly.
+1. If it requires new syscalls, add them to `Poseidon.Net.HttpServer.pas` with `{$IFDEF MSWINDOWS}` / `{$IFDEF LINUX}` guards.
+2. Create a dedicated unit `Poseidon.Net.<Feature>.pas` for the protocol logic.
+3. Expose it via a method on `TPoseidonNativeServer` — callers should not need to reference the new unit directly.
 4. Add a sample in `samples/` and document it in `docs/playbook/03-protocols/`.

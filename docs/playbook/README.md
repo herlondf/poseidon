@@ -1,10 +1,10 @@
-# AsyncIO Playbook
+﻿# Poseidon Playbook
 
-Technical documentation for the AsyncIO library.
+Technical documentation for the Poseidon library.
 
 | Section | Description |
 |---------|-------------|
-| [01 — Overview](01-overview/README.md) | What AsyncIO is, architecture, when to use |
+| [01 — Overview](01-overview/README.md) | What Poseidon is, architecture, when to use |
 | [02 — Core Concepts](02-core-concepts/README.md) | Event loop, I/O model, connection lifecycle |
 | [03 — Protocols](03-protocols/README.md) | HTTP/1.1, SSL/TLS, WebSocket, HTTP/2 |
 | [04 — Operations](04-operations/README.md) | Worker threads, buffer pool, observability |

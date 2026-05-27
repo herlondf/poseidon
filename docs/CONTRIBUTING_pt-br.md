@@ -1,8 +1,8 @@
-# Contribuindo com o AsyncIO
+﻿# Contribuindo com o Poseidon
 
 ## Escopo
 
-O AsyncIO busca ser uma biblioteca Delphi de I/O assíncrono com zero dependências, focada em:
+O Poseidon busca ser uma biblioteca Delphi de I/O assíncrono com zero dependências, focada em:
 
 - **Apenas syscalls nativas** — epoll no Linux, IOCP no Windows; sem camada de transporte de terceiros
 - **Um único WSASend por resposta** — elimina o stall de Nagle causado por padrões de dupla escrita
@@ -11,11 +11,11 @@ O AsyncIO busca ser uma biblioteca Delphi de I/O assíncrono com zero dependênc
 
 ## Diretrizes técnicas
 
-- `AsyncIO.Net.HttpServer` é a **única** unit que faz syscalls diretas (epoll/IOCP). Todas as demais são adapters.
-- Nunca adicionar `uses` de bibliotecas de terceiros em qualquer unit `AsyncIO.Net.*` — zero dependências externas é uma restrição rígida.
-- Novas units seguem a convenção de nomenclatura `AsyncIO.Net.<Modulo>.pas`.
+- `Poseidon.Net.HttpServer` é a **única** unit que faz syscalls diretas (epoll/IOCP). Todas as demais são adapters.
+- Nunca adicionar `uses` de bibliotecas de terceiros em qualquer unit `Poseidon.Net.*` — zero dependências externas é uma restrição rígida.
+- Novas units seguem a convenção de nomenclatura `Poseidon.Net.<Modulo>.pas`.
 - Compatibilidade de plataforma: Linux 64-bit (epoll) **e** Windows 64-bit (IOCP). Qualquer bloco `{$IFDEF}` deve cobrir ambos.
-- `class var` compartilhados entre threads → proteger com `TMonitor` ou `TCriticalSection`. Ver `AsyncIO.Net.Pool.Buffer` como referência.
+- `class var` compartilhados entre threads → proteger com `TMonitor` ou `TCriticalSection`. Ver `Poseidon.Net.Pool.Buffer` como referência.
 - `try/finally` obrigatório sempre que um objeto é alocado e precisa ser liberado.
 - Sem blocos `except` vazios. Logar ou relançar.
 
@@ -33,19 +33,19 @@ O AsyncIO busca ser uma biblioteca Delphi de I/O assíncrono com zero dependênc
 
 Sempre valide:
 
-- Build da suite de testes (`tests/AsyncIO.Tests.dproj`)
+- Build da suite de testes (`tests/Poseidon.Tests.dproj`)
 - Build de todos os samples (`samples/0N-*/`)
 - Smoke test quando a mudança tocar o caminho de despacho de requisições, buffer pool ou handshake SSL
 
 ## Adicionando uma nova funcionalidade de protocolo
 
-1. Se requer novas syscalls, adicioná-las a `AsyncIO.Net.HttpServer.pas` com guards `{$IFDEF MSWINDOWS}` / `{$IFDEF LINUX}`.
-2. Criar uma unit dedicada `AsyncIO.Net.<Funcionalidade>.pas` para a lógica do protocolo.
-3. Expor via método em `TAsyncIONativeServer` — callers não devem precisar referenciar a nova unit diretamente.
+1. Se requer novas syscalls, adicioná-las a `Poseidon.Net.HttpServer.pas` com guards `{$IFDEF MSWINDOWS}` / `{$IFDEF LINUX}`.
+2. Criar uma unit dedicada `Poseidon.Net.<Funcionalidade>.pas` para a lógica do protocolo.
+3. Expor via método em `TPoseidonNativeServer` — callers não devem precisar referenciar a nova unit diretamente.
 4. Adicionar um sample em `samples/` e documentar em `docs/playbook/03-protocols/`.
 
 ## Convenções
 
 - Documentação pública (`playbook/`) em inglês; `playbook_pt-br/` é a tradução direta — manter em sincronia.
-- Código e identificadores seguem o estilo atual do projeto (prefixo `TAsyncIO`, `IAsyncIO`, `EAsyncIO`).
+- Código e identificadores seguem o estilo atual do projeto (prefixo `TPoseidon`, `IPoseidon`, `EPoseidon`).
 - Mensagens de commit em pt-BR, formato `tipo(escopo): descrição curta` (Conventional Commits).

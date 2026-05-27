@@ -1,7 +1,7 @@
-# Worker threads
+﻿# Worker threads
 
-O AsyncIO despacha requisições para um pool de threads. O tamanho padrão é **200 workers**
-(propriedade `WorkerCount` em `TAsyncIONativeServer`).
+O Poseidon despacha requisições para um pool de threads. O tamanho padrão é **200 workers**
+(propriedade `WorkerCount` em `TPoseidonNativeServer`).
 
 ## Dimensionamento
 
@@ -17,7 +17,7 @@ Para handlers que acessam banco de dados (I/O bloqueante): mantenha o padrão 20
 Deve ser definido **antes** de `Listen`:
 
 ```pascal
-LServer := TAsyncIONativeServer.Create;
+LServer := TPoseidonNativeServer.Create;
 LServer.WorkerCount := 50;
 LServer.Listen('0.0.0.0', 9000, @HandleRequest, nil);
 ```

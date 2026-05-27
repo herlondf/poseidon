@@ -1,23 +1,23 @@
-# Servidor HTTP básico
+﻿# Servidor HTTP básico
 
 Servidor mínimo executável — responde `Olá, mundo!` a cada requisição.
 
 ```pascal
-program AsyncIOBasico;
+program PoseidonBasico;
 
 {$APPTYPE CONSOLE}
 
 uses
   System.SysUtils,
-  AsyncIO.Net.HttpServer;
+  Poseidon.Net.HttpServer;
 
 var
-  LServer: TAsyncIONativeServer;
+  LServer: TPoseidonNativeServer;
 begin
-  LServer := TAsyncIONativeServer.Create;
+  LServer := TPoseidonNativeServer.Create;
   try
     LServer.Listen('0.0.0.0', 9000,
-      procedure(const AReq: TAsyncIONativeRequest;
+      procedure(const AReq: TPoseidonNativeRequest;
                 out AStatus: Integer; out AContentType: string;
                 out ABody: TBytes;
                 out AExtraHeaders: TArray<TPair<string,string>>)

@@ -1,4 +1,4 @@
-# Poseidon
+﻿# Poseidon
 
 > *God of the seas — raw transport, the force of the waves.*
 
@@ -15,7 +15,7 @@
 
 ## Overview
 
-Poseidon (AsyncIO) is a standalone Delphi library that provides a native async I/O HTTP server.
+Poseidon is a standalone Delphi library that provides a native async I/O HTTP server.
 It is used as the transport layer for [Pegasus](https://github.com/herlondf/pegasus) and
 [Horse](https://github.com/HashLoad/horse) when the `HORSE_ASYNCIO` define is active.
 
@@ -49,14 +49,14 @@ No package install needed.
 ## Quick Start
 
 ```pascal
-uses AsyncIO.Net.HttpServer;
+uses Poseidon.Net.HttpServer;
 
 var
-  LServer: TAsyncIONativeServer;
+  LServer: TPoseidonNativeServer;
 begin
-  LServer := TAsyncIONativeServer.Create;
+  LServer := TPoseidonNativeServer.Create;
   LServer.Listen('0.0.0.0', 9000,
-    procedure(const AReq: TAsyncIONativeRequest;
+    procedure(const AReq: TPoseidonNativeRequest;
               out AStatus: Integer;
               out AContentType: string;
               out ABody: TBytes;
@@ -82,18 +82,18 @@ See [`samples/`](samples/) for runnable examples.
 ## Source layout
 
 ```
-src/                                   ← AsyncIO core (zero external dependencies)
-  AsyncIO.Net.HttpServer.pas           ← core server — epoll/IOCP syscalls
-  AsyncIO.Net.Pool.Buffer.pas          ← lock-free buffer pool
-  AsyncIO.Net.Pool.Native.pas          ← per-request context pool
-  AsyncIO.Net.WebAdapters.Native.pas   ← WebBroker adapter bridge
-  AsyncIO.Net.WebSocket.pas            ← WebSocket frame handling
-  AsyncIO.Net.SSL.pas                  ← OpenSSL bindings + SNI
-  AsyncIO.Net.HTTP2.pas                ← HTTP/2 (h2 via ALPN)
+src/                                   ← Poseidon core (zero external dependencies)
+  Poseidon.Net.HttpServer.pas           ← core server — epoll/IOCP syscalls
+  Poseidon.Net.Pool.Buffer.pas          ← lock-free buffer pool
+  Poseidon.Net.Pool.Native.pas          ← per-request context pool
+  Poseidon.Net.WebAdapters.Native.pas   ← WebBroker adapter bridge
+  Poseidon.Net.WebSocket.pas            ← WebSocket frame handling
+  Poseidon.Net.SSL.pas                  ← OpenSSL bindings + SNI
+  Poseidon.Net.HTTP2.pas                ← HTTP/2 (h2 via ALPN)
 
 providers/                             ← framework integrations (optional)
   horse/
-    Horse.Provider.AsyncIO.pas         ← Horse provider (requires Horse ≥ 3.1.9)
+    Horse.Provider.Poseidon.pas         ← Horse provider (requires Horse ≥ 3.1.9)
 ```
 
 ## The Olympian Family
