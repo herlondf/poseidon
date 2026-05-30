@@ -183,6 +183,11 @@ const
   RECV_BUF_SIZE    = 32768;  // was 8192 — match CrossSocket; reduz recv() syscalls em payloads maiores
   ACCUM_INITIAL    = 8192;
   WORKER_COUNT_MIN = 4;
+  // W15: cap auto-computed workers — ProcessorCount*2 on high-core machines
+  // (e.g. 100 logical → 200 threads) stalled the Delphi debugger at startup
+  // and wasted stack memory with no throughput gain. IOCP saturates well below
+  // that. Explicit FWorkerCount > 0 bypasses this cap.
+  WORKER_COUNT_MAX = 16;
   CM_HTTP          = 0;
   CM_WEBSOCKET     = 1;
 
@@ -1616,7 +1621,7 @@ begin
   if FWorkerCount > 0 then
     LWorkers := FWorkerCount
   else
-    LWorkers := Max(WORKER_COUNT_MIN, TThread.ProcessorCount * 2);
+    LWorkers := Min(Max(WORKER_COUNT_MIN, TThread.ProcessorCount * 2), WORKER_COUNT_MAX);
   SetLength(FWorkers, LWorkers);
   for I := 0 to LWorkers - 1 do
     FWorkers[I] := TThread.CreateAnonymousThread(procedure begin _WorkerLoop; end);
@@ -2073,7 +2078,7 @@ begin
   if FWorkerCount > 0 then
     LWorkers := FWorkerCount
   else
-    LWorkers := Max(WORKER_COUNT_MIN, TThread.ProcessorCount * 2);
+    LWorkers := Min(Max(WORKER_COUNT_MIN, TThread.ProcessorCount * 2), WORKER_COUNT_MAX);
   SetLength(FWorkers, LWorkers);
   for I := 0 to LWorkers - 1 do
     FWorkers[I] := TThread.CreateAnonymousThread(procedure begin _WorkerLoop; end);
