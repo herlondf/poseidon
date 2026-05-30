@@ -780,6 +780,13 @@ end;
 procedure TH2Conn._ProcessFrame(AType, AFlags: Byte; AStreamID: Cardinal;
   APayload: PByte; APayLen: Integer);
 begin
+  // RFC 7540 §4.2 — reject frames whose payload exceeds SETTINGS_MAX_FRAME_SIZE
+  if APayLen > FPeerMaxFrameSize then
+  begin
+    _GoAway(AStreamID, H2_ERR_FRAME_SIZE_ERROR);
+    Exit;
+  end;
+
   case AType of
     H2_FRAME_DATA:
       _HandleData(AFlags, AStreamID, APayload, APayLen);
