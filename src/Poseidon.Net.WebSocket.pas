@@ -311,6 +311,11 @@ var
 begin
   LLen := Length(APayload);
 
+  // RFC 6455 §5.2 — opcodes 0x3-0x7 and 0xB-0xF are reserved
+  if (AOpcode > $0A) or ((AOpcode > $02) and (AOpcode < $08)) then
+    raise EArgumentException.Create(
+      'Invalid WebSocket opcode: 0x' + IntToHex(AOpcode, 2));
+
   if LLen < 126 then
     LHdrLen := 2
   else if LLen <= $FFFF then

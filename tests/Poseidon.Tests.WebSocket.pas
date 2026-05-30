@@ -47,6 +47,10 @@ type
     procedure ParseFrame_MaskedFrame_UnmasksPayloadCorrectly;
     [Test]
     procedure ParseFrame_InsufficientBytes_ReturnsFalse;
+
+    // BuildFrame — opcode validation
+    [Test]
+    procedure BuildFrame_ReservedOpcode_RaisesArgumentException;
   end;
   {$M-}
 
@@ -207,6 +211,14 @@ begin
   LRaw := TBytes.Create($81);
   Assert.IsFalse(TWebSocketUtils.ParseFrame(@LRaw[0], Length(LRaw), LParsed, LConsumed));
   Assert.AreEqual(0, LConsumed);
+end;
+
+procedure TPoseidonWebSocketTests.BuildFrame_ReservedOpcode_RaisesArgumentException;
+begin
+  // Opcodes 0x3-0x7 and 0xB-0xF are reserved — RFC 6455 §5.2
+  Assert.WillRaise(
+    procedure begin TWebSocketUtils.BuildFrame($03, True, []); end,
+    EArgumentException, 'Expected EArgumentException for reserved opcode $03');
 end;
 
 end.
