@@ -1635,12 +1635,15 @@ begin
   FAcceptThread.FreeOnTerminate := False;
   FAcceptThread.Start;
 
+  // AOnListen fires here — server is functional (workers + accept running).
+  // Sweep is intentionally started after: if AOnListen blocks (e.g. Readln),
+  // sweep still starts when Listen() resumes instead of never starting.
+  if Assigned(AOnListen) then
+    AOnListen();
+
   FIdleSweepThread := TThread.CreateAnonymousThread(procedure begin _IdleSweepLoop; end);
   FIdleSweepThread.FreeOnTerminate := False;
   FIdleSweepThread.Start;
-
-  if Assigned(AOnListen) then
-    AOnListen();
 end;
 
 procedure TPoseidonNativeServer.Stop;
@@ -2092,12 +2095,15 @@ begin
   FAcceptThread.FreeOnTerminate := False;
   FAcceptThread.Start;
 
+  // AOnListen fires here — server is functional (workers + accept running).
+  // Sweep is intentionally started after: if AOnListen blocks (e.g. Readln),
+  // sweep still starts when Listen() resumes instead of never starting.
+  if Assigned(AOnListen) then
+    AOnListen();
+
   FIdleSweepThread := TThread.CreateAnonymousThread(procedure begin _IdleSweepLoop; end);
   FIdleSweepThread.FreeOnTerminate := False;
   FIdleSweepThread.Start;
-
-  if Assigned(AOnListen) then
-    AOnListen();
 end;
 
 // ---------------------------------------------------------------------------
