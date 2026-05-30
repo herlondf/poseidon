@@ -8,7 +8,9 @@ uses
   DUnitX.TestRunner,
   DUnitX.Loggers.Console,
   DUnitX.Loggers.XML.NUnit,
-  Poseidon.Tests.WebSocket;
+  Poseidon.Tests.WebSocket,
+  Poseidon.Tests.HttpServer,
+  Poseidon.Tests.HTTP2;
 
 var
   LRunner:  ITestRunner;
