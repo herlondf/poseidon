@@ -42,6 +42,9 @@ type
     out   ABody:         TBytes;
     out   AExtraHeaders: TArray<TPair<string,string>>);
 
+  TLogLevel = (llDebug, llInfo, llWarning, llError);
+  TOnPoseidonLog = reference to procedure(ALevel: TLogLevel; const AMessage: string);
+
   TPoseidonNativeServer = class
   private
     FOnRequest:       TOnNativeRequest;
@@ -65,6 +68,7 @@ type
     FWSLock:          TCriticalSection;
     FH2Enabled:       Boolean;         // HTTP/2 via ALPN; requires SSL. Default False.
     FWorkerCount:     Integer;         // 0 = auto (ProcessorCount * 2, min 4)
+    FOnLog:           TOnPoseidonLog;
 {$IFDEF MSWINDOWS}
     FIocp:          THandle;
 {$ELSE}
@@ -79,6 +83,10 @@ type
     procedure _CloseConn(AConn: Pointer);
     procedure _WorkerLoop;
     procedure _ProcessRecv(AConn: Pointer; const ABuf: PByte; ALen: Cardinal);
+    procedure _ProcessRecvSSL(AConn: Pointer; const ABuf: PByte; ALen: Cardinal;
+      out AAborted: Boolean);
+    procedure _ProcessRecvPlain(AConn: Pointer; const ABuf: PByte; ALen: Cardinal);
+    procedure _DispatchAccumBuf(AConn: Pointer);
     function  _TryParseRequest(AConn: Pointer;
       out AReq: TPoseidonNativeRequest; out ABadRequest: Boolean): Boolean;
     function  _DecodeChunked(ABuf: PByte; ABufLen: Integer;
@@ -102,6 +110,7 @@ type
     procedure _H2OnRequest(const AReq: TH2RequestData;
       var AStatus: Integer; var AContentType: string; var ABody: TBytes;
       var AExtra: TArray<TPair<string,string>>);
+    procedure _Log(ALevel: TLogLevel; const AMessage: string);
 {$IFNDEF MSWINDOWS}
     procedure _DoRecv(AConn: Pointer);
     procedure _FlushSend(AConn: Pointer);
@@ -139,6 +148,9 @@ type
     // For blocking workloads (e.g. DB + ACBr calls), set to the maximum number
     // of concurrent requests you want to support (e.g. 200).
     property WorkerCount: Integer read FWorkerCount write FWorkerCount;
+    // Optional log callback. When assigned, all internal errors are routed here.
+    // When nil (default), errors are written to ErrOutput.
+    property OnLog: TOnPoseidonLog read FOnLog write FOnLog;
     procedure RegisterWSHandler(const APath: string; AHandler: TWSMessageCallback);
   end;
 
@@ -938,100 +950,120 @@ begin
 end;
 
 // ===========================================================================
-// Shared: _ProcessRecv
-// Accumulates bytes, parses one HTTP request, invokes FOnRequest,
-// builds the response, and calls platform-specific _PostSend.
-// Calls _PostRecv (platform-specific re-arm) when parse is incomplete.
+// Shared: _ProcessRecv and helpers
+// _ProcessRecv is the entry point called by the platform worker (IOCP/epoll).
+// It delegates to three focused methods:
+//   _ProcessRecvSSL  — feeds bytes into the OpenSSL BIO pair and drains plaintext
+//   _ProcessRecvPlain — accumulates plain-HTTP bytes into AccumBuf
+//   _DispatchAccumBuf — routes the accumulated buffer to H2/WS/HTTP1 handlers
 // ===========================================================================
 
-procedure TPoseidonNativeServer._ProcessRecv(AConn: Pointer;
-  const ABuf: PByte; ALen: Cardinal);
+procedure TPoseidonNativeServer._ProcessRecvSSL(AConn: Pointer;
+  const ABuf: PByte; ALen: Cardinal; out AAborted: Boolean);
 var
-  LConn:    TNativeConn absolute AConn;
-  LReq:     TPoseidonNativeRequest;
-  AStatus:  Integer;
-  ACT:      string;
-  ABody:    TBytes;
-  AExtra:   TArray<TPair<string,string>>;
-  LResp:    TBytes;
-  LBad:     Boolean;
-  LDecBuf:  array[0..RECV_BUF_SIZE - 1] of Byte;
-  LDecN:    Integer;
-  LErr:     Integer;
-  LHsRet:   Integer;
+  LConn:   TNativeConn absolute AConn;
+  LDecBuf: array[0..RECV_BUF_SIZE - 1] of Byte;
+  LDecN:   Integer;
+  LErr:    Integer;
+  LHsRet:  Integer;
 begin
-  try
-  LConn.LastActivity := Now;   // touched on any inbound bytes — gates idle-sweep
-  if LConn.SSLHandle <> nil then
+  AAborted := False;
+
+  // Feed encrypted bytes into the ReadBio
+  if (ALen > 0) and
+     (TPoseidonSSL.BIO_Write(LConn.SSLReadBio, ABuf, ALen) <= 0) then
   begin
-    // --- SSL path: feed encrypted bytes into ReadBio, then SSL_read application data ---
-    if (ALen > 0) and
-       (TPoseidonSSL.BIO_Write(LConn.SSLReadBio, ABuf, ALen) <= 0) then
+    AAborted := True;
+    _CloseConn(AConn);
+    Exit;
+  end;
+
+  if not LConn.SSLHandshook then
+  begin
+    LHsRet := TPoseidonSSL.Do_Handshake(LConn.SSLHandle);
+    if LHsRet = 1 then
     begin
+      LConn.SSLHandshook := True;
+      // ALPN: if client negotiated "h2", create TH2Conn for this connection.
+      if FH2Enabled and (TPoseidonSSL.SSL_GetSelectedProtocol(LConn.SSLHandle) = 'h2') then
+      begin
+        LConn.H2Conn := TH2Conn.Create(AConn, _H2Send, _H2Close, _H2OnRequest);
+        LConn.H2Conn.SendInitialSettings;
+        LConn.KeepAlive := True;  // HTTP/2 connections are always persistent
+      end;
+    end
+    else
+    begin
+      LErr := TPoseidonSSL.Get_Error(LConn.SSLHandle, LHsRet);
+      if LErr = SSL_ERROR_WANT_READ then
+      begin
+        _SSLFlushWriteBio(AConn);
+        if TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio) <= 0 then
+          _PostRecv(AConn);
+        AAborted := True;
+        Exit;
+      end;
+      AAborted := True;
       _CloseConn(AConn);
       Exit;
     end;
-
-    if not LConn.SSLHandshook then
+    _SSLFlushWriteBio(AConn);
+    if TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio) > 0 then
     begin
-      LHsRet := TPoseidonSSL.Do_Handshake(LConn.SSLHandle);
-      if LHsRet = 1 then
-      begin
-        LConn.SSLHandshook := True;
-        // ALPN: if client negotiated "h2", create TH2Conn for this connection.
-        if FH2Enabled and (TPoseidonSSL.SSL_GetSelectedProtocol(LConn.SSLHandle) = 'h2') then
-        begin
-          LConn.H2Conn := TH2Conn.Create(AConn, _H2Send, _H2Close, _H2OnRequest);
-          LConn.H2Conn.SendInitialSettings;
-          LConn.KeepAlive := True;  // HTTP/2 connections are always persistent
-        end;
-      end
-      else
-      begin
-        LErr := TPoseidonSSL.Get_Error(LConn.SSLHandle, LHsRet);
-        if LErr = SSL_ERROR_WANT_READ then
-        begin
-          _SSLFlushWriteBio(AConn);
-          if TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio) <= 0 then
-            _PostRecv(AConn);
-          Exit;
-        end;
-        _CloseConn(AConn);
-        Exit;
-      end;
-      _SSLFlushWriteBio(AConn);
-      if TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio) > 0 then Exit;
+      // Handshake response is being sent; wait for next recv to continue.
+      AAborted := True;
+      Exit;
     end;
-
-    // Drain decrypted application data
-    repeat
-      LDecN := TPoseidonSSL.SSL_Read(LConn.SSLHandle, @LDecBuf[0], RECV_BUF_SIZE);
-      if LDecN > 0 then
-      begin
-        if LConn.AccumLen + LDecN > Length(LConn.AccumBuf) then
-          SetLength(LConn.AccumBuf,
-            Max(LConn.AccumLen + LDecN, Length(LConn.AccumBuf) * 2));
-        Move(LDecBuf[0], LConn.AccumBuf[LConn.AccumLen], LDecN);
-        Inc(LConn.AccumLen, LDecN);
-      end
-      else
-      begin
-        LErr := TPoseidonSSL.Get_Error(LConn.SSLHandle, LDecN);
-        if LErr = SSL_ERROR_WANT_READ then Break;
-        _CloseConn(AConn);
-        Exit;
-      end;
-    until False;
-  end
-  else if ALen > 0 then
-  begin
-    if LConn.AccumLen + Integer(ALen) > Length(LConn.AccumBuf) then
-      SetLength(LConn.AccumBuf,
-        Max(LConn.AccumLen + Integer(ALen), Length(LConn.AccumBuf) * 2));
-    Move(ABuf^, LConn.AccumBuf[LConn.AccumLen], ALen);
-    Inc(LConn.AccumLen, ALen);
   end;
 
+  // Drain decrypted application data into AccumBuf
+  repeat
+    LDecN := TPoseidonSSL.SSL_Read(LConn.SSLHandle, @LDecBuf[0], RECV_BUF_SIZE);
+    if LDecN > 0 then
+    begin
+      if LConn.AccumLen + LDecN > Length(LConn.AccumBuf) then
+        SetLength(LConn.AccumBuf,
+          Max(LConn.AccumLen + LDecN, Length(LConn.AccumBuf) * 2));
+      Move(LDecBuf[0], LConn.AccumBuf[LConn.AccumLen], LDecN);
+      Inc(LConn.AccumLen, LDecN);
+    end
+    else
+    begin
+      LErr := TPoseidonSSL.Get_Error(LConn.SSLHandle, LDecN);
+      if LErr = SSL_ERROR_WANT_READ then Break;
+      AAborted := True;
+      _CloseConn(AConn);
+      Exit;
+    end;
+  until False;
+end;
+
+procedure TPoseidonNativeServer._ProcessRecvPlain(AConn: Pointer;
+  const ABuf: PByte; ALen: Cardinal);
+var
+  LConn: TNativeConn absolute AConn;
+begin
+  if LConn.AccumLen + Integer(ALen) > Length(LConn.AccumBuf) then
+    SetLength(LConn.AccumBuf,
+      Max(LConn.AccumLen + Integer(ALen), Length(LConn.AccumBuf) * 2));
+  Move(ABuf^, LConn.AccumBuf[LConn.AccumLen], ALen);
+  Inc(LConn.AccumLen, ALen);
+end;
+
+procedure TPoseidonNativeServer._DispatchAccumBuf(AConn: Pointer);
+var
+  LConn:    TNativeConn absolute AConn;
+  LReq:     TPoseidonNativeRequest;
+  LStatus:  Integer;
+  LCT:      string;
+  LBody:    TBytes;
+  LExtra:   TArray<TPair<string,string>>;
+  LResp:    TBytes;
+  LBad:     Boolean;
+  LUpgrade: string;
+  LWsKey:   string;
+  I:        Integer;
+begin
   if LConn.AccumLen > MAX_REQUEST_SIZE then
   begin
     _CloseConn(AConn);
@@ -1071,54 +1103,68 @@ begin
     Exit;
   end;
 
+  LUpgrade := '';
+  LWsKey   := '';
+  for I := 0 to High(LReq.Headers) do
   begin
-    var LUpgrade := '';
-    var LWsKey   := '';
-    for var I := 0 to High(LReq.Headers) do
-    begin
-      if SameText(LReq.Headers[I].Key, 'Upgrade')           then LUpgrade := LReq.Headers[I].Value;
-      if SameText(LReq.Headers[I].Key, 'Sec-WebSocket-Key') then LWsKey   := LReq.Headers[I].Value;
-    end;
-    if SameText(LUpgrade, 'websocket') and (LWsKey <> '') then
-    begin
-      _UpgradeToWS(AConn, LReq);
-      Exit;
-    end;
+    if SameText(LReq.Headers[I].Key, 'Upgrade')           then LUpgrade := LReq.Headers[I].Value;
+    if SameText(LReq.Headers[I].Key, 'Sec-WebSocket-Key') then LWsKey   := LReq.Headers[I].Value;
+  end;
+  if SameText(LUpgrade, 'websocket') and (LWsKey <> '') then
+  begin
+    _UpgradeToWS(AConn, LReq);
+    Exit;
   end;
 
   LConn.KeepAlive := LReq.KeepAlive;
   TInterlocked.Increment(FInFlightCount);
   try
-    AStatus := 500;
-    ACT     := 'application/json';
-    ABody   := G_DEFAULT_ERROR_BODY;  // pre-encoded; overwritten by handler
-    SetLength(AExtra, 0);
+    LStatus := 500;
+    LCT     := 'application/json';
+    LBody   := G_DEFAULT_ERROR_BODY;  // pre-encoded; overwritten by handler
+    SetLength(LExtra, 0);
     try
-      FOnRequest(LReq, AStatus, ACT, ABody, AExtra);
+      FOnRequest(LReq, LStatus, LCT, LBody, LExtra);
     except
       on E: Exception do
       begin
-        AStatus := 500;
-        ACT     := 'application/problem+json';
-        ABody   := TEncoding.UTF8.GetBytes(
+        LStatus := 500;
+        LCT     := 'application/problem+json';
+        LBody   := TEncoding.UTF8.GetBytes(
           '{"type":"about:blank","title":"Internal Server Error",' +
           '"status":500,"detail":"' + E.Message + '"}');
-        SetLength(AExtra, 0);
+        SetLength(LExtra, 0);
       end;
     end;
   finally
     TInterlocked.Decrement(FInFlightCount);
   end;
 
-  _TryGzipResponse(LReq, ACT, ABody, AExtra);
-
-  LResp := _BuildResponse(AStatus, ACT, ABody, LReq.KeepAlive, AExtra);
+  _TryGzipResponse(LReq, LCT, LBody, LExtra);
+  LResp := _BuildResponse(LStatus, LCT, LBody, LReq.KeepAlive, LExtra);
   _EncryptAndSend(AConn, LResp);
+end;
+
+procedure TPoseidonNativeServer._ProcessRecv(AConn: Pointer;
+  const ABuf: PByte; ALen: Cardinal);
+var
+  LConn:    TNativeConn absolute AConn;
+  LAborted: Boolean;
+begin
+  try
+    LConn.LastActivity := Now;   // touched on any inbound bytes — gates idle-sweep
+    LAborted := False;
+    if LConn.SSLHandle <> nil then
+      _ProcessRecvSSL(AConn, ABuf, ALen, LAborted)
+    else if ALen > 0 then
+      _ProcessRecvPlain(AConn, ABuf, ALen);
+    if not LAborted then
+      _DispatchAccumBuf(AConn);
   except
     on E: Exception do
     begin
-      Writeln(ErrOutput, '[recv] ', LConn.RemoteAddr, ' EX [', E.ClassName,
-        ']: ', E.Message);
+      _Log(llError, '[recv] ' + LConn.RemoteAddr + ' EX [' + E.ClassName +
+        ']: ' + E.Message);
       try _CloseConn(AConn); except end;
     end;
   end;
@@ -1311,7 +1357,7 @@ begin
           LHandler(LConn.WSConn, LFrame);
         except
           on E: Exception do
-            Writeln(ErrOutput, '[ws] ', LConn.RemoteAddr, ' EX: ', E.Message);
+            _Log(llError, '[ws] ' + LConn.RemoteAddr + ' EX: ' + E.Message);
         end;
       end;
     end;
@@ -1392,6 +1438,16 @@ begin
   AContentType := LCT;
   ABody        := LBody;
   AExtra       := LExtra;
+end;
+
+procedure TPoseidonNativeServer._Log(ALevel: TLogLevel; const AMessage: string);
+const
+  LEVEL_LABEL: array[TLogLevel] of string = ('DEBUG', 'INFO', 'WARN', 'ERROR');
+begin
+  if Assigned(FOnLog) then
+    FOnLog(ALevel, AMessage)
+  else
+    Writeln(ErrOutput, '[poseidon][', LEVEL_LABEL[ALevel], '] ', AMessage);
 end;
 
 procedure TPoseidonNativeServer.RegisterWSHandler(const APath: string;
@@ -1877,7 +1933,7 @@ begin
       end;
     except
       on E: Exception do
-        Writeln(ErrOutput, '[iocp] WORKER_EX [', E.ClassName, ']: ', E.Message);
+        _Log(llError, '[iocp] WORKER_EX [' + E.ClassName + ']: ' + E.Message);
     end;
   end;
 end;
@@ -2399,7 +2455,7 @@ begin
         end;
       except
         on E: Exception do
-          Writeln(ErrOutput, '[epoll] WORKER_EX [', E.ClassName, ']: ', E.Message);
+          _Log(llError, '[epoll] WORKER_EX [' + E.ClassName + ']: ' + E.Message);
       end;
     end;
   end;
