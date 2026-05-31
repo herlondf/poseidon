@@ -49,6 +49,7 @@
     <DelphiCompile Include="$(MainSource)">
       <MainSource>MainSource</MainSource>
     </DelphiCompile>
+    <DCCReference Include="Poseidon.Sample.BenchReport.pas" />
   </ItemGroup>
   <ProjectExtensions>
     <Borland.Personality>Delphi.Personality.12</Borland.Personality>

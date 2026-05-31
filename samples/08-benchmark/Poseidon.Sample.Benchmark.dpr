@@ -2,35 +2,28 @@ program Poseidon.Sample.Benchmark;
 
 // Sample 08 — HTTP/1.1 Throughput Benchmark
 //
-// Runs two scenarios against a local Poseidon server and prints a results table.
+// Roda dois cenários contra um servidor Poseidon local e imprime uma tabela de
+// resultados no console, além de gerar um relatório HTML no diretório do executável.
 //
-//   Scenario A — keep-alive (persistent connections)
-//     WORKERS workers, each making REPS_KEEPALIVE sequential GET requests on
-//     a single persistent connection (Connection: keep-alive).
+//   Cenário A — keep-alive (conexões persistentes)
+//     WORKERS workers, cada um fazendo REPS_KEEPALIVE requests sequenciais numa
+//     única conexão persistente (Connection: keep-alive).
 //
-//   Scenario B — new connection per request
-//     WORKERS workers, each making REPS_NEWCONN requests with a fresh TCP
-//     connection per request (Connection: close).
+//   Cenário B — nova conexão por request
+//     WORKERS workers, cada um fazendo REPS_NEWCONN requests com um novo socket
+//     TCP por request (Connection: close).
 //
-// Measurements per request: wall-clock latency via TStopwatch.
-// Aggregates: throughput (req/s), P50 / P99 latency (ms).
+// Métricas por request: latência wall-clock via TStopwatch.
+// Agregados: throughput (req/s), Avg / P50 / P95 / P99 / Min / Max (ms).
+// Relatório: HTML com tema escuro e gráficos Chart.js — poseidon-sample-bench.html
 //
-// io_uring vs epoll note
-// ─────────────────────
-// On Linux, Poseidon auto-selects io_uring (kernel ≥ 5.1) or epoll as fallback.
-// To compare both back-ends, run this benchmark on:
-//   • A host with kernel ≥ 5.1  → io_uring path
-//   • A host with kernel < 5.1  → epoll path
-// The benchmark itself is back-end agnostic; the server chooses at startup.
+// io_uring vs epoll
+// ─────────────────
+// No Linux, o Poseidon seleciona io_uring (kernel ≥ 5.1) ou epoll como fallback.
+// Para comparar os dois backends, execute este benchmark em hosts com kernels
+// diferentes. O benchmark em si é agnóstico ao backend.
 //
-// HTTP/2 note
-// ───────────
-// HTTP/2 benefit is visible when many streams share a single TLS connection.
-// See samples/04-http2 for the HTTP/2 server setup; benchmark it by replacing
-// the server in this program with HTTP2Enabled := True and using an HTTP/2
-// client library (e.g. libcurl with ALPN, or nghttp2).
-//
-// Usage: Poseidon.Sample.Benchmark.exe
+// Uso: Poseidon.Sample.Benchmark.exe
 
 {$APPTYPE CONSOLE}
 
@@ -45,14 +38,16 @@ uses
   System.Math,
   Winapi.Winsock2,
   Poseidon.Net.Types,
-  Poseidon.Net.HttpServer;
+  Poseidon.Net.HttpServer,
+  Poseidon.Sample.BenchReport;
 
 const
   BENCH_PORT      = 9090;
   BENCH_HOST      = '127.0.0.1';
   WORKERS         = 50;
-  REPS_KEEPALIVE  = 1000;  // requests per worker — keep-alive scenario
-  REPS_NEWCONN    = 200;   // requests per worker — new-connection scenario
+  REPS_KEEPALIVE  = 1000;  // requests por worker — cenário keep-alive
+  REPS_NEWCONN    = 200;   // requests por worker — cenário nova conexão
+  REPORT_FILE     = 'poseidon-sample-bench.html';
 
 // ─── HTTP handler ─────────────────────────────────────────────────────────────
 
@@ -104,18 +99,18 @@ begin
   Result := True;
 end;
 
-// Read until we find the end of HTTP/1.1 headers (double CRLF).
-// Returns True when found; fills AOut with everything received so far.
+// Lê até encontrar o fim dos headers HTTP/1.1 (duplo CRLF).
 function RecvResponse(ASocket: TSocket; out AOut: TBytes): Boolean;
 var
-  LBuf: array[0..8191] of Byte;
+  LBuf: TBytes;  // TBytes required by TEncoding.GetString overload
   LRcv: Integer;
   LStr: string;
 begin
   Result := False;
   SetLength(AOut, 0);
+  SetLength(LBuf, 8192);
   repeat
-    LRcv := recv(ASocket, LBuf[0], SizeOf(LBuf), 0);
+    LRcv := recv(ASocket, LBuf[0], Length(LBuf), 0);
     if LRcv <= 0 then Exit;
     LStr := TEncoding.ASCII.GetString(LBuf, 0, LRcv);
     SetLength(AOut, Length(AOut) + LRcv);
@@ -125,10 +120,8 @@ begin
   until False;
 end;
 
-// ─── Scenario A — keep-alive ──────────────────────────────────────────────────
+// ─── Cenário A — keep-alive ──────────────────────────────────────────────────
 
-// Each worker opens one connection and fires REPS_KEEPALIVE sequential requests.
-// Returns array of per-request latencies in milliseconds.
 function RunWorkerKeepAlive: TArray<Double>;
 var
   LSock:   TSocket;
@@ -158,7 +151,7 @@ begin
   end;
 end;
 
-// ─── Scenario B — new connection per request ─────────────────────────────────
+// ─── Cenário B — nova conexão por request ────────────────────────────────────
 
 function RunWorkerNewConn: TArray<Double>;
 var
@@ -186,57 +179,80 @@ begin
   end;
 end;
 
-// ─── Statistics ───────────────────────────────────────────────────────────────
+// ─── Estatísticas ─────────────────────────────────────────────────────────────
 
-procedure PrintStats(const AScenarioName: string; const AAllLatencies: TArray<Double>;
-  AWallMs: Double);
+// Computa todas as métricas a partir dos array de latências brutas.
+function BuildResult(
+  const AName:    string;
+  const AAll:     TArray<Double>;
+  AWallMs:        Double;
+  AWorkers:       Integer): TSampleScenarioResult;
 var
   LSorted: TArray<Double>;
-  P50, P99: Double;
-  I:        Integer;
-  LTotal:   Integer;
+  LTotal:  Integer;
+  LSum:    Double;
+  LV:      Double;
 begin
-  LTotal := Length(AAllLatencies);
-  if LTotal = 0 then
-  begin
-    Writeln(AScenarioName, ': no data');
-    Exit;
-  end;
+  Result := Default(TSampleScenarioResult);
+  LTotal := Length(AAll);
 
-  LSorted := Copy(AAllLatencies, 0, LTotal);
+  Result.Name    := AName;
+  Result.Workers := AWorkers;
+  Result.WallMs  := AWallMs;
+  Result.TotalRequests := LTotal;
+
+  if LTotal = 0 then Exit;
+
+  Result.RepsPerWorker := LTotal div Max(1, AWorkers);
+  Result.RPS           := LTotal / (AWallMs / 1000.0);
+
+  LSum := 0;
+  for LV in AAll do LSum := LSum + LV;
+  Result.AvgMs := LSum / LTotal;
+
+  LSorted := Copy(AAll, 0, LTotal);
   TArray.Sort<Double>(LSorted);
 
-  P50 := LSorted[Trunc(LTotal * 0.50)];
-  P99 := LSorted[Trunc(LTotal * 0.99)];
-
-  Writeln(Format('%-30s  %6d req   %7.0f req/s   P50=%5.2f ms   P99=%6.2f ms',
-    [AScenarioName,
-     LTotal,
-     LTotal / (AWallMs / 1000.0),
-     P50, P99]));
+  Result.MinMs := LSorted[0];
+  Result.MaxMs := LSorted[High(LSorted)];
+  Result.P50   := LSorted[Max(0, Trunc(LTotal * 0.50))];
+  Result.P95   := LSorted[Max(0, Min(Trunc(LTotal * 0.95), LTotal - 1))];
+  Result.P99   := LSorted[Max(0, Min(Trunc(LTotal * 0.99), LTotal - 1))];
 end;
 
-// ─── Run one scenario ─────────────────────────────────────────────────────────
-
-procedure RunScenario(const AName: string; AWorkerCount: Integer;
-  AWorkerFn: TFunc<TArray<Double>>);
-var
-  LTasks:    TArray<ITask>;
-  LResults:  TArray<TArray<Double>>;
-  LAll:      TArray<Double>;
-  LPos:      Integer;
-  I, J:      Integer;
-  LWall:     TStopwatch;
-  LTotal:    Integer;
+procedure PrintResult(const R: TSampleScenarioResult);
 begin
-  Write(Format('Running %-30s ... ', [AName]));
+  if R.TotalRequests = 0 then
+  begin
+    Writeln(R.Name + ': sem dados');
+    Exit;
+  end;
+  Writeln(Format('%-40s  %6d req   %7.0f req/s   P50=%5.2f ms   P99=%6.2f ms',
+    [R.Name, R.TotalRequests, R.RPS, R.P50, R.P99]));
+end;
+
+// ─── Executor de cenário ──────────────────────────────────────────────────────
+
+function RunScenario(
+  const AName:      string;
+  AWorkerCount:     Integer;
+  AWorkerFn:        TFunc<TArray<Double>>): TSampleScenarioResult;
+var
+  LTasks:   TArray<ITask>;
+  LResults: TArray<TArray<Double>>;
+  LAll:     TArray<Double>;
+  LPos:     Integer;
+  I, J:     Integer;
+  LWall:    TStopwatch;
+  LTotal:   Integer;
+begin
+  Write(Format('Executando %-40s ... ', [AName]));
   Flush(Output);
 
   SetLength(LTasks,   AWorkerCount);
   SetLength(LResults, AWorkerCount);
 
   LWall := TStopwatch.StartNew;
-
   for I := 0 to AWorkerCount - 1 do
   begin
     var LIdx := I;
@@ -246,15 +262,12 @@ begin
         LResults[LIdx] := AWorkerFn();
       end);
   end;
-
   TTask.WaitForAll(LTasks, 120000);
   LWall.Stop;
 
-  // Flatten
+  // Achata os arrays por worker
   LTotal := 0;
-  for I := 0 to AWorkerCount - 1 do
-    Inc(LTotal, Length(LResults[I]));
-
+  for I := 0 to AWorkerCount - 1 do Inc(LTotal, Length(LResults[I]));
   SetLength(LAll, LTotal);
   LPos := 0;
   for I := 0 to AWorkerCount - 1 do
@@ -264,15 +277,16 @@ begin
       Inc(LPos);
     end;
 
-  Writeln('done');
-  PrintStats(AName, LAll, LWall.Elapsed.TotalMilliseconds);
+  Writeln('concluído');
+  Result := BuildResult(AName, LAll, LWall.Elapsed.TotalMilliseconds, AWorkerCount);
+  PrintResult(Result);
 end;
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 var
-  GServer:  TPoseidonNativeServer;
-  GReady:   TEvent;
+  GServer: TPoseidonNativeServer;
+  GReady:  TEvent;
 
 procedure OnListenReady;
 begin
@@ -285,7 +299,12 @@ begin
 end;
 
 var
-  LWSAData: TWSAData;
+  LWSAData:    TWSAData;
+  LResultA:    TSampleScenarioResult;
+  LResultB:    TSampleScenarioResult;
+  LReport:     TSampleBenchReport;
+  LMachine:    string;
+  LReportPath: string;
 begin
   WSAStartup($0202, LWSAData);
   try
@@ -293,23 +312,23 @@ begin
     GServer := TPoseidonNativeServer.Create;
     try
       GServer.WorkerCount := 200;
-
       TThread.CreateAnonymousThread(ServerThread).Start;
 
       if GReady.WaitFor(5000) <> TWaitResult.wrSignaled then
       begin
-        Writeln('ERROR: server did not start within 5 s');
+        Writeln('ERRO: servidor não iniciou em 5 s');
         Exit;
       end;
 
-      Writeln('Poseidon Sample 08 — HTTP/1.1 Throughput Benchmark');
-      Writeln(Format('Server: %s:%d   Workers: %d', [BENCH_HOST, BENCH_PORT, GServer.WorkerCount]));
+      Writeln('Poseidon Sample 08 — Benchmark de Throughput HTTP/1.1');
+      Writeln(Format('Servidor: %s:%d   Workers: %d',
+        [BENCH_HOST, BENCH_PORT, GServer.WorkerCount]));
       Writeln(StringOfChar('-', 78));
-      Writeln(Format('%-30s  %9s   %12s   %14s   %14s',
-        ['Scenario', 'Requests', 'Throughput', 'P50 Latency', 'P99 Latency']));
+      Writeln(Format('%-40s  %9s   %12s   %14s   %14s',
+        ['Cenário', 'Requests', 'Throughput', 'P50 Latência', 'P99 Latência']));
       Writeln(StringOfChar('-', 78));
 
-      RunScenario(
+      LResultA := RunScenario(
         Format('A: keep-alive (%dx%d)', [WORKERS, REPS_KEEPALIVE]),
         WORKERS,
         function: TArray<Double>
@@ -317,8 +336,8 @@ begin
           Result := RunWorkerKeepAlive;
         end);
 
-      RunScenario(
-        Format('B: new-conn (%dx%d)', [WORKERS, REPS_NEWCONN]),
+      LResultB := RunScenario(
+        Format('B: nova-conn (%dx%d)', [WORKERS, REPS_NEWCONN]),
         WORKERS,
         function: TArray<Double>
         begin
@@ -327,11 +346,31 @@ begin
 
       Writeln(StringOfChar('-', 78));
       Writeln;
-      Writeln('Notes:');
-      Writeln('  - Linux: io_uring used automatically on kernel >= 5.1; epoll on older kernels.');
-      Writeln('    Run on both kernel versions and compare to measure io_uring benefit.');
-      Writeln('  - HTTP/2 requires TLS+ALPN. See samples/04-http2 and use an HTTP/2 client');
-      Writeln('    (e.g. nghttp2) to benchmark HTTP/2 throughput.');
+
+      // ── Gerar relatório HTML ───────────────────────────────────────────────
+
+      LMachine := GetEnvironmentVariable('COMPUTERNAME');   // Windows
+      if LMachine = '' then LMachine := GetEnvironmentVariable('HOSTNAME'); // Linux
+      if LMachine = '' then LMachine := 'localhost';
+
+      LReportPath := ExtractFilePath(ParamStr(0)) + REPORT_FILE;
+
+      LReport := TSampleBenchReport.Create(
+        [LResultA, LResultB],
+        LMachine, Now,
+        'Poseidon HTTP/1.1 &mdash; Keep-Alive vs Nova Conex&atilde;o');
+      try
+        LReport.SaveToFile(LReportPath);
+        Writeln(Format('Relatório HTML gerado: %s', [LReportPath]));
+      finally
+        LReport.Free;
+      end;
+
+      Writeln;
+      Writeln('Notas:');
+      Writeln('  - Linux: io_uring selecionado automaticamente em kernel >= 5.1;');
+      Writeln('    epoll em kernels mais antigos. Execute nos dois para comparar.');
+      Writeln('  - HTTP/2 requer TLS+ALPN. Veja samples/04-http2 e use nghttp2.');
 
       GServer.Stop;
     finally
