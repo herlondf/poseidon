@@ -48,9 +48,29 @@ type
     [Test]
     procedure ParseFrame_InsufficientBytes_ReturnsFalse;
 
+    // BuildFrame — 64-bit length encoding (payload >= 65536)
+    [Test]
+    procedure BuildFrame_Payload65536Bytes_Uses64BitLengthEncoding;
+
+    // BuildFrame — FIN flag variations
+    [Test]
+    procedure BuildFrame_FinFalse_FirstByteHasNoFinBit;
+
+    // ParseFrame — ping / pong opcodes
+    [Test]
+    procedure ParseFrame_PingFrame_OpcodeParsedCorrectly;
+    [Test]
+    procedure ParseFrame_PongFrame_OpcodeParsedCorrectly;
+
+    // ParseFrame — 16-bit length round-trip
+    [Test]
+    procedure ParseFrame_16BitLength_RoundTripMatchesOriginal;
+
     // BuildFrame — opcode validation
     [Test]
     procedure BuildFrame_ReservedOpcode_RaisesArgumentException;
+    [Test]
+    procedure BuildFrame_ReservedOpcode0B_RaisesArgumentException;
   end;
   {$M-}
 
@@ -219,6 +239,91 @@ begin
   Assert.WillRaise(
     procedure begin TWebSocketUtils.BuildFrame($03, True, []); end,
     EArgumentException, 'Expected EArgumentException for reserved opcode $03');
+end;
+
+procedure TPoseidonWebSocketTests.BuildFrame_ReservedOpcode0B_RaisesArgumentException;
+begin
+  Assert.WillRaise(
+    procedure begin TWebSocketUtils.BuildFrame($0B, True, []); end,
+    EArgumentException, 'Expected EArgumentException for reserved opcode $0B');
+end;
+
+procedure TPoseidonWebSocketTests.BuildFrame_Payload65536Bytes_Uses64BitLengthEncoding;
+var
+  LPayload: TBytes;
+  LFrame:   TBytes;
+begin
+  SetLength(LPayload, 65536);
+  LFrame := TWebSocketUtils.BuildFrame(OPCODE_BINARY, True, LPayload);
+  // Header = 10 bytes (byte0, byte1=127, 8-byte big-endian length)
+  Assert.AreEqual(65546, Length(LFrame));
+  Assert.AreEqual(Byte(127), LFrame[1]);  // 127 = 64-bit indicator
+  // 8-byte big-endian for 65536 = $0000000000010000
+  Assert.AreEqual(Byte(0),   LFrame[2]);
+  Assert.AreEqual(Byte(0),   LFrame[3]);
+  Assert.AreEqual(Byte(0),   LFrame[4]);
+  Assert.AreEqual(Byte(0),   LFrame[5]);
+  Assert.AreEqual(Byte(0),   LFrame[6]);
+  Assert.AreEqual(Byte(1),   LFrame[7]);
+  Assert.AreEqual(Byte(0),   LFrame[8]);
+  Assert.AreEqual(Byte(0),   LFrame[9]);
+end;
+
+procedure TPoseidonWebSocketTests.BuildFrame_FinFalse_FirstByteHasNoFinBit;
+var
+  LFrame: TBytes;
+begin
+  // FIN=0, Opcode=0 (continuation) → first byte = $00
+  LFrame := TWebSocketUtils.BuildFrame(OPCODE_CONTINUATION, False, TEncoding.UTF8.GetBytes('frag'));
+  Assert.AreEqual(Byte($00), LFrame[0]);
+end;
+
+procedure TPoseidonWebSocketTests.ParseFrame_PingFrame_OpcodeParsedCorrectly;
+var
+  LRaw:      TBytes;
+  LParsed:   TWebSocketFrame;
+  LConsumed: Integer;
+begin
+  // FIN=1, Opcode=9 (Ping), no mask, payload "ping"
+  LRaw := TBytes.Create($89, $04, $70, $69, $6E, $67);  // $89=FIN+Ping, $04=len 4, "ping"
+  Assert.IsTrue(TWebSocketUtils.ParseFrame(@LRaw[0], Length(LRaw), LParsed, LConsumed));
+  Assert.AreEqual(OPCODE_PING, LParsed.Opcode);
+  Assert.IsTrue(LParsed.FinFlag);
+  Assert.AreEqual(4, Length(LParsed.Payload));
+  Assert.AreEqual(6, LConsumed);
+end;
+
+procedure TPoseidonWebSocketTests.ParseFrame_PongFrame_OpcodeParsedCorrectly;
+var
+  LRaw:      TBytes;
+  LParsed:   TWebSocketFrame;
+  LConsumed: Integer;
+begin
+  // FIN=1, Opcode=A (Pong), no mask, no payload
+  LRaw := TBytes.Create($8A, $00);  // $8A=FIN+Pong, $00=len 0
+  Assert.IsTrue(TWebSocketUtils.ParseFrame(@LRaw[0], Length(LRaw), LParsed, LConsumed));
+  Assert.AreEqual(OPCODE_PONG, LParsed.Opcode);
+  Assert.AreEqual(0, Length(LParsed.Payload));
+  Assert.AreEqual(2, LConsumed);
+end;
+
+procedure TPoseidonWebSocketTests.ParseFrame_16BitLength_RoundTripMatchesOriginal;
+var
+  LPayload:  TBytes;
+  LFrame:    TBytes;
+  LParsed:   TWebSocketFrame;
+  LConsumed: Integer;
+  I:         Integer;
+begin
+  SetLength(LPayload, 200);
+  for I := 0 to 199 do
+    LPayload[I] := Byte(I mod 256);
+  LFrame := TWebSocketUtils.BuildFrame(OPCODE_BINARY, True, LPayload);
+  Assert.IsTrue(TWebSocketUtils.ParseFrame(@LFrame[0], Length(LFrame), LParsed, LConsumed));
+  Assert.AreEqual(Length(LFrame), LConsumed);
+  Assert.AreEqual(200, Length(LParsed.Payload));
+  for I := 0 to 199 do
+    Assert.AreEqual(Byte(I mod 256), LParsed.Payload[I]);
 end;
 
 end.

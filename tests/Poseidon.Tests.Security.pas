@@ -41,6 +41,7 @@ type
     [Test] procedure BareDoubleDot_ReturnsFalse;
     [Test] procedure SingleDot_ReturnsTrue;
     [Test] procedure PathWithDotFile_ReturnsTrue;
+    [Test] procedure DoubleSlash_StillSafe;
   end;
 
   [TestFixture]
@@ -77,6 +78,8 @@ type
     [Test] procedure Slash24_HostOutsideSubnet_ReturnsFalse;
     [Test] procedure Slash0_MatchesEverything_ReturnsTrue;
     [Test] procedure Slash16_BoundaryIP_ReturnsTrue;
+    [Test] procedure Slash1_FirstHalfOfInternet_ReturnsTrue;
+    [Test] procedure Slash1_SecondHalfOfInternet_ReturnsFalse;
     // RemoteAddr with port suffix
     [Test] procedure RemoteAddrWithPort_Stripped_ReturnsTrue;
     [Test] procedure RemoteAddrWithPort_Stripped_ReturnsFalse;
@@ -218,6 +221,13 @@ begin
   // A file named ".gitignore" is not a traversal
   Assert.IsTrue(IsPathSafe('/.gitignore'));
   Assert.IsTrue(IsPathSafe('/api/.well-known/openid-configuration'));
+end;
+
+procedure TSecurityIsPathSafeTests.DoubleSlash_StillSafe;
+begin
+  // Double slashes do not contain ".." — should be safe at protocol level
+  Assert.IsTrue(IsPathSafe('//api/v1/users'));
+  Assert.IsTrue(IsPathSafe('/a//b'));
 end;
 
 // ===========================================================================
@@ -393,6 +403,21 @@ begin
   Assert.IsTrue(IsIPInCIDR('[::1]:8080',   '127.0.0.1/8'));
   Assert.IsTrue(IsIPInCIDR('::1',          '127.0.0.1/8'));
   Assert.IsTrue(IsIPInCIDR('2001:db8::1',  '10.0.0.0/8'));
+end;
+
+procedure TSecurityIsIPInCIDRTests.Slash1_FirstHalfOfInternet_ReturnsTrue;
+begin
+  // /1 mask = $80000000; 0.0.0.0/1 covers 0.x.x.x .. 127.x.x.x
+  Assert.IsTrue(IsIPInCIDR('0.0.0.0',    '0.0.0.0/1'));
+  Assert.IsTrue(IsIPInCIDR('64.1.2.3',   '0.0.0.0/1'));
+  Assert.IsTrue(IsIPInCIDR('127.255.255.255', '0.0.0.0/1'));
+end;
+
+procedure TSecurityIsIPInCIDRTests.Slash1_SecondHalfOfInternet_ReturnsFalse;
+begin
+  // 128.x.x.x is outside 0.0.0.0/1
+  Assert.IsFalse(IsIPInCIDR('128.0.0.0', '0.0.0.0/1'));
+  Assert.IsFalse(IsIPInCIDR('192.168.1.1', '0.0.0.0/1'));
 end;
 
 initialization

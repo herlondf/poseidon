@@ -39,6 +39,8 @@ type
     [Test] procedure Acquire_SmallRequest_ReturnsTier0;
     [Test] procedure Acquire_1_ReturnsTier0;
     [Test] procedure ConcurrentAcquireRelease_NoDeadlock;
+    [Test] procedure Release_NilBuffer_DoesNotCrash;
+    [Test] procedure ConcurrentAcquireRelease_MultiTier_NoDeadlock;
   end;
   {$M-}
 
@@ -268,6 +270,51 @@ begin
   end;
   TTask.WaitForAll(LTasks);
   // If we reach here without hanging/crashing: pass.
+  Assert.Pass;
+end;
+
+procedure TBufferPoolTests.Release_NilBuffer_DoesNotCrash;
+var
+  LBuf: TBytes;
+begin
+  // A nil/empty TBytes should be released without crash or exception.
+  LBuf := nil;
+  Assert.WillNotRaise(
+    procedure begin TBufferPool.Release(LBuf); end);
+  Assert.AreEqual(0, Length(LBuf));
+end;
+
+procedure TBufferPoolTests.ConcurrentAcquireRelease_MultiTier_NoDeadlock;
+// Stress test across all three tiers simultaneously.
+const
+  TASK_COUNT = 6;
+  ITER_COUNT = 100;
+var
+  LTasks: array[0..TASK_COUNT - 1] of ITask;
+  I:      Integer;
+begin
+  for I := 0 to TASK_COUNT - 1 do
+  begin
+    LTasks[I] := TTask.Run(
+      procedure
+      var
+        J:     Integer;
+        LBuf0: TBytes;
+        LBuf1: TBytes;
+        LBuf2: TBytes;
+      begin
+        for J := 0 to ITER_COUNT - 1 do
+        begin
+          LBuf0 := TBufferPool.Acquire(0);
+          LBuf1 := TBufferPool.Acquire(POOL_TIER0_SIZE + 1);
+          LBuf2 := TBufferPool.Acquire(POOL_TIER1_SIZE + 1);
+          TBufferPool.Release(LBuf0);
+          TBufferPool.Release(LBuf1);
+          TBufferPool.Release(LBuf2);
+        end;
+      end);
+  end;
+  TTask.WaitForAll(LTasks);
   Assert.Pass;
 end;
 
