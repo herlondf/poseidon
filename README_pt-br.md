@@ -3,7 +3,7 @@
 > *Deus dos mares — transporte bruto, a força das ondas.*
 
 <p align="center">
-  <img src="docs/logo.png" alt="Poseidon" width="180"/>
+  <img src="docs/logo.png" alt="Poseidon" width="320"/>
 </p>
 
 <p align="center">
