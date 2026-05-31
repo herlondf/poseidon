@@ -1,4 +1,4 @@
-﻿# Worker threads
+# Worker threads & graceful shutdown
 
 Poseidon dispatches incoming requests to a thread pool. The default pool size is **200 workers**
 (`WorkerCount` property on `TPoseidonNativeServer`).
@@ -22,8 +22,31 @@ LServer.WorkerCount := 50;
 LServer.Listen('0.0.0.0', 9000, @HandleRequest, nil);
 ```
 
+## Graceful shutdown (R-1)
+
+`Stop` waits for all in-flight requests to complete before returning.
+It uses an internal event (no busy-wait / Sleep loop) so the calling thread blocks
+efficiently until the drain completes or the timeout expires.
+
+```pascal
+LServer.DrainTimeoutMs := 15000;  // default 30 000 ms
+LServer.Stop;
+// returns when all in-flight requests have finished, or after DrainTimeoutMs
+```
+
+`DrainTimeoutMs` must be set before `Listen` (it is read once at start, not during drain).
+
+### Typical shutdown pattern
+
+```pascal
+// in a signal handler or application shutdown:
+LServer.Stop;
+LServer.Free;
+```
+
 ## Notes
 
 - Workers are OS threads, not green threads. Each blocked worker holds a full stack.
 - I/O completion (accept, read, write) is handled by a separate I/O thread — workers only run your callback.
 - If all workers are busy, new requests queue in the OS completion port backlog.
+- `MaxQueueDepth` (default 0 = unlimited) lets you cap the in-flight count and return 503 when the limit is reached — see [limits-and-backpressure.md](limits-and-backpressure.md).

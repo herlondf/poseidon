@@ -1,4 +1,4 @@
-﻿# WebSocket
+# WebSocket
 
 WebSocket handlers are registered per-path via `RegisterWSHandler`.
 The same server instance handles both HTTP and WebSocket traffic on the same port.
@@ -47,6 +47,17 @@ LServer.RegisterWSHandler('/ws',
 | `Close(ACode: Word = 1000)` | Send close frame and tear down the connection |
 | `RemoteAddr: string` | Remote IP address (read-only property) |
 | `Closed: Boolean` | True if the connection is already closed (read-only property) |
+
+## Frame size limit (R-3)
+
+Use `MaxWSFrameSize` to reject oversized payloads before they are processed:
+
+```pascal
+LServer.MaxWSFrameSize := 1024 * 1024;  // 1 MB — close with code 1009 if exceeded
+```
+
+The default is `0` (unlimited). When a frame exceeds the limit the connection is closed
+with WebSocket close code `1009` (Message Too Big) and the handler is not called.
 
 ## Working with text payloads
 
