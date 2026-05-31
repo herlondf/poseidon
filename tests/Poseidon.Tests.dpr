@@ -10,7 +10,12 @@ uses
   DUnitX.Loggers.XML.NUnit,
   Poseidon.Tests.WebSocket,
   Poseidon.Tests.HttpServer,
-  Poseidon.Tests.HTTP2;
+  Poseidon.Tests.HTTP2,
+  Poseidon.Tests.Security,
+  Poseidon.Tests.BufferPool,
+  Poseidon.Tests.HTTP1Parser,
+  Poseidon.Tests.ResponseBuilder,
+  Poseidon.Tests.ProxyProtocol;
 
 var
   LRunner:  ITestRunner;

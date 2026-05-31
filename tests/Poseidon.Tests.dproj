@@ -47,6 +47,11 @@
       <MainSource>MainSource</MainSource>
     </DelphiCompile>
     <DCCReference Include="Poseidon.Tests.WebSocket.pas"/>
+    <DCCReference Include="Poseidon.Tests.Security.pas"/>
+    <DCCReference Include="Poseidon.Tests.BufferPool.pas"/>
+    <DCCReference Include="Poseidon.Tests.HTTP1Parser.pas"/>
+    <DCCReference Include="Poseidon.Tests.ResponseBuilder.pas"/>
+    <DCCReference Include="Poseidon.Tests.ProxyProtocol.pas"/>
   </ItemGroup>
   <ProjectExtensions>
     <Borland.Personality>Delphi.Personality.12</Borland.Personality>

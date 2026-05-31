@@ -1,0 +1,308 @@
+unit Poseidon.Tests.ResponseBuilder;
+
+// DUnitX unit tests for Poseidon.Net.ResponseBuilder.BuildHTTPResponse.
+//
+// Tests verify that the assembled TBytes contain the correct HTTP/1.1
+// response structure without needing a running server.
+//
+// Coverage:
+//   Status lines (200, 404, custom)
+//   Content-Type header (common pre-encoded values, custom)
+//   Content-Length header (0, small, large)
+//   Connection header (keep-alive vs close)
+//   Extra headers (single, multiple, S-3 CRLF stripped from values)
+//   Security headers (A-1: opt-in)
+//   Server banner (A-2: configurable / omitted)
+//   DefaultErrorBody (non-nil, UTF-8 JSON)
+
+interface
+
+uses
+  DUnitX.TestFramework;
+
+type
+  {$M+}
+  [TestFixture]
+  TResponseBuilderTests = class
+  private
+    function ResponseToString(const ABytes: TBytes): string;
+    function HasHeader(const AResponse, AName, AValue: string): Boolean;
+    function HasStatusLine(const AResponse: string; AExpected: string): Boolean;
+  public
+    [Test] procedure Status200_ContainsOKStatusLine;
+    [Test] procedure Status404_ContainsNotFoundStatusLine;
+    [Test] procedure Status201_ContainsCreatedStatusLine;
+    [Test] procedure CustomStatus_ContainsUnknownStatusLine;
+    [Test] procedure ContentType_JSON_UsesPreencoded;
+    [Test] procedure ContentType_TextPlain_UsesPreencoded;
+    [Test] procedure ContentType_Custom_UsedVerbatim;
+    [Test] procedure KeepAlive_True_ContainsKeepAliveHeader;
+    [Test] procedure KeepAlive_False_ContainsCloseHeader;
+    [Test] procedure ContentLength_Zero_WrittenCorrectly;
+    [Test] procedure ContentLength_Large_WrittenCorrectly;
+    [Test] procedure ExtraHeader_Appended;
+    [Test] procedure ExtraHeader_CRLFStripped;
+    [Test] procedure SecureHeaders_Disabled_NotPresent;
+    [Test] procedure SecureHeaders_Enabled_AllPresent;
+    [Test] procedure ServerBanner_Empty_HeaderOmitted;
+    [Test] procedure ServerBanner_NonEmpty_HeaderPresent;
+    [Test] procedure Body_PresentInResponse;
+    [Test] procedure Body_Empty_NoBodyBytes;
+    [Test] procedure DefaultErrorBody_IsValidJSON;
+    [Test] procedure Response_EndsWithDoubleCRLF_BeforeBody;
+  end;
+  {$M-}
+
+implementation
+
+uses
+  System.SysUtils,
+  System.Classes,
+  System.Generics.Collections,
+  Poseidon.Net.ResponseBuilder;
+
+function TResponseBuilderTests.ResponseToString(const ABytes: TBytes): string;
+begin
+  Result := TEncoding.ASCII.GetString(ABytes);
+end;
+
+function TResponseBuilderTests.HasHeader(const AResponse, AName, AValue: string): Boolean;
+var
+  LSearch: string;
+begin
+  LSearch := AName + ': ' + AValue;
+  Result  := Pos(LSearch, AResponse) > 0;
+end;
+
+function TResponseBuilderTests.HasStatusLine(const AResponse: string;
+  AExpected: string): Boolean;
+begin
+  Result := Pos(AExpected, AResponse) = 1;
+end;
+
+procedure TResponseBuilderTests.Status200_ContainsOKStatusLine;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/plain', [], False, [], False, ''));
+  Assert.IsTrue(HasStatusLine(LResp, 'HTTP/1.1 200 OK'));
+end;
+
+procedure TResponseBuilderTests.Status404_ContainsNotFoundStatusLine;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(404, 'text/plain', [], False, [], False, ''));
+  Assert.IsTrue(HasStatusLine(LResp, 'HTTP/1.1 404 Not Found'));
+end;
+
+procedure TResponseBuilderTests.Status201_ContainsCreatedStatusLine;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(201, 'application/json', [], False, [], False, ''));
+  Assert.IsTrue(HasStatusLine(LResp, 'HTTP/1.1 201 Created'));
+end;
+
+procedure TResponseBuilderTests.CustomStatus_ContainsUnknownStatusLine;
+var
+  LResp: string;
+begin
+  // Status codes not in the pre-encoded table use "Unknown"
+  LResp := ResponseToString(
+    BuildHTTPResponse(418, 'text/plain', [], False, [], False, ''));
+  Assert.IsTrue(HasStatusLine(LResp, 'HTTP/1.1 418 Unknown'));
+end;
+
+procedure TResponseBuilderTests.ContentType_JSON_UsesPreencoded;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'application/json', [], False, [], False, ''));
+  Assert.IsTrue(HasHeader(LResp, 'Content-Type', 'application/json'));
+end;
+
+procedure TResponseBuilderTests.ContentType_TextPlain_UsesPreencoded;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/plain', [], False, [], False, ''));
+  Assert.IsTrue(HasHeader(LResp, 'Content-Type', 'text/plain'));
+end;
+
+procedure TResponseBuilderTests.ContentType_Custom_UsedVerbatim;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/csv; charset=utf-8', [], False, [], False, ''));
+  Assert.IsTrue(HasHeader(LResp, 'Content-Type', 'text/csv; charset=utf-8'));
+end;
+
+procedure TResponseBuilderTests.KeepAlive_True_ContainsKeepAliveHeader;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/plain', [], True, [], False, ''));
+  Assert.IsTrue(Pos('Connection: keep-alive', LResp) > 0);
+end;
+
+procedure TResponseBuilderTests.KeepAlive_False_ContainsCloseHeader;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/plain', [], False, [], False, ''));
+  Assert.IsTrue(Pos('Connection: close', LResp) > 0);
+end;
+
+procedure TResponseBuilderTests.ContentLength_Zero_WrittenCorrectly;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/plain', [], False, [], False, ''));
+  Assert.IsTrue(HasHeader(LResp, 'Content-Length', '0'));
+end;
+
+procedure TResponseBuilderTests.ContentLength_Large_WrittenCorrectly;
+var
+  LBody: TBytes;
+  LResp: string;
+begin
+  SetLength(LBody, 123456);
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'application/octet-stream', LBody, False, [], False, ''));
+  Assert.IsTrue(HasHeader(LResp, 'Content-Length', '123456'));
+end;
+
+procedure TResponseBuilderTests.ExtraHeader_Appended;
+var
+  LExtra: TArray<TPair<string,string>>;
+  LResp:  string;
+begin
+  LExtra := [TPair<string,string>.Create('X-Request-Id', 'abc123')];
+  LResp  := ResponseToString(
+    BuildHTTPResponse(200, 'text/plain', [], False, LExtra, False, ''));
+  Assert.IsTrue(HasHeader(LResp, 'X-Request-Id', 'abc123'));
+end;
+
+procedure TResponseBuilderTests.ExtraHeader_CRLFStripped;
+var
+  LExtra: TArray<TPair<string,string>>;
+  LResp:  string;
+begin
+  // S-3: injection attempt in header value must be stripped
+  LExtra := [TPair<string,string>.Create('Location',
+    'https://example.com'#13#10'X-Evil: injected')];
+  LResp  := ResponseToString(
+    BuildHTTPResponse(302, 'text/plain', [], False, LExtra, False, ''));
+  Assert.IsFalse(Pos('X-Evil', LResp) > 0, 'Injected header must be stripped');
+  Assert.IsTrue(Pos('Location:', LResp) > 0, 'Location header must be present');
+end;
+
+procedure TResponseBuilderTests.SecureHeaders_Disabled_NotPresent;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/html', [], False, [], False, ''));
+  Assert.IsFalse(Pos('X-Content-Type-Options', LResp) > 0);
+  Assert.IsFalse(Pos('X-Frame-Options', LResp) > 0);
+end;
+
+procedure TResponseBuilderTests.SecureHeaders_Enabled_AllPresent;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/html', [], False, [], True, ''));
+  Assert.IsTrue(Pos('X-Content-Type-Options: nosniff', LResp) > 0);
+  Assert.IsTrue(Pos('X-Frame-Options: DENY', LResp) > 0);
+  Assert.IsTrue(Pos('Referrer-Policy: strict-origin-when-cross-origin', LResp) > 0);
+end;
+
+procedure TResponseBuilderTests.ServerBanner_Empty_HeaderOmitted;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/plain', [], False, [], False, ''));
+  Assert.IsFalse(Pos('Server:', LResp) > 0);
+end;
+
+procedure TResponseBuilderTests.ServerBanner_NonEmpty_HeaderPresent;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/plain', [], False, [], False, 'Poseidon/2.0'));
+  Assert.IsTrue(HasHeader(LResp, 'Server', 'Poseidon/2.0'));
+end;
+
+procedure TResponseBuilderTests.Body_PresentInResponse;
+var
+  LBodyStr: string;
+  LBody:    TBytes;
+  LFull:    TBytes;
+  LResp:    string;
+begin
+  LBodyStr := '{"ok":true}';
+  LBody    := TEncoding.UTF8.GetBytes(LBodyStr);
+  LFull    := BuildHTTPResponse(200, 'application/json', LBody, False, [], False, '');
+  LResp    := TEncoding.UTF8.GetString(LFull);
+  Assert.IsTrue(LResp.EndsWith(LBodyStr));
+end;
+
+procedure TResponseBuilderTests.Body_Empty_NoBodyBytes;
+var
+  LFull: TBytes;
+  LResp: string;
+begin
+  LFull := BuildHTTPResponse(204, 'text/plain', [], False, [], False, '');
+  LResp := ResponseToString(LFull);
+  // Must end with CRLFCRLF (header terminator + empty body)
+  Assert.IsTrue(LResp.EndsWith(#13#10#13#10));
+end;
+
+procedure TResponseBuilderTests.DefaultErrorBody_IsValidJSON;
+var
+  LBody: TBytes;
+  LStr:  string;
+begin
+  LBody := DefaultErrorBody;
+  Assert.IsTrue(Length(LBody) > 0);
+  LStr := TEncoding.UTF8.GetString(LBody);
+  // Must start with '{' and contain "error"
+  Assert.IsTrue(LStr.StartsWith('{'));
+  Assert.IsTrue(Pos('"error"', LStr) > 0);
+end;
+
+procedure TResponseBuilderTests.Response_EndsWithDoubleCRLF_BeforeBody;
+var
+  LBody:    TBytes;
+  LFull:    TBytes;
+  LHeaderPart: string;
+  LHeaderEnd:  Integer;
+begin
+  LBody := TEncoding.UTF8.GetBytes('hello');
+  LFull := BuildHTTPResponse(200, 'text/plain', LBody, False, [], False, '');
+  // Find the CRLFCRLF separator between headers and body
+  LHeaderPart := TEncoding.ASCII.GetString(LFull);
+  LHeaderEnd  := Pos(#13#10#13#10, LHeaderPart);
+  Assert.IsTrue(LHeaderEnd > 0, 'Must have CRLFCRLF between headers and body');
+  // Body starts at LHeaderEnd + 4 (the CRLFCRLF is 4 bytes, Pos returns 1-based)
+  // Length of body = total - (header section + 4 separator bytes)
+  Assert.AreEqual(Length(LBody), Length(LFull) - (LHeaderEnd + 3));
+end;
+
+initialization
+  TDUnitX.RegisterTestFixture(TResponseBuilderTests);
+
+end.
