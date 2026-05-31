@@ -10,6 +10,9 @@ interface
 
 uses
   System.SysUtils,
+{$IFDEF MSWINDOWS}
+  Winapi.Winsock2,
+{$ENDIF}
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.HTTP2,
   Poseidon.Net.WebSocket;
@@ -45,19 +48,21 @@ type
     PendingSendActual: Integer; // P-4: bytes to send; 0 = use Length(PendingSend)
     SentBytes:         Integer;
 {$ENDIF}
-    constructor Create(
-{$IFDEF MSWINDOWS}ASocket: TSocket{$ELSE}ASocket: Integer{$ENDIF};
-      const AAddr: string);
+    // R-1: ASocket is NativeUInt so callers need no {$IFDEF} for socket type.
+    // Internally cast to TSocket (Windows) or Integer (Linux).
+    constructor Create(ASocket: NativeUInt; const AAddr: string);
     destructor Destroy; override;
   end;
 
 implementation
 
-constructor TNativeConn.Create(
-{$IFDEF MSWINDOWS}ASocket: TSocket{$ELSE}ASocket: Integer{$ENDIF};
-  const AAddr: string);
+constructor TNativeConn.Create(ASocket: NativeUInt; const AAddr: string);
 begin
-  Socket       := ASocket;
+{$IFDEF MSWINDOWS}
+  Socket       := TSocket(ASocket);
+{$ELSE}
+  Socket       := Integer(ASocket);
+{$ENDIF}
   RemoteAddr   := AAddr;
   AccumBuf     := TBufferPool.Acquire;  // pooled 8 KB
   AccumLen     := 0;

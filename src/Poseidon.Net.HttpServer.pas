@@ -1,4 +1,4 @@
-﻿unit Poseidon.Net.HttpServer;
+unit Poseidon.Net.HttpServer;
 
 // Native HTTP/1.1 server.
 // Windows: IOCP — WSARecv + single WSASend per response.
@@ -27,7 +27,8 @@ uses
   Poseidon.Net.WebSocket,
   Poseidon.Net.HTTP2,
   Poseidon.Net.Metrics,
-  Poseidon.Net.ProxyProtocol;
+  Poseidon.Net.ProxyProtocol,
+  Poseidon.Net.IO;
 
 type
   // R-5: TPoseidonNativeServer implements IDispatchCallbacks (non-ref-counted).
@@ -39,9 +40,6 @@ type
   private
     FOnRequest:       TOnNativeRequest;
     FActive:          Boolean;
-    FListenSocket:    NativeUInt;
-    FAcceptThread:    TThread;
-    FWorkers:         TArray<TThread>;
     FConnLock:        TCriticalSection;
     FConnList:        TList;
     FInFlightCount:   Int64;
@@ -85,25 +83,20 @@ type
     FRateBuckets:       TDictionary<string, Int64>; // IP → packed (count|window)
     FRateGlobalCount:   Int64;     // global req count in current window
     FRateGlobalWindow:  Int64;     // current global window (tick64 div 1000)
-{$IFDEF MSWINDOWS}
-    FIocp:          THandle;
-{$ELSE}
-    FEpollFd:       Integer;
-    FShutdownPipe:  array[0..1] of Integer;
-{$ENDIF}
+    // R-1: platform IO backend — holds IOCP/epoll fd, listen socket, workers.
+    FIOBackend:       IIOBackend;
+    // R-5: protocol dispatcher
+    FDispatcher:      TProtocolDispatcher;
 
-    procedure _Accept;
     procedure _OnNewSocket(ASocket: NativeUInt; const ARemoteAddr: string);
     procedure _PostRecv(AConn: Pointer);
     procedure _PostSend(AConn: Pointer; const AResponse: TBytes;
       AActualLen: Integer = 0);
     procedure _CloseConn(AConn: Pointer);
-    procedure _WorkerLoop;
     procedure _ProcessRecv(AConn: Pointer; const ABuf: PByte; ALen: Cardinal);
     procedure _ProcessRecvSSL(AConn: Pointer; const ABuf: PByte; ALen: Cardinal;
       out AAborted: Boolean);
     procedure _ProcessRecvPlain(AConn: Pointer; const ABuf: PByte; ALen: Cardinal);
-    FDispatcher: TProtocolDispatcher;  // R-5: protocol dispatch strategy
 
     procedure _DispatchAccumBuf(AConn: Pointer);  // thin shim — builds TDispatchConfig + calls FDispatcher
     function  _TryParseRequest(AConn: Pointer;
@@ -129,10 +122,6 @@ type
     procedure _Log(ALevel: TLogLevel; const AMessage: string);
     // Returns True when the request should proceed; False = rate-limited.
     function  _CheckRateLimit(const ARemoteAddr: string): Boolean;
-{$IFNDEF MSWINDOWS}
-    procedure _DoRecv(AConn: Pointer);
-    procedure _FlushSend(AConn: Pointer);
-{$ENDIF}
   public
     constructor Create;
     destructor  Destroy; override;
@@ -245,11 +234,11 @@ type
 
 implementation
 
+// R-1: platform-specific IO backend (IOCP on Windows, epoll on Linux).
+// This is the only {$IFDEF} remaining in HttpServer — used solely to select the backend.
 {$IFDEF MSWINDOWS}
 uses
-  Winapi.Windows,
-  Winapi.Winsock2,
-  Poseidon.Net.Connection,
+  Poseidon.Net.IO.IOCP,
   Poseidon.Net.SSL,
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.Security,
@@ -257,13 +246,7 @@ uses
   Poseidon.Net.HTTP1.Parser;
 {$ELSE}
 uses
-  Posix.SysSocket,
-  Posix.NetinetIn,
-  Posix.NetinetTcp,
-  Posix.ArpaInet,
-  Posix.Unistd,
-  Posix.Errno,
-  Poseidon.Net.Connection,
+  Poseidon.Net.IO.Epoll,
   Poseidon.Net.SSL,
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.Security,
@@ -515,6 +498,63 @@ procedure TServerDispatchAdapter.RecordRequest(AStatus: Integer;
 begin
   if Assigned(FServer.FMetrics) then
     FServer.FMetrics.RecordRequest(AStatus, ADurationMs, ARxBytes, ATxBytes);
+end;
+
+// ===========================================================================
+// R-1: TServerIOAdapter — IIOCallbacks bridge from IO backend to server
+// ===========================================================================
+
+type
+  TServerIOAdapter = class(TInterfacedObject, IIOCallbacks)
+  private
+    FServer: TPoseidonNativeServer;
+  public
+    constructor Create(AServer: TPoseidonNativeServer);
+    procedure OnNewConn(ASocket: NativeUInt; const AAddr: string);
+    procedure OnRecv(AConn: Pointer; const ABuf: PByte; ALen: Cardinal);
+    procedure OnSendComplete(AConn: Pointer);
+    procedure OnConnError(AConn: Pointer);
+  end;
+
+constructor TServerIOAdapter.Create(AServer: TPoseidonNativeServer);
+begin
+  inherited Create;
+  FServer := AServer;
+end;
+
+procedure TServerIOAdapter.OnNewConn(ASocket: NativeUInt; const AAddr: string);
+begin
+  FServer._OnNewSocket(ASocket, AAddr);
+end;
+
+procedure TServerIOAdapter.OnRecv(AConn: Pointer; const ABuf: PByte;
+  ALen: Cardinal);
+begin
+  FServer._ProcessRecv(AConn, ABuf, ALen);
+end;
+
+procedure TServerIOAdapter.OnSendComplete(AConn: Pointer);
+var
+  LConn: TNativeConn absolute AConn;
+begin
+  // During TLS handshake: keep alive regardless of KeepAlive flag —
+  // we need to re-arm recv for the next handshake message.
+  if (LConn.SSLHandle <> nil) and not LConn.SSLHandshook then
+    FServer._PostRecv(AConn)
+  else if LConn.KeepAlive then
+  begin
+    if LConn.AccumLen > 0 then
+      FServer._ProcessRecv(AConn, nil, 0)  // pipelined request in AccumBuf
+    else
+      FServer._PostRecv(AConn);
+  end
+  else
+    FServer._CloseConn(AConn);
+end;
+
+procedure TServerIOAdapter.OnConnError(AConn: Pointer);
+begin
+  FServer._CloseConn(AConn);
 end;
 
 // ===========================================================================
@@ -944,6 +984,12 @@ begin
   FWSLock                  := TCriticalSection.Create;
   // R-5: create the protocol dispatcher with a server-backed adapter
   FDispatcher              := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self));
+  // R-1: create platform IO backend — ONLY {$IFDEF} remaining in HttpServer
+{$IFDEF MSWINDOWS}
+  FIOBackend               := TIOCPBackend.Create;
+{$ELSE}
+  FIOBackend               := TEpollBackend.Create;
+{$ENDIF}
 end;
 
 destructor TPoseidonNativeServer.Destroy;
@@ -1269,144 +1315,38 @@ begin
       LConn := TNativeConn(LSnap[I]);
       LIdle := MilliSecondsBetween(LNow, LConn.LastActivity);
       if LIdle > FIdleTimeoutMs then
-{$IFDEF MSWINDOWS}
-        shutdown(LConn.Socket, SD_BOTH);
-{$ELSE}
-        shutdown(LConn.Socket, SHUT_RDWR);
-{$ENDIF}
+        FIOBackend.ShutdownConn(LSnap[I]);
     end;
   end;
 end;
 
 // ===========================================================================
-// Windows — IOCP implementation
+// R-1: Platform-agnostic Listen / Stop / _OnNewSocket / _PostRecv / _PostSend
+//      / _CloseConn — all IO operations delegated to FIOBackend.
 // ===========================================================================
-
-{$IFDEF MSWINDOWS}
-
-function _IocpCreate(FileH, Existing: THandle; Key: NativeUInt;
-  Threads: DWORD): THandle; stdcall;
-  external 'kernel32.dll' name 'CreateIoCompletionPort';
-
-function _IocpGet(Port: THandle; pBytes: PDWORD; pKey: PNativeUInt;
-  pOvl: PPointer; Ms: DWORD): BOOL; stdcall;
-  external 'kernel32.dll' name 'GetQueuedCompletionStatus';
-
-function _IocpPost(Port: THandle; Bytes: DWORD; Key: NativeUInt;
-  pOvl: Pointer): BOOL; stdcall;
-  external 'kernel32.dll' name 'PostQueuedCompletionStatus';
-
-function _WsaBind(s: TSocket; addr: PSockAddrIn; addrlen: Integer): Integer; stdcall;
-  external 'ws2_32.dll' name 'bind';
-
-function _WsaAccept(s: TSocket; addr: PSockAddrIn; addrlen: PInteger): TSocket; stdcall;
-  external 'ws2_32.dll' name 'accept';
-
-function _WsaListen(s: TSocket; backlog: Integer): Integer; stdcall;
-  external 'ws2_32.dll' name 'listen';
-
-type
-  TIocpAction = (iaRecv, iaSend);
-
-  PRecvCtx = ^TRecvCtx;
-  TRecvCtx = record
-    Ovl:    TOverlapped;            // MUST be first
-    Action: TIocpAction;
-    Conn:   Pointer;
-    WsaBuf: TWsaBuf;
-    Data:   array[0..RECV_BUF_SIZE - 1] of Byte;
-  end;
-
-  PSendCtx = ^TSendCtx;
-  TSendCtx = record
-    Ovl:       TOverlapped;         // MUST be first
-    Action:    TIocpAction;
-    Conn:      Pointer;
-    WsaBuf:    TWsaBuf;
-    SendBuf:   TBytes;
-    ActualLen: Integer;             // P-4: bytes to send; 0 = use Length(SendBuf)
-  end;
-
-  PIocpHdr = ^TIocpHdr;
-  TIocpHdr = record
-    Ovl:    TOverlapped;
-    Action: TIocpAction;
-    Conn:   Pointer;
-  end;
-
-// Note: an attempted pool of PRecvCtx/PSendCtx (W9) measured WORSE than
-// AllocMem/New under load — a single TMonitor across 8 workers @ 30k+ ops/s
-// becomes a hotter contention point than the FastMM allocator. Kept the
-// allocator path; a per-worker (thread-local) pool would be the next
-// experiment if pursued.
 
 procedure TPoseidonNativeServer.Listen(const AHost: string; APort: Integer;
   AOnRequest: TOnNativeRequest; AOnListen: TProc);
 var
-  LAddr:       TSockAddrIn;
-  LOne:        Integer;
-  LWorkers, I: Integer;
+  LWorkers: Integer;
 begin
   if FActive then
     raise Exception.Create('TPoseidonNativeServer: already listening');
-
-  var LWsaData: TWSAData;
-  if WSAStartup($0202, LWsaData) <> 0 then
-    raise Exception.Create('WSAStartup failed');
 
   FOnRequest := AOnRequest;
   FActive    := True;
   FConnLock  := TCriticalSection.Create;
   FConnList  := TList.Create;
 
-  FIocp := _IocpCreate(INVALID_HANDLE_VALUE, 0, 0, 0);
-  if FIocp = 0 then RaiseLastOSError;
-
-  FListenSocket := WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nil, 0,
-    WSA_FLAG_OVERLAPPED);
-  if FListenSocket = INVALID_SOCKET then RaiseLastOSError;
-
-  LOne := 1;
-  setsockopt(FListenSocket, SOL_SOCKET, SO_REUSEADDR,
-    PAnsiChar(@LOne), SizeOf(LOne));
-
-  // TCP_FASTOPEN (RFC 7413) — opt-in; Windows 10 1607+, value = 1 to enable
-  if FTCPFastOpen then
-    setsockopt(FListenSocket, IPPROTO_TCP, 15 {TCP_FASTOPEN},
-      PAnsiChar(@LOne), SizeOf(LOne));
-  // Failure is silently ignored: older Windows versions return WSAENOPROTOOPT
-
-  FillChar(LAddr, SizeOf(LAddr), 0);
-  LAddr.sin_family := AF_INET;
-  LAddr.sin_port   := htons(APort);
-  if (AHost = '0.0.0.0') or (AHost = '') then
-    LAddr.sin_addr.S_addr := INADDR_ANY
-  else
-    LAddr.sin_addr.S_addr := inet_addr(PAnsiChar(AnsiString(AHost)));
-
-  if _WsaBind(FListenSocket, @LAddr, SizeOf(LAddr)) = SOCKET_ERROR then
-    RaiseLastOSError;
-  if _WsaListen(FListenSocket, SOMAXCONN) = SOCKET_ERROR then
-    RaiseLastOSError;
-
-  // W14: tested ProcessorCount × 1 vs × 2 empirically. ×2 wins by ~50% at
-  // c=100 — extra workers absorb IOCP wait time while others process.
+  // W14: ProcessorCount×2 wins ~50% at c=100 — extra workers absorb wait time.
+  // Cap at WORKER_COUNT_MAX to avoid stack waste on high-core machines.
   if FWorkerCount > 0 then
     LWorkers := FWorkerCount
   else
     LWorkers := Min(Max(WORKER_COUNT_MIN, TThread.ProcessorCount * 2), WORKER_COUNT_MAX);
-  SetLength(FWorkers, LWorkers);
-  for I := 0 to LWorkers - 1 do
-    FWorkers[I] := TThread.CreateAnonymousThread(procedure begin _WorkerLoop; end);
-  for I := 0 to LWorkers - 1 do
-  begin
-    FWorkers[I].FreeOnTerminate := False;
-    FWorkers[I].Start;
-  end;
 
-  FAcceptThread := TThread.CreateAnonymousThread(procedure begin _Accept; end);
-  FAcceptThread.FreeOnTerminate := False;
-  FAcceptThread.Start;
+  FIOBackend.StartListening(AHost, APort, LWorkers, FTCPFastOpen,
+    TServerIOAdapter.Create(Self));
 
   if FMetricsEnabled then
     FMetrics := TPoseidonMetrics.Create;
@@ -1426,15 +1366,12 @@ procedure TPoseidonNativeServer.Stop;
 var
   I:     Integer;
   LConn: TNativeConn;
+  LSnap: TArray<Pointer>;
 begin
   if not FActive then Exit;
   FActive := False;
 
-  closesocket(FListenSocket);
-  FListenSocket := INVALID_SOCKET;
-
-  FAcceptThread.WaitFor;
-  FreeAndNil(FAcceptThread);
+  FIOBackend.StopAccept;
 
   if FIdleSweepThread <> nil then
   begin
@@ -1443,15 +1380,17 @@ begin
   end;
 
   // Force every client socket into error state — pending recv/send will
-  // complete with WSAESHUTDOWN, workers call _CloseConn naturally and remove
+  // complete with an error; workers call _CloseConn naturally and remove
   // the conn from FConnList. Drain then waits for that to happen.
   FConnLock.Enter;
   try
-    for I := 0 to FConnList.Count - 1 do
-      shutdown(TNativeConn(FConnList[I]).Socket, SD_BOTH);
+    SetLength(LSnap, FConnList.Count);
+    for I := 0 to FConnList.Count - 1 do LSnap[I] := FConnList[I];
   finally
     FConnLock.Leave;
   end;
+  for I := 0 to High(LSnap) do
+    FIOBackend.ShutdownConn(LSnap[I]);
 
   // R-1: event-driven drain — no polling; FDrainEvent fires from each _CloseConn
   FDrainEvent.ResetEvent;
@@ -1472,70 +1411,28 @@ begin
         LConn.SSLReadBio  := nil;
         LConn.SSLWriteBio := nil;
       end;
-      closesocket(LConn.Socket);
+      FIOBackend.SocketClose(LConn);
       LConn.Free;
     end;
   finally
     FConnLock.Leave;
   end;
 
-  for I := 0 to High(FWorkers) do
-    _IocpPost(FIocp, 0, 0, nil);
-  for I := 0 to High(FWorkers) do
-  begin
-    FWorkers[I].WaitFor;
-    FWorkers[I].Free;
-  end;
-  SetLength(FWorkers, 0);
+  FIOBackend.SignalWorkers;
+  FIOBackend.JoinWorkers;
 
-  CloseHandle(FIocp);
-  FIocp := 0;
   FreeAndNil(FConnList);
   FreeAndNil(FConnLock);
-  WSACleanup;
-end;
-
-procedure TPoseidonNativeServer._Accept;
-var
-  LClient:   TSocket;
-  LAddr:     TSockAddrIn;
-  LAddrLen:  Integer;
-  LRemoteIP: AnsiString;
-begin
-  while FActive do
-  begin
-    FillChar(LAddr, SizeOf(LAddr), 0);
-    LAddrLen := SizeOf(LAddr);
-    LClient := _WsaAccept(FListenSocket, @LAddr, @LAddrLen);
-    if LClient = INVALID_SOCKET then Break;
-    LRemoteIP := inet_ntoa(LAddr.sin_addr);
-    try
-      _OnNewSocket(LClient,
-        string(LRemoteIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
-    except
-      closesocket(LClient);
-    end;
-  end;
 end;
 
 procedure TPoseidonNativeServer._OnNewSocket(ASocket: NativeUInt;
   const ARemoteAddr: string);
+// Called by TServerIOAdapter.OnNewConn (which is invoked by the IO backend's
+// accept thread). At this point TCP_NODELAY + SO_KEEPALIVE are already set.
 var
-  LOne:  Integer;
   LConn: TNativeConn;
 begin
-  LOne := 1;
-  setsockopt(TSocket(ASocket), IPPROTO_TCP, TCP_NODELAY,
-    PAnsiChar(@LOne), SizeOf(LOne));
-  setsockopt(TSocket(ASocket), SOL_SOCKET, SO_KEEPALIVE,
-    PAnsiChar(@LOne), SizeOf(LOne));
-
-  if _IocpCreate(THandle(ASocket), FIocp, 0, 0) = 0 then
-  begin
-    closesocket(TSocket(ASocket));
-    Exit;
-  end;
-  LConn := TNativeConn.Create(TSocket(ASocket), ARemoteAddr);
+  LConn := TNativeConn.Create(ASocket, ARemoteAddr);
   if FSSLEnabled then
   begin
     try
@@ -1543,8 +1440,8 @@ begin
       TPoseidonSSL.Setup_Server(LConn.SSLHandle,
         LConn.SSLReadBio, LConn.SSLWriteBio);
     except
+      FIOBackend.SocketClose(LConn);  // epoll DEL silently fails (ENOENT) — harmless
       LConn.Free;
-      closesocket(TSocket(ASocket));
       Exit;
     end;
   end;
@@ -1552,80 +1449,37 @@ begin
   if not _AdmitAndRegister(LConn) then
   begin
     if LConn.SSLHandle <> nil then TPoseidonSSL.Free_SSL(LConn.SSLHandle);
+    FIOBackend.SocketClose(LConn);
     LConn.Free;
-    closesocket(TSocket(ASocket));
     Exit;
   end;
   if Assigned(FMetrics) then FMetrics.AdjustConnections(1);
-  _PostRecv(LConn);
+  try
+    FIOBackend.RegisterConn(LConn);
+  except
+    // RegisterConn failure (e.g. IOCP associate) — undo admission and close
+    FConnLock.Enter;
+    try
+      FConnList.Remove(LConn);
+      _UnregisterIP(LConn.RemoteAddr);
+    finally
+      FConnLock.Leave;
+    end;
+    if Assigned(FMetrics) then FMetrics.AdjustConnections(-1);
+    if LConn.SSLHandle <> nil then TPoseidonSSL.Free_SSL(LConn.SSLHandle);
+    LConn.Free;
+  end;
 end;
 
 procedure TPoseidonNativeServer._PostRecv(AConn: Pointer);
-var
-  LConn:  TNativeConn absolute AConn;
-  LCtx:   PRecvCtx;
-  LFlags: DWORD;
-  LBytes: DWORD;
-  LRes:   Integer;
 begin
-  LCtx := AllocMem(SizeOf(TRecvCtx));        // W9 reverted: FastMM is fast enough
-  LCtx^.Action     := iaRecv;
-  LCtx^.Conn       := AConn;
-  LCtx^.WsaBuf.len := RECV_BUF_SIZE;
-  LCtx^.WsaBuf.buf := @LCtx^.Data[0];
-  LFlags := 0;
-  LBytes := 0;
-
-  LRes := WSARecv(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, LFlags,
-    PWSAOverlapped(@LCtx^.Ovl), nil);
-
-  if (LRes = SOCKET_ERROR) and (WSAGetLastError <> WSA_IO_PENDING) then
-  begin
-    FreeMem(LCtx);
-    _CloseConn(AConn);
-  end;
+  FIOBackend.PostRecv(AConn);
 end;
 
 procedure TPoseidonNativeServer._PostSend(AConn: Pointer; const AResponse: TBytes;
   AActualLen: Integer = 0);
-var
-  LConn:    TNativeConn absolute AConn;
-  LCtx:     PSendCtx;
-  LBytes:   DWORD;
-  LRes:     Integer;
-  LSendLen: Integer;
 begin
-  // P-4: AActualLen > 0 when AResponse is a pool buffer larger than the response.
-  LSendLen := AActualLen;
-  if LSendLen = 0 then LSendLen := Length(AResponse);
-
-  if LSendLen = 0 then
-  begin
-    if LConn.KeepAlive then _PostRecv(AConn)
-    else _CloseConn(AConn);
-    Exit;
-  end;
-
-  New(LCtx);
-  FillChar(LCtx^.Ovl, SizeOf(TOverlapped), 0);  // Ovl.hEvent must be 0 for IOCP
-  LCtx^.Action     := iaSend;
-  LCtx^.Conn       := AConn;
-  LCtx^.SendBuf    := AResponse;
-  LCtx^.ActualLen  := AActualLen;
-  LCtx^.WsaBuf.len := ULONG(LSendLen);
-  LCtx^.WsaBuf.buf := @LCtx^.SendBuf[0];
-  LBytes := 0;
-
-  LRes := WSASend(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, 0,
-    PWSAOverlapped(@LCtx^.Ovl), nil);
-
-  if (LRes = SOCKET_ERROR) and (WSAGetLastError <> WSA_IO_PENDING) then
-  begin
-    // P-4: return pool buffer before disposing context
-    TBufferPool.Release(LCtx^.SendBuf);
-    Dispose(LCtx);
-    _CloseConn(AConn);
-  end;
+  FIOBackend.PostSend(AConn, AResponse, AActualLen);
 end;
 
 procedure TPoseidonNativeServer._CloseConn(AConn: Pointer);
@@ -1660,631 +1514,12 @@ begin
     LConn.SSLReadBio  := nil;
     LConn.SSLWriteBio := nil;
   end;
-  // R-6: TCP half-close — FIN before RST so the client receives the last bytes
-  shutdown(LConn.Socket, SD_SEND);
-  closesocket(LConn.Socket);
+  FIOBackend.SocketClose(LConn);  // platform-specific: epoll DEL + shutdown + close
   LConn.Free;
   // R-1: wake the drain event so Stop() can proceed without polling
   if Assigned(FDrainEvent) then FDrainEvent.SetEvent;
 end;
 
-procedure TPoseidonNativeServer._WorkerLoop;
-var
-  LBytes: DWORD;
-  LKey:   NativeUInt;
-  LOvl:   Pointer;
-  LHdr:   PIocpHdr;
-  LConn:  TNativeConn;
-  LOK:    BOOL;
-begin
-  while True do
-  begin
-    LOvl   := nil;
-    LBytes := 0;
-    LKey   := 0;
-    LOK    := _IocpGet(FIocp, @LBytes, @LKey, @LOvl, INFINITE);
 
-    if LOvl = nil then Break;  // shutdown pill
-
-    try
-      LHdr  := PIocpHdr(LOvl);
-      LConn := TNativeConn(LHdr^.Conn);
-
-      if (not LOK) or (LBytes = 0) then
-      begin
-        case LHdr^.Action of
-          iaRecv: FreeMem(PRecvCtx(LOvl));
-          iaSend:
-          begin
-            // P-4: return pool buffer (no-op for non-pool buffers)
-            TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
-            Dispose(PSendCtx(LOvl));
-          end;
-        end;
-        _CloseConn(LConn);
-        Continue;
-      end;
-
-      case LHdr^.Action of
-        iaRecv:
-        begin
-          _ProcessRecv(LConn, @PRecvCtx(LOvl)^.Data[0], LBytes);
-          FreeMem(PRecvCtx(LOvl));
-        end;
-        iaSend:
-        begin
-          // P-4: return pool buffer (no-op for non-pool buffers)
-          TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
-          Dispose(PSendCtx(LOvl));
-          // During TLS handshake we keep the connection alive regardless of
-          // HTTP KeepAlive — re-arm recv for the next handshake message.
-          if (LConn.SSLHandle <> nil) and not LConn.SSLHandshook then
-            _PostRecv(LConn)
-          else if LConn.KeepAlive then
-          begin
-            if LConn.AccumLen > 0 then
-              _ProcessRecv(LConn, nil, 0)
-            else
-              _PostRecv(LConn);
-          end
-          else _CloseConn(LConn);
-        end;
-      end;
-    except
-      on E: Exception do
-        _Log(llError, '[iocp] WORKER_EX [' + E.ClassName + ']: ' + E.Message);
-    end;
-  end;
-end;
-
-// ===========================================================================
-// Linux — epoll implementation
-// ===========================================================================
-
-{$ELSE}
-
-const
-  MAX_EVENTS   = 256;  // was 64 — batch maior reduz syscalls epoll_wait sob 100+ conns
-  // epoll(7) event flags
-  EPOLLIN      = $00000001;
-  EPOLLOUT     = $00000004;
-  EPOLLERR     = $00000008;
-  EPOLLHUP     = $00000010;
-  EPOLLONESHOT = Integer($40000000);
-  // epoll_ctl operations
-  EPOLL_CTL_ADD = 1;
-  EPOLL_CTL_DEL = 2;
-  EPOLL_CTL_MOD = 3;
-  // epoll_create1 flags
-  EPOLL_CLOEXEC  = $80000;
-  // setsockopt — SO_REUSEPORT (Linux 3.9+): kernel distribui accepts entre workers
-  SO_REUSEPORT   = 15;
-
-type
-  // Union: ptr/fd/u32/u64 — largest field is Pointer (8 bytes on 64-bit).
-  epoll_data_t = record
-    case Integer of
-      0: (ptr: Pointer);
-      1: (fd:  Integer);
-      2: (u32: UInt32);
-      3: (u64: UInt64);
-  end;
-  // Packed to match Linux ABI: 4 bytes events + 8 bytes data = 12 bytes.
-  epoll_event = packed record
-    events: UInt32;
-    data:   epoll_data_t;
-  end;
-
-function epoll_create1(flags: Integer): Integer; cdecl;
-  external 'c' name 'epoll_create1';
-function epoll_ctl(epfd, op, fd: Integer; event: Pointer): Integer; cdecl;
-  external 'c' name 'epoll_ctl';
-function epoll_wait(epfd: Integer; events: Pointer; maxevents, timeout: Integer): Integer; cdecl;
-  external 'c' name 'epoll_wait';
-
-// accept4, pipe, read, write, close — declared explicitly to avoid conflicts
-// with Pascal built-in identifiers and Delphi RTL renames.
-function _LinuxAccept4(sockfd: Integer; addr: Pointer; addrlen: Pointer;
-  flags: Integer): Integer; cdecl; external 'c' name 'accept4';
-function _LinuxPipe(pipefd: PInteger): Integer; cdecl;
-  external 'c' name 'pipe';
-function _LinuxRead(fd: Integer; buf: Pointer; count: NativeUInt): NativeInt; cdecl;
-  external 'c' name 'read';
-function _LinuxWrite(fd: Integer; buf: Pointer; count: NativeUInt): NativeInt; cdecl;
-  external 'c' name 'write';
-function _LinuxClose(fd: Integer): Integer; cdecl;
-  external 'c' name 'close';
-
-// Socket functions — raw declarations to avoid type mismatch with Posix unit bindings.
-function _LinuxSocket(domain, typ, protocol: Integer): Integer; cdecl;
-  external 'c' name 'socket';
-function _LinuxBind(sockfd: Integer; addr: Pointer; addrlen: UInt32): Integer; cdecl;
-  external 'c' name 'bind';
-function _LinuxListen(sockfd, backlog: Integer): Integer; cdecl;
-  external 'c' name 'listen';
-function _LinuxSetsockopt(sockfd, level, optname: Integer; optval: Pointer; optlen: UInt32): Integer; cdecl;
-  external 'c' name 'setsockopt';
-function _LinuxRecv(sockfd: Integer; buf: Pointer; len: NativeUInt; flags: Integer): NativeInt; cdecl;
-  external 'c' name 'recv';
-function _LinuxSend(sockfd: Integer; buf: Pointer; len: NativeUInt; flags: Integer): NativeInt; cdecl;
-  external 'c' name 'send';
-
-// ---------------------------------------------------------------------------
-// Listen
-// ---------------------------------------------------------------------------
-
-procedure TPoseidonNativeServer.Listen(const AHost: string; APort: Integer;
-  AOnRequest: TOnNativeRequest; AOnListen: TProc);
-var
-  LAddr:       sockaddr_in;
-  LOne:        Integer;
-  LWorkers, I: Integer;
-  LEv:         epoll_event;
-  LPipe:       array[0..1] of Integer;
-begin
-  if FActive then
-    raise Exception.Create('TPoseidonNativeServer: already listening');
-
-  FOnRequest := AOnRequest;
-  FActive    := True;
-  FConnLock  := TCriticalSection.Create;
-  FConnList  := TList.Create;
-
-  // Shutdown pipe: read-end [0] registered in epoll with nil sentinel.
-  if _LinuxPipe(@LPipe[0]) < 0 then
-    raise Exception.Create('pipe() failed: ' + IntToStr(GetLastError));
-  FShutdownPipe[0] := LPipe[0];
-  FShutdownPipe[1] := LPipe[1];
-
-  FEpollFd := epoll_create1(EPOLL_CLOEXEC);
-  if FEpollFd < 0 then
-    raise Exception.Create('epoll_create1 failed: ' + IntToStr(GetLastError));
-
-  FillChar(LEv, SizeOf(LEv), 0);
-  LEv.events   := EPOLLIN;
-  LEv.data.ptr := nil;  // shutdown sentinel
-  epoll_ctl(FEpollFd, EPOLL_CTL_ADD, FShutdownPipe[0], @LEv);
-
-  FListenSocket := NativeUInt(_LinuxSocket(AF_INET, SOCK_STREAM or SOCK_CLOEXEC, 0));
-  if Integer(FListenSocket) < 0 then
-    raise Exception.Create('socket() failed: ' + IntToStr(GetLastError));
-
-  LOne := 1;
-  _LinuxSetsockopt(Integer(FListenSocket), SOL_SOCKET, SO_REUSEADDR,
-    @LOne, SizeOf(LOne));
-  _LinuxSetsockopt(Integer(FListenSocket), SOL_SOCKET, SO_REUSEPORT,
-    @LOne, SizeOf(LOne));  // kernel load-balances accepts entre worker threads
-
-  // TCP_FASTOPEN (RFC 7413) — opt-in; Linux 3.7+; value = SYN queue length
-  // Requires /proc/sys/net/ipv4/tcp_fastopen to have bit 2 set (server mode).
-  // Failure (ENOPROTOOPT on older kernels) is silently ignored.
-  if FTCPFastOpen then
-    _LinuxSetsockopt(Integer(FListenSocket), IPPROTO_TCP, 23 {TCP_FASTOPEN},
-      @LOne, SizeOf(LOne));
-
-  FillChar(LAddr, SizeOf(LAddr), 0);
-  LAddr.sin_family := AF_INET;
-  LAddr.sin_port   := htons(APort);
-  if (AHost = '0.0.0.0') or (AHost = '') then
-    LAddr.sin_addr.s_addr := INADDR_ANY
-  else
-    LAddr.sin_addr.s_addr := inet_addr(MarshaledAString(AnsiString(AHost)));
-
-  if _LinuxBind(Integer(FListenSocket), @LAddr, SizeOf(LAddr)) < 0 then
-    raise Exception.Create('bind() failed: ' + IntToStr(GetLastError));
-
-  if _LinuxListen(Integer(FListenSocket), SOMAXCONN) < 0 then
-    raise Exception.Create('listen() failed: ' + IntToStr(GetLastError));
-
-  if FWorkerCount > 0 then
-    LWorkers := FWorkerCount
-  else
-    LWorkers := Min(Max(WORKER_COUNT_MIN, TThread.ProcessorCount * 2), WORKER_COUNT_MAX);
-  SetLength(FWorkers, LWorkers);
-  for I := 0 to LWorkers - 1 do
-    FWorkers[I] := TThread.CreateAnonymousThread(procedure begin _WorkerLoop; end);
-  for I := 0 to LWorkers - 1 do
-  begin
-    FWorkers[I].FreeOnTerminate := False;
-    FWorkers[I].Start;
-  end;
-
-  FAcceptThread := TThread.CreateAnonymousThread(procedure begin _Accept; end);
-  FAcceptThread.FreeOnTerminate := False;
-  FAcceptThread.Start;
-
-  if FMetricsEnabled then
-    FMetrics := TPoseidonMetrics.Create;
-
-  // AOnListen fires here — server is functional (workers + accept running).
-  // Sweep is intentionally started after: if AOnListen blocks (e.g. Readln),
-  // sweep still starts when Listen() resumes instead of never starting.
-  if Assigned(AOnListen) then
-    AOnListen();
-
-  FIdleSweepThread := TThread.CreateAnonymousThread(procedure begin _IdleSweepLoop; end);
-  FIdleSweepThread.FreeOnTerminate := False;
-  FIdleSweepThread.Start;
-end;
-
-// ---------------------------------------------------------------------------
-// Stop
-// ---------------------------------------------------------------------------
-
-procedure TPoseidonNativeServer.Stop;
-var
-  I:      Integer;
-  LConn:  TNativeConn;
-  LDummy: Byte;
-begin
-  if not FActive then Exit;
-  FActive := False;
-
-  _LinuxClose(Integer(FListenSocket));
-  FListenSocket := NativeUInt(-1);
-
-  FAcceptThread.WaitFor;
-  FreeAndNil(FAcceptThread);
-
-  if FIdleSweepThread <> nil then
-  begin
-    FIdleSweepThread.WaitFor;
-    FreeAndNil(FIdleSweepThread);
-  end;
-
-  // Force every client socket into error state — pending recv/send completes
-  // with -1/EBADF and workers call _CloseConn naturally.
-  FConnLock.Enter;
-  try
-    for I := 0 to FConnList.Count - 1 do
-      shutdown(TNativeConn(FConnList[I]).Socket, SHUT_RDWR);
-  finally
-    FConnLock.Leave;
-  end;
-
-  // R-1: event-driven drain — no polling; FDrainEvent fires from each _CloseConn
-  FDrainEvent.ResetEvent;
-  if (TInterlocked.Read(FInFlightCount) > 0) or (FConnList.Count > 0) then
-    FDrainEvent.WaitFor(FDrainTimeoutMs);
-
-  // Final cleanup under lock — any stragglers.
-  FConnLock.Enter;
-  try
-    while FConnList.Count > 0 do
-    begin
-      LConn := TNativeConn(FConnList[0]);
-      FConnList.Delete(0);
-      if LConn.SSLHandle <> nil then
-      begin
-        TPoseidonSSL.Free_SSL(LConn.SSLHandle);
-        LConn.SSLHandle   := nil;
-        LConn.SSLReadBio  := nil;
-        LConn.SSLWriteBio := nil;
-      end;
-      epoll_ctl(FEpollFd, EPOLL_CTL_DEL, LConn.Socket, nil);
-      _LinuxClose(LConn.Socket);
-      LConn.Free;
-    end;
-  finally
-    FConnLock.Leave;
-  end;
-
-  // Write one byte per worker — level-triggered sentinel wakes each one.
-  LDummy := 0;
-  for I := 0 to High(FWorkers) do
-    _LinuxWrite(FShutdownPipe[1], @LDummy, 1);
-
-  for I := 0 to High(FWorkers) do
-  begin
-    FWorkers[I].WaitFor;
-    FWorkers[I].Free;
-  end;
-  SetLength(FWorkers, 0);
-
-  _LinuxClose(FEpollFd);
-  _LinuxClose(FShutdownPipe[0]);
-  _LinuxClose(FShutdownPipe[1]);
-  FEpollFd         := -1;
-  FShutdownPipe[0] := -1;
-  FShutdownPipe[1] := -1;
-
-  FreeAndNil(FConnList);
-  FreeAndNil(FConnLock);
-end;
-
-// ---------------------------------------------------------------------------
-// Accept thread — blocking accept4 produces non-blocking client fds
-// ---------------------------------------------------------------------------
-
-procedure TPoseidonNativeServer._Accept;
-var
-  LFd:      Integer;
-  LAddr:    sockaddr_in;
-  LAddrLen: Cardinal;  // socklen_t
-  LIP:      AnsiString;
-begin
-  while FActive do
-  begin
-    FillChar(LAddr, SizeOf(LAddr), 0);
-    LAddrLen := SizeOf(LAddr);
-    LFd := _LinuxAccept4(Integer(FListenSocket), @LAddr, @LAddrLen,
-      SOCK_NONBLOCK or SOCK_CLOEXEC);
-    if LFd < 0 then
-    begin
-      if GetLastError = EINTR then Continue;
-      Break;
-    end;
-    LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
-    try
-      _OnNewSocket(NativeUInt(LFd),
-        string(LIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
-    except
-      _LinuxClose(LFd);
-    end;
-  end;
-end;
-
-// ---------------------------------------------------------------------------
-// New connection setup
-// ---------------------------------------------------------------------------
-
-procedure TPoseidonNativeServer._OnNewSocket(ASocket: NativeUInt;
-  const ARemoteAddr: string);
-var
-  LOne:  Integer;
-  LConn: TNativeConn;
-  LEv:   epoll_event;
-begin
-  LOne := 1;
-  _LinuxSetsockopt(Integer(ASocket), IPPROTO_TCP, TCP_NODELAY,
-    @LOne, SizeOf(LOne));
-  _LinuxSetsockopt(Integer(ASocket), SOL_SOCKET, SO_KEEPALIVE,
-    @LOne, SizeOf(LOne));
-
-  LConn := TNativeConn.Create(Integer(ASocket), ARemoteAddr);
-  if FSSLEnabled then
-  begin
-    try
-      LConn.SSLHandle := TPoseidonSSL.New_SSL(FSSLCtx);
-      TPoseidonSSL.Setup_Server(LConn.SSLHandle,
-        LConn.SSLReadBio, LConn.SSLWriteBio);
-    except
-      LConn.Free;
-      _LinuxClose(Integer(ASocket));
-      Exit;
-    end;
-  end;
-  // Connection limit + per-IP enforcement (atomic under FConnLock)
-  if not _AdmitAndRegister(LConn) then
-  begin
-    if LConn.SSLHandle <> nil then TPoseidonSSL.Free_SSL(LConn.SSLHandle);
-    LConn.Free;
-    _LinuxClose(Integer(ASocket));
-    Exit;
-  end;
-  if Assigned(FMetrics) then FMetrics.AdjustConnections(1);
-
-  FillChar(LEv, SizeOf(LEv), 0);
-  LEv.events   := EPOLLIN or EPOLLONESHOT;
-  LEv.data.ptr := LConn;
-  epoll_ctl(FEpollFd, EPOLL_CTL_ADD, Integer(ASocket), @LEv);
-end;
-
-// ---------------------------------------------------------------------------
-// _PostRecv — re-arm EPOLLIN|EPOLLONESHOT for next read event
-// ---------------------------------------------------------------------------
-
-procedure TPoseidonNativeServer._PostRecv(AConn: Pointer);
-var
-  LConn: TNativeConn absolute AConn;
-  LEv:   epoll_event;
-begin
-  FillChar(LEv, SizeOf(LEv), 0);
-  LEv.events   := EPOLLIN or EPOLLONESHOT;
-  LEv.data.ptr := AConn;
-  epoll_ctl(FEpollFd, EPOLL_CTL_MOD, LConn.Socket, @LEv);
-end;
-
-// ---------------------------------------------------------------------------
-// _PostSend — store response bytes, kick off non-blocking send loop
-// ---------------------------------------------------------------------------
-
-procedure TPoseidonNativeServer._PostSend(AConn: Pointer; const AResponse: TBytes;
-  AActualLen: Integer = 0);
-var
-  LConn:    TNativeConn absolute AConn;
-  LSendLen: Integer;
-begin
-  // P-4: AActualLen > 0 when AResponse is a pool buffer larger than the response.
-  LSendLen := AActualLen;
-  if LSendLen = 0 then LSendLen := Length(AResponse);
-
-  if LSendLen = 0 then
-  begin
-    if LConn.KeepAlive then _PostRecv(AConn)
-    else _CloseConn(AConn);
-    Exit;
-  end;
-  LConn.PendingSend       := AResponse;
-  LConn.PendingSendActual := AActualLen;  // 0 = use full Length(PendingSend)
-  LConn.SentBytes         := 0;
-  _FlushSend(AConn);
-end;
-
-// ---------------------------------------------------------------------------
-// _FlushSend — send() loop; arms EPOLLOUT on EAGAIN (partial send)
-// ---------------------------------------------------------------------------
-
-procedure TPoseidonNativeServer._FlushSend(AConn: Pointer);
-var
-  LConn:      TNativeConn absolute AConn;
-  LRemain:    Integer;
-  LN:         NativeInt;
-  LEv:        epoll_event;
-  LTotalSend: Integer;
-begin
-  // P-4: use PendingSendActual when set (pool buffer with only first N bytes valid)
-  LTotalSend := LConn.PendingSendActual;
-  if LTotalSend = 0 then LTotalSend := Length(LConn.PendingSend);
-
-  while LConn.SentBytes < LTotalSend do
-  begin
-    LRemain := LTotalSend - LConn.SentBytes;
-    LN := _LinuxSend(LConn.Socket,
-      @LConn.PendingSend[LConn.SentBytes], LRemain, MSG_NOSIGNAL);
-    if LN > 0 then
-      Inc(LConn.SentBytes, LN)
-    else
-    begin
-      if GetLastError = EAGAIN then
-      begin
-        // Kernel send buffer full — resume when EPOLLOUT fires.
-        FillChar(LEv, SizeOf(LEv), 0);
-        LEv.events   := EPOLLOUT or EPOLLONESHOT;
-        LEv.data.ptr := AConn;
-        epoll_ctl(FEpollFd, EPOLL_CTL_MOD, LConn.Socket, @LEv);
-      end
-      else
-        _CloseConn(AConn);
-      Exit;
-    end;
-  end;
-
-  // All bytes sent — P-4: return pool buffer (no-op for non-pool buffers)
-  TBufferPool.Release(LConn.PendingSend);
-  LConn.PendingSendActual := 0;
-  // During TLS handshake we keep the connection alive regardless of HTTP KeepAlive.
-  if (LConn.SSLHandle <> nil) and not LConn.SSLHandshook then
-    _PostRecv(AConn)
-  else if LConn.KeepAlive then
-  begin
-    if LConn.AccumLen > 0 then
-      _ProcessRecv(AConn, nil, 0)  // pipelined request already in AccumBuf
-    else
-      _PostRecv(AConn);
-  end
-  else
-    _CloseConn(AConn);
-end;
-
-// ---------------------------------------------------------------------------
-// _DoRecv — reads one chunk and hands it to _ProcessRecv
-// ---------------------------------------------------------------------------
-
-procedure TPoseidonNativeServer._DoRecv(AConn: Pointer);
-var
-  LConn: TNativeConn absolute AConn;
-  LBuf:  array[0..RECV_BUF_SIZE - 1] of Byte;
-  LN:    NativeInt;
-begin
-  LN := _LinuxRecv(LConn.Socket, @LBuf[0], RECV_BUF_SIZE, 0);
-  if LN > 0 then
-    _ProcessRecv(AConn, @LBuf[0], Cardinal(LN))
-  else if LN = 0 then
-    _CloseConn(AConn)  // graceful FIN
-  else if GetLastError <> EAGAIN then
-    _CloseConn(AConn);
-  // EAGAIN on level-triggered: harmless — EPOLLONESHOT stays disarmed
-  // until _PostRecv re-arms it.
-end;
-
-// ---------------------------------------------------------------------------
-// _CloseConn — guarded against double-close from Stop()
-// ---------------------------------------------------------------------------
-
-procedure TPoseidonNativeServer._CloseConn(AConn: Pointer);
-var
-  LConn: TNativeConn absolute AConn;
-  LIdx:  Integer;
-begin
-  FConnLock.Enter;
-  try
-    LIdx := FConnList.IndexOf(AConn);
-    if LIdx >= 0 then
-    begin
-      FConnList.Delete(LIdx);
-      _UnregisterIP(LConn.RemoteAddr);
-    end;
-  finally
-    FConnLock.Leave;
-  end;
-  if LIdx < 0 then Exit;  // already closed by Stop()
-  if Assigned(FMetrics) then FMetrics.AdjustConnections(-1);
-  if LConn.WSMode = CM_WEBSOCKET then
-  begin
-    if LConn.WSConn <> nil then
-      (LConn.WSConn as TPoseidonWSConn).Invalidate;
-    LConn.WSConn := nil;
-  end;
-  FreeAndNil(LConn.H2Conn);
-  if LConn.SSLHandle <> nil then
-  begin
-    TPoseidonSSL.Free_SSL(LConn.SSLHandle);  // also frees both BIOs
-    LConn.SSLHandle   := nil;
-    LConn.SSLReadBio  := nil;
-    LConn.SSLWriteBio := nil;
-  end;
-  epoll_ctl(FEpollFd, EPOLL_CTL_DEL, LConn.Socket, nil);
-  // R-6: TCP half-close — FIN before RST so the client receives the last bytes
-  shutdown(LConn.Socket, SHUT_WR);
-  _LinuxClose(LConn.Socket);
-  LConn.Free;
-  // R-1: wake the drain event so Stop() can proceed without polling
-  if Assigned(FDrainEvent) then FDrainEvent.SetEvent;
-end;
-
-// ---------------------------------------------------------------------------
-// Worker loop — epoll_wait dispatcher
-// ---------------------------------------------------------------------------
-
-procedure TPoseidonNativeServer._WorkerLoop;
-var
-  LEvents: array[0..MAX_EVENTS - 1] of epoll_event;
-  LN, I:   Integer;
-  LConn:   TNativeConn;
-  LDone:   Boolean;
-  LDummy:  Byte;
-begin
-  LDone := False;
-  while not LDone do
-  begin
-    LN := epoll_wait(FEpollFd, @LEvents[0], MAX_EVENTS, -1);
-    if LN < 0 then
-    begin
-      if GetLastError = EINTR then Continue;
-      Break;
-    end;
-
-    for I := 0 to LN - 1 do
-    begin
-      if LEvents[I].data.ptr = nil then
-      begin
-        // Shutdown sentinel: consume one byte so level-triggered fires
-        // exactly once per worker.
-        _LinuxRead(FShutdownPipe[0], @LDummy, 1);
-        LDone := True;
-        Break;
-      end;
-
-      LConn := TNativeConn(LEvents[I].data.ptr);
-      try
-        if (LEvents[I].events and (EPOLLERR or EPOLLHUP)) <> 0 then
-          _CloseConn(LConn)
-        else
-        begin
-          if (LEvents[I].events and EPOLLIN) <> 0 then
-            _DoRecv(LConn);
-          if (LEvents[I].events and EPOLLOUT) <> 0 then
-            _FlushSend(LConn);
-        end;
-      except
-        on E: Exception do
-          _Log(llError, '[epoll] WORKER_EX [' + E.ClassName + ']: ' + E.Message);
-      end;
-    end;
-  end;
-end;
-
-{$ENDIF MSWINDOWS}
 
 end.

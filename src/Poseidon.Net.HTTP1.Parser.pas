@@ -160,7 +160,7 @@ const
   CR               = $0D;
   LF               = $0A;
 
-  function BufToStr(AStart, ALen: Integer): string; inline;
+  function BufToStr(AStart, ALen: Integer): string;
   begin
     if ALen <= 0 then Result := ''
     else Result := TEncoding.ASCII.GetString(ABuf, AStart, ALen);

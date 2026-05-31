@@ -7,6 +7,7 @@ unit Poseidon.Net.Types;
 interface
 
 uses
+  System.SysUtils,
   System.Generics.Collections;
 
 type
