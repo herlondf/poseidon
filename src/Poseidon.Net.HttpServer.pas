@@ -1433,7 +1433,7 @@ begin
         LConn.SSLWriteBio := nil;
       end;
       FIOBackend.SocketClose(LConn);
-      LConn.Free;
+      LConn.Release;  // #43: drop server ref; IOCP-op refs drop when workers drain
     end;
   finally
     FConnLock.Leave;
@@ -1462,7 +1462,7 @@ begin
         LConn.SSLReadBio, LConn.SSLWriteBio);
     except
       FIOBackend.SocketClose(LConn);  // epoll DEL silently fails (ENOENT) — harmless
-      LConn.Free;
+      LConn.Release;  // #43: never registered — drop server ref directly
       Exit;
     end;
   end;
@@ -1471,7 +1471,7 @@ begin
   begin
     if LConn.SSLHandle <> nil then FSSLProvider.FreeSSL(LConn.SSLHandle);
     FIOBackend.SocketClose(LConn);
-    LConn.Free;
+    LConn.Release;  // #43: never registered — drop server ref directly
     Exit;
   end;
   if Assigned(FMetrics) then FMetrics.AdjustConnections(1);
@@ -1488,7 +1488,7 @@ begin
     end;
     if Assigned(FMetrics) then FMetrics.AdjustConnections(-1);
     if LConn.SSLHandle <> nil then FSSLProvider.FreeSSL(LConn.SSLHandle);
-    LConn.Free;
+    LConn.Release;  // #43: IOCP associate failed before PostRecv — drop server ref
   end;
 end;
 
@@ -1536,7 +1536,7 @@ begin
     LConn.SSLWriteBio := nil;
   end;
   FIOBackend.SocketClose(LConn);  // platform-specific: epoll DEL + shutdown + close
-  LConn.Free;
+  LConn.Release;  // #43: drop server ref; object lives until all IOCP ops complete
   // R-1: wake the drain event so Stop() can proceed without polling
   if Assigned(FDrainEvent) then FDrainEvent.SetEvent;
 end;

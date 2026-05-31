@@ -4,12 +4,20 @@ unit Poseidon.Net.Connection;
 //
 // Owns the socket handle, the accumulation buffer, SSL BIO pointers, WebSocket
 // and HTTP/2 upgrade state, and (on Linux) the non-blocking send state.
-// Lifecycle: created in _OnNewSocket, destroyed in _CloseConn.
+//
+// Lifecycle (#43 — IOCP race fix):
+//   Created  → FRefCount = 1  (server "owns" one ref)
+//   PostRecv / PostSend → AddRef before WSARecv/WSASend (one ref per in-flight op)
+//   Worker loop completion → Release after the callback (drops the IOCP-op ref)
+//   _CloseConn → Release (drops the server ref); may not reach zero yet if ops
+//                are still in-flight — the object lives until the last Release.
+//   AddRef/Release are thread-safe via TInterlocked.
 
 interface
 
 uses
   System.SysUtils,
+  System.SyncObjs,
 {$IFDEF MSWINDOWS}
   Winapi.Winsock2,
 {$ENDIF}
@@ -23,6 +31,8 @@ const
 
 type
   TNativeConn = class
+  private
+    FRefCount: Integer;   // #43: atomic ref count; reaches 0 → Destroy
   public
 {$IFDEF MSWINDOWS}
     Socket:     TSocket;
@@ -52,9 +62,27 @@ type
     // Internally cast to TSocket (Windows) or Integer (Linux).
     constructor Create(ASocket: NativeUInt; const AAddr: string);
     destructor Destroy; override;
+
+    // #43: ref-counting — thread-safe via TInterlocked.
+    // Do NOT call Free directly; use Release instead.
+    procedure AddRef;
+    procedure Release;
   end;
 
 implementation
+
+// #43: import TInterlocked via SyncObjs alias — already in interface uses.
+
+procedure TNativeConn.AddRef;
+begin
+  TInterlocked.Increment(FRefCount);
+end;
+
+procedure TNativeConn.Release;
+begin
+  if TInterlocked.Decrement(FRefCount) = 0 then
+    Destroy;
+end;
 
 constructor TNativeConn.Create(ASocket: NativeUInt; const AAddr: string);
 begin
@@ -64,6 +92,7 @@ begin
   Socket       := Integer(ASocket);
 {$ENDIF}
   RemoteAddr   := AAddr;
+  FRefCount    := 1;                    // #43: server owns one ref
   AccumBuf     := TBufferPool.Acquire;  // pooled 8 KB
   AccumLen     := 0;
   KeepAlive    := False;

@@ -252,11 +252,13 @@ begin
   LFlags := 0;
   LBytes := 0;
 
+  LConn.AddRef;  // #43: keep conn alive while this IOCP recv is in-flight
   LRes := WSARecv(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, LFlags,
     PWSAOverlapped(@LCtx^.Ovl), nil);
 
   if (LRes = SOCKET_ERROR) and (WSAGetLastError <> WSA_IO_PENDING) then
   begin
+    LConn.Release;  // #43: op never posted — drop the ref we just took
     FreeMem(LCtx);
     FCallbacks.OnConnError(AConn);
   end;
@@ -290,11 +292,13 @@ begin
   LCtx^.WsaBuf.buf := @LCtx^.SendBuf[0];
   LBytes := 0;
 
+  LConn.AddRef;  // #43: keep conn alive while this IOCP send is in-flight
   LRes := WSASend(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, 0,
     PWSAOverlapped(@LCtx^.Ovl), nil);
 
   if (LRes = SOCKET_ERROR) and (WSAGetLastError <> WSA_IO_PENDING) then
   begin
+    LConn.Release;  // #43: op never posted — drop the ref we just took
     TBufferPool.Release(LCtx^.SendBuf);
     Dispose(LCtx);
     FCallbacks.OnConnError(AConn);
@@ -383,6 +387,7 @@ begin
           end;
         end;
         FCallbacks.OnConnError(LConn);
+        LConn.Release;  // #43: drop IOCP-op ref (AddRef was in PostRecv/PostSend)
         Continue;
       end;
 
@@ -391,12 +396,14 @@ begin
         begin
           FCallbacks.OnRecv(LConn, @PRecvCtx(LOvl)^.Data[0], LBytes);
           FreeMem(PRecvCtx(LOvl));
+          LConn.Release;  // #43: drop IOCP recv op ref
         end;
         iaSend:
         begin
           TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
           Dispose(PSendCtx(LOvl));
           FCallbacks.OnSendComplete(LConn);
+          LConn.Release;  // #43: drop IOCP send op ref
         end;
       end;
     except
