@@ -1,0 +1,104 @@
+version: "3.9"
+
+# benchmark/linux/compose.yml
+# Orquestra Poseidon, Horse/CrossSocket, HAProxy e Bombardier para benchmark.
+#
+# Uso:
+#   cd benchmark/linux
+#   ./build-bench.sh            # compila os binários Linux64
+#   docker compose up -d poseidon horse haproxy
+#   ./run-benchmark.sh          # executa todos os cenários e gera relatório
+
+networks:
+  bench:
+    driver: bridge
+
+volumes:
+  assets:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/assets
+
+services:
+  # ---------------------------------------------------------------------------
+  # Poseidon — servidor de referência
+  # ---------------------------------------------------------------------------
+  poseidon:
+    build:
+      context: ./poseidon
+    image: bench-poseidon:latest
+    container_name: poseidon
+    volumes:
+      - ./assets:/app
+    ports:
+      - "18080:8080"
+    networks:
+      - bench
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/ping || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Horse/CrossSocket — baseline para comparação
+  # ---------------------------------------------------------------------------
+  horse:
+    build:
+      context: ./horse
+    image: bench-horse:latest
+    container_name: horse
+    volumes:
+      - ./assets:/app
+    ports:
+      - "18081:8080"
+    networks:
+      - bench
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/ping || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # HAProxy — load balancer / healthcheck monitor
+  # Portas: 8081→poseidon, 8082→horse, 9090→stats
+  # ---------------------------------------------------------------------------
+  haproxy:
+    image: haproxy:2.8-alpine
+    container_name: haproxy
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "18091:8081"   # Poseidon via HAProxy
+      - "18092:8082"   # Horse via HAProxy
+      - "19090:9090"   # HAProxy stats
+    networks:
+      - bench
+    depends_on:
+      poseidon:
+        condition: service_healthy
+      horse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Bombardier — cliente de benchmark (usado via docker exec)
+  # Imagem leve com bombardier pré-instalado para execução on-demand.
+  # ---------------------------------------------------------------------------
+  bombardier:
+    image: alpine:3.19
+    container_name: bombardier
+    networks:
+      - bench
+    volumes:
+      - ./assets:/assets
+    entrypoint: ["/bin/sh", "-c", "apk add --no-cache curl && sleep infinity"]
+    profiles:
+      - tools
