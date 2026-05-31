@@ -83,6 +83,12 @@ type
     // Initial settings sent on creation
     [Test]
     procedure SendInitialSettings_WritesBytesThatStartWithSettingsFrame;
+
+    // P-1: server-side SETTINGS values sent to client
+    [Test]
+    procedure Settings_MaxConcurrentStreams_CustomValue_EncodedInFrame;
+    [Test]
+    procedure Settings_InitialWindowSize_CustomValue_EncodedInFrame;
   end;
   {$M-}
 
@@ -402,7 +408,9 @@ type
       var AStatus: Integer; var AContentType: string;
       var ABody: TBytes; var AExtra: TH2ExtraArr);
   public
-    constructor Create;
+    constructor Create; overload;
+    constructor Create(AMaxConcurrent: Cardinal;
+      AInitWinSize: Cardinal); overload;
     destructor  Destroy; override;
 
     procedure Feed(const AData: TBytes);
@@ -423,6 +431,21 @@ begin
     OnSend,
     OnClose,
     OnRequest);
+end;
+
+constructor TH2TestHarness.Create(AMaxConcurrent: Cardinal;
+  AInitWinSize: Cardinal);
+begin
+  inherited Create;
+  FLock  := TCriticalSection.Create;
+  FReqs  := TList<TH2RequestData>.Create;
+  FConn  := TH2Conn.Create(
+    Self,
+    OnSend,
+    OnClose,
+    OnRequest,
+    AMaxConcurrent,
+    AInitWinSize);
 end;
 
 destructor TH2TestHarness.Destroy;
@@ -709,6 +732,88 @@ begin
     Assert.IsTrue(Length(LS) >= 9, 'SendInitialSettings must write at least one frame');
     // First frame type byte (offset 3) must be SETTINGS (4)
     CheckInt(H2T_SETTINGS, Integer(LS[3]), 'First frame from SendInitialSettings must be SETTINGS');
+  finally
+    LH.Free;
+  end;
+end;
+
+// ── P-1: server-side SETTINGS values ─────────────────────────────────────────
+
+// Helper: search for a specific setting ID in the payload of the first SETTINGS
+// frame contained in ABuf.  Returns the value if found, -1 otherwise.
+function FindSettingValue(const ABuf: TBytes; ASettingID: Word): Integer;
+var
+  LPayLen: Integer;
+  I:       Integer;
+  LId:     Word;
+begin
+  Result := -1;
+  if Length(ABuf) < 9 then
+    Exit;
+  LPayLen := (Integer(ABuf[0]) shl 16) or (Integer(ABuf[1]) shl 8) or Integer(ABuf[2]);
+  if LPayLen < 6 then
+    Exit;
+  I := 9;  // skip 9-byte frame header
+  while I + 5 <= 9 + LPayLen - 1 do
+  begin
+    LId := (Word(ABuf[I]) shl 8) or Word(ABuf[I + 1]);
+    if LId = ASettingID then
+    begin
+      Result := (Integer(ABuf[I + 2]) shl 24) or
+                (Integer(ABuf[I + 3]) shl 16) or
+                (Integer(ABuf[I + 4]) shl 8)  or
+                 Integer(ABuf[I + 5]);
+      Exit;
+    end;
+    Inc(I, 6);
+  end;
+end;
+
+procedure TH2ConnUnitTests.Settings_MaxConcurrentStreams_CustomValue_EncodedInFrame;
+// P-1: H2MaxConcurrentStreams passed to TH2Conn constructor must appear as
+// SETTINGS_MAX_CONCURRENT_STREAMS (0x0003) in the initial SETTINGS frame.
+var
+  LH:  TH2TestHarness;
+  LS:  TBytes;
+  LVal: Integer;
+const
+  CUSTOM_MAX_STREAMS = 50;
+  SETTING_ID         = $0003;  // SETTINGS_MAX_CONCURRENT_STREAMS (RFC 7540 §6.5.2)
+begin
+  LH := TH2TestHarness.Create(CUSTOM_MAX_STREAMS, 65535);
+  try
+    LH.H2.SendInitialSettings;
+    LS   := LH.SentBytes;
+    LVal := FindSettingValue(LS, SETTING_ID);
+    Assert.AreNotEqual(-1, LVal,
+      'SETTINGS_MAX_CONCURRENT_STREAMS (0x0003) must be present in initial SETTINGS frame');
+    CheckInt(CUSTOM_MAX_STREAMS, LVal,
+      'SETTINGS_MAX_CONCURRENT_STREAMS value must match H2MaxConcurrentStreams');
+  finally
+    LH.Free;
+  end;
+end;
+
+procedure TH2ConnUnitTests.Settings_InitialWindowSize_CustomValue_EncodedInFrame;
+// P-1: H2InitialWindowSize passed to TH2Conn constructor must appear as
+// SETTINGS_INITIAL_WINDOW_SIZE (0x0004) in the initial SETTINGS frame.
+var
+  LH:  TH2TestHarness;
+  LS:  TBytes;
+  LVal: Integer;
+const
+  CUSTOM_WIN_SIZE = 32768;
+  SETTING_ID      = $0004;  // SETTINGS_INITIAL_WINDOW_SIZE (RFC 7540 §6.5.2)
+begin
+  LH := TH2TestHarness.Create(100, CUSTOM_WIN_SIZE);
+  try
+    LH.H2.SendInitialSettings;
+    LS   := LH.SentBytes;
+    LVal := FindSettingValue(LS, SETTING_ID);
+    Assert.AreNotEqual(-1, LVal,
+      'SETTINGS_INITIAL_WINDOW_SIZE (0x0004) must be present in initial SETTINGS frame');
+    CheckInt(CUSTOM_WIN_SIZE, LVal,
+      'SETTINGS_INITIAL_WINDOW_SIZE value must match H2InitialWindowSize');
   finally
     LH.Free;
   end;

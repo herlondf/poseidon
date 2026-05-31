@@ -51,6 +51,11 @@ type
     [Test] procedure Body_Empty_NoBodyBytes;
     [Test] procedure DefaultErrorBody_IsValidJSON;
     [Test] procedure Response_EndsWithDoubleCRLF_BeforeBody;
+
+    // P-4: BuildHTTPResponsePooled
+    [Test] procedure Pooled_ContentMatchesNonPooled;
+    [Test] procedure Pooled_ActualLen_EqualsNonPooledLength;
+    [Test] procedure Pooled_Release_DoesNotCrash;
   end;
   {$M-}
 
@@ -59,6 +64,7 @@ implementation
 uses
   System.Classes,
   System.Generics.Collections,
+  Poseidon.Net.Pool.Buffer,
   Poseidon.Net.ResponseBuilder;
 
 procedure CheckInt(AExpected, AActual: Integer; const AMsg: string = '');
@@ -305,6 +311,75 @@ begin
   // Body starts at LHeaderEnd + 4 (the CRLFCRLF is 4 bytes, Pos returns 1-based)
   // Length of body = total - (header section + 4 separator bytes)
   CheckInt(Length(LBody), Length(LFull) - (LHeaderEnd + 3));
+end;
+
+// ── P-4: BuildHTTPResponsePooled ─────────────────────────────────────────────
+
+procedure TResponseBuilderTests.Pooled_ContentMatchesNonPooled;
+// P-4: The pool-backed variant must produce byte-identical output to the
+// heap-allocated variant for the same inputs.
+var
+  LBody:      TBytes;
+  LNonPooled: TBytes;
+  LPooled:    TBytes;
+  LActualLen: Integer;
+  LPooledStr: string;
+  LNonPoolStr: string;
+begin
+  LBody      := TEncoding.UTF8.GetBytes('hello pooled');
+  LNonPooled := BuildHTTPResponse(200, 'text/plain', LBody, True, [], False, 'Test/1.0');
+  LPooled    := BuildHTTPResponsePooled(200, 'text/plain', LBody, True, [],
+    False, 'Test/1.0', LActualLen);
+  try
+    SetLength(LPooledStr, LActualLen);
+    Move(LPooled[0], LPooledStr[1], LActualLen);
+    LNonPoolStr := TEncoding.ASCII.GetString(LNonPooled);
+    // Compare as raw strings to catch byte-level differences
+    Assert.AreEqual(LNonPoolStr,
+      TEncoding.ASCII.GetString(Copy(LPooled, 0, LActualLen)),
+      'Pooled response content must be identical to non-pooled response');
+  finally
+    TBufferPool.Release(LPooled);
+  end;
+end;
+
+procedure TResponseBuilderTests.Pooled_ActualLen_EqualsNonPooledLength;
+// P-4: AActualLen out-parameter must equal the byte count produced by the
+// non-pooled variant for the same inputs.
+var
+  LBody:      TBytes;
+  LNonPooled: TBytes;
+  LPooled:    TBytes;
+  LActualLen: Integer;
+begin
+  LBody      := TEncoding.UTF8.GetBytes('length check');
+  LNonPooled := BuildHTTPResponse(201, 'application/json', LBody, False,
+    [], True, '');
+  LPooled := BuildHTTPResponsePooled(201, 'application/json', LBody, False,
+    [], True, '', LActualLen);
+  try
+    Assert.AreEqual(Integer(Length(LNonPooled)), LActualLen,
+      'AActualLen must equal length of non-pooled response');
+    Assert.IsTrue(Integer(Length(LPooled)) >= LActualLen,
+      'Pool buffer must be at least as large as AActualLen');
+  finally
+    TBufferPool.Release(LPooled);
+  end;
+end;
+
+procedure TResponseBuilderTests.Pooled_Release_DoesNotCrash;
+// P-4: TBufferPool.Release on a pooled buffer must not raise or corrupt memory.
+var
+  LBody:     TBytes;
+  LPooled:   TBytes;
+  LActualLen: Integer;
+begin
+  LBody   := TEncoding.UTF8.GetBytes('release test');
+  LPooled := BuildHTTPResponsePooled(200, 'text/plain', LBody, True, [],
+    False, '', LActualLen);
+  // If Release crashes, the unhandled exception will fail this test automatically.
+  TBufferPool.Release(LPooled);
+  Assert.IsTrue(True, 'TBufferPool.Release on a pooled buffer must not raise');
 end;
 
 initialization

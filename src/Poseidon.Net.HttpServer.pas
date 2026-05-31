@@ -1069,9 +1069,10 @@ begin
   end;
 
   LResp := TWebSocketUtils.BuildHandshakeResponse(LKey);
-  LConn.WSMode   := CM_WEBSOCKET;
-  LConn.WSPath   := AReq.Path;
-  LConn.AccumLen := 0;
+  LConn.WSMode    := CM_WEBSOCKET;
+  LConn.WSPath    := AReq.Path;
+  LConn.KeepAlive := True;  // WebSocket connections are always persistent
+  LConn.AccumLen  := 0;
 
   LConn.WSConn := TPoseidonWSConn.Create(
     LConn.RemoteAddr,
