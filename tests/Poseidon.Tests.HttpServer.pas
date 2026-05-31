@@ -3,7 +3,7 @@ unit Poseidon.Tests.HttpServer;
 // DUnitX integration tests for TPoseidonNativeServer (HTTP/1.1).
 //
 // Fixture 1 — TPoseidonHttpServerTests  (port 19001): basic HTTP paths
-// Fixture 2 — TPoseidonHttpServerAdvTests (port 19002): security / reliability
+// Fixture 2 — TPoseidonHttpServerAdvTests (port 19003): security / reliability
 //   properties: AllowedMethods, MaxRequestSize, MaxQueueDepth,
 //   SecureHeaders, ServerBanner, RateLimit, path traversal, request smuggling.
 //
@@ -41,7 +41,7 @@ type
 
   // ── Fixture 2: security / reliability properties ────────────────────────────
   [TestFixture]
-  TPoseidonHttpServerAdvTests = class  // port 19002
+  TPoseidonHttpServerAdvTests = class  // port 19003
   private
     FEvent: TEvent;
   public
@@ -264,8 +264,8 @@ end;
 // =============================================================================
 
 const
-  ADV_PORT = 19002;
-  ADV_BASE = 'http://127.0.0.1:19002';
+  ADV_PORT = 19003;
+  ADV_BASE = 'http://127.0.0.1:19003';
 
 type
   TAdvExtraHeaders = TArray<TPair<string,string>>;
