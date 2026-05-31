@@ -9,6 +9,7 @@ unit Poseidon.Tests.ProxyProtocol;
 interface
 
 uses
+  System.SysUtils,
   DUnitX.TestFramework;
 
 type
@@ -62,8 +63,12 @@ type
 implementation
 
 uses
-  System.SysUtils,
   Poseidon.Net.ProxyProtocol;
+
+procedure CheckInt(AExpected, AActual: Integer; const AMsg: string = '');
+begin
+  Assert.AreEqual(AExpected, AActual, AMsg);
+end;
 
 // ---------------------------------------------------------------------------
 // V2 builder helper
@@ -117,7 +122,7 @@ begin
     LAddr, LPort, LConsumed, LIncomp, LInvalid));
   Assert.AreEqual('192.168.1.5', LAddr);
   Assert.AreEqual(Word(12345), LPort);
-  Assert.AreEqual(Length(LBuf), LConsumed);
+  CheckInt(Length(LBuf), LConsumed);
   Assert.IsFalse(LIncomp);
   Assert.IsFalse(LInvalid);
 end;
@@ -286,7 +291,7 @@ begin
     LAddr, LPort, LConsumed, LIncomp, LInvalid));
   Assert.AreEqual('192.168.1.5', LAddr);
   Assert.AreEqual(Word(12345), LPort);
-  Assert.AreEqual(Length(LBuf), LConsumed);
+  CheckInt(Length(LBuf), LConsumed);
 end;
 
 procedure TProxyProtocolV1Tests.V1_TCP6_ParsesAddrAndPort;
@@ -312,7 +317,7 @@ begin
   Assert.IsTrue(TryParseProxyProtocolV1(@LBuf[0], Length(LBuf),
     LAddr, LPort, LConsumed, LIncomp, LInvalid));
   Assert.AreEqual('', LAddr);
-  Assert.AreEqual(Length(LBuf), LConsumed);
+  CheckInt(Length(LBuf), LConsumed);
 end;
 
 procedure TProxyProtocolV1Tests.V1_NoCRLF_Short_Incomplete;
@@ -394,7 +399,7 @@ begin
   Assert.IsTrue(TryParseProxyProtocolV1(@LBuf[0], Length(LBuf),
     LAddr, LPort, LConsumed, LIncomp, LInvalid));
   // Consumed = line length + 2 (CRLF)
-  Assert.AreEqual(Length(LLine) + 2, LConsumed);
+  CheckInt(Length(LLine) + 2, LConsumed);
 end;
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ unit Poseidon.Tests.HTTP2;
 //   openssl req -x509 -newkey rsa:2048 -keyout tests\certs\test-server.key ^
 //     -out tests\certs\test-server.crt -days 3650 -nodes -subj "/CN=127.0.0.1"
 //
-// Tests skip automatically when OpenSSL is not available (Assert.Ignore),
+// Tests skip automatically when OpenSSL is not available (Assert.Pass),
 // so the suite never fails on machines without OpenSSL installed.
 //
 // Port 19002 is reserved for this fixture; never use it for other test suites.
@@ -46,8 +46,10 @@ implementation
 uses
   System.SysUtils,
   System.Classes,
+  System.Generics.Collections,
   System.Net.HttpClient,
   System.Net.URLClient,
+  Poseidon.Net.Types,
   Poseidon.Net.HttpServer,
   Poseidon.Net.SSL;
 
@@ -57,15 +59,72 @@ const
   CERT_FILE   = '.\certs\test-server.crt';
   KEY_FILE    = '.\certs\test-server.key';
 
+type
+  // Alias avoids Delphi parser issue with nested generics (TArray<TPair<X,Y>>)
+  // in anonymous-method parameter declarations.
+  TH2ExtraHeaders = TArray<TPair<string,string>>;
+
 var
-  GH2Server: TPoseidonNativeServer;
+  GH2Server:      TPoseidonNativeServer;
+  GH2ListenReady: TEvent;  // points to FEvent during SetupFixture
+
+// Named procedures avoid parser confusion from complex generic types inside
+// anonymous method parameter lists.
+
+procedure TestH2Handler(const AReq: TPoseidonNativeRequest;
+  out AStatus: Integer; out AContentType: string;
+  out ABody: TBytes; out AExtraHeaders: TH2ExtraHeaders);
+begin
+  AContentType  := 'application/json';
+  AExtraHeaders := [];
+  if (AReq.Method = 'GET') and (AReq.Path = '/') then
+  begin
+    AStatus := 200;
+    ABody   := TEncoding.UTF8.GetBytes('{"ok":true}');
+  end
+  else if AReq.Method = 'POST' then
+  begin
+    AStatus := 201;
+    ABody   := AReq.RawBody;
+  end
+  else if (AReq.Method = 'GET') and (AReq.Path = '/teapot') then
+  begin
+    AStatus      := 418;
+    AContentType := 'text/plain';
+    ABody        := TEncoding.UTF8.GetBytes('I am a teapot');
+  end
+  else
+  begin
+    AStatus := 404;
+    ABody   := TEncoding.UTF8.GetBytes('not found');
+  end;
+end;
+
+procedure TestH2ListenReady;
+begin
+  GH2ListenReady.SetEvent;
+end;
+
+procedure ListenH2Thread;
+begin
+  GH2Server.Listen('127.0.0.1', INTEST_PORT, TestH2Handler, TestH2ListenReady);
+end;
+
+// Certificate validator — accepts any certificate for self-signed test certs.
+procedure AcceptAllCertificates(const Sender: TObject;
+  const ARequest: TURLRequest; const Certificate: TCertificate;
+  var Accepted: Boolean);
+begin
+  Accepted := True;
+end;
 
 { TPoseidonHTTP2Tests }
 
 procedure TPoseidonHTTP2Tests.EnsureSSL;
 begin
   if not FSSLAvail then
-    Assert.Ignore('OpenSSL not available — HTTP/2 test skipped');
+    // DUnitX has no Assert.Ignore in this version; Pass skips without failure.
+    Assert.Pass('OpenSSL not available — HTTP/2 test skipped');
 end;
 
 procedure TPoseidonHTTP2Tests.SetupFixture;
@@ -80,48 +139,13 @@ begin
     Exit;
   end;
 
-  FEvent    := TEvent.Create(nil, True, False, '');
-  GH2Server := TPoseidonNativeServer.Create;
+  FEvent         := TEvent.Create(nil, True, False, '');
+  GH2Server      := TPoseidonNativeServer.Create;
+  GH2ListenReady := FEvent;
   GH2Server.HTTP2Enabled := True;
   GH2Server.ConfigureSSL(CERT_FILE, KEY_FILE);
 
-  TThread.CreateAnonymousThread(
-    procedure
-    begin
-      GH2Server.Listen('127.0.0.1', INTEST_PORT,
-        procedure(const AReq: TPoseidonNativeRequest;
-          out AStatus:       Integer;
-          out AContentType:  string;
-          out ABody:         TBytes;
-          out AExtraHeaders: TArray<TPair<string,string>>)
-        begin
-          AContentType  := 'application/json';
-          AExtraHeaders := [];
-
-          if (AReq.Method = 'GET') and (AReq.Path = '/') then
-          begin
-            AStatus := 200;
-            ABody   := TEncoding.UTF8.GetBytes('{"ok":true}');
-          end
-          else if AReq.Method = 'POST' then
-          begin
-            AStatus := 201;
-            ABody   := AReq.RawBody;
-          end
-          else if (AReq.Method = 'GET') and (AReq.Path = '/teapot') then
-          begin
-            AStatus      := 418;
-            AContentType := 'text/plain';
-            ABody        := TEncoding.UTF8.GetBytes('I am a teapot');
-          end
-          else
-          begin
-            AStatus := 404;
-            ABody   := TEncoding.UTF8.GetBytes('not found');
-          end;
-        end,
-        procedure begin FEvent.SetEvent; end);
-    end).Start;
+  TThread.CreateAnonymousThread(ListenH2Thread).Start;
 
   Assert.AreEqual(TWaitResult.wrSignaled,
     FEvent.WaitFor(5000), 'HTTP/2 server did not start within 5 s');
@@ -134,6 +158,7 @@ begin
   GH2Server.Stop;
   FreeAndNil(GH2Server);
   FreeAndNil(FEvent);
+  GH2ListenReady := nil;
 end;
 
 procedure TPoseidonHTTP2Tests.Get_SimpleRequest_Returns200ViaH2;
@@ -144,12 +169,7 @@ begin
   EnsureSSL;
   LClient := THTTPClient.Create;
   try
-    LClient.OnValidateServerCertificate :=
-      procedure(const ASender: TObject; const ARequest: TURLRequest;
-        const ACertificate: TCertificate; var AAccepted: Boolean)
-      begin
-        AAccepted := True;  // accept self-signed certificate in tests
-      end;
+    LClient.ValidateServerCertificateCallback := AcceptAllCertificates;
     LResponse := LClient.Get(BASE_URL + '/');
     Assert.AreEqual(200, LResponse.StatusCode);
     Assert.IsTrue(LResponse.ContentAsString.Contains('"ok":true'));
@@ -168,12 +188,7 @@ begin
   LClient := THTTPClient.Create;
   LBody   := TStringStream.Create('{"data":1}', TEncoding.UTF8);
   try
-    LClient.OnValidateServerCertificate :=
-      procedure(const ASender: TObject; const ARequest: TURLRequest;
-        const ACertificate: TCertificate; var AAccepted: Boolean)
-      begin
-        AAccepted := True;
-      end;
+    LClient.ValidateServerCertificateCallback := AcceptAllCertificates;
     LResponse := LClient.Post(BASE_URL + '/data', LBody, nil,
       [TNameValuePair.Create('Content-Type', 'application/json')]);
     Assert.AreEqual(201, LResponse.StatusCode);
@@ -192,12 +207,7 @@ begin
   LClient := THTTPClient.Create;
   try
     LClient.HandleRedirects := False;
-    LClient.OnValidateServerCertificate :=
-      procedure(const ASender: TObject; const ARequest: TURLRequest;
-        const ACertificate: TCertificate; var AAccepted: Boolean)
-      begin
-        AAccepted := True;
-      end;
+    LClient.ValidateServerCertificateCallback := AcceptAllCertificates;
     LResponse := LClient.Get(BASE_URL + '/teapot');
     Assert.AreEqual(418, LResponse.StatusCode);
   finally

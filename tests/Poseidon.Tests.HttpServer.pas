@@ -42,67 +42,82 @@ implementation
 uses
   System.SysUtils,
   System.Classes,
+  System.Generics.Collections,
   System.Net.HttpClient,
   System.Net.URLClient,
+  Poseidon.Net.Types,
   Poseidon.Net.HttpServer;
 
 const
   INTEST_PORT = 19001;
   BASE_URL    = 'http://127.0.0.1:19001';
 
+type
+  // Alias avoids Delphi parser issue with nested generics (TArray<TPair<X,Y>>)
+  // in anonymous-method parameter declarations.
+  TExtraHeaders = TArray<TPair<string,string>>;
+
 var
-  GServer: TPoseidonNativeServer;
+  GServer:      TPoseidonNativeServer;
+  GListenReady: TEvent;  // points to FEvent during SetupFixture
+
+// Named procedures for Listen callbacks — avoids parser confusion from
+// complex generic types inside anonymous method parameter lists.
+
+procedure TestHttpHandler(const AReq: TPoseidonNativeRequest;
+  out AStatus: Integer; out AContentType: string;
+  out ABody: TBytes; out AExtraHeaders: TExtraHeaders);
+begin
+  AContentType  := 'application/json';
+  AExtraHeaders := [];
+  if (AReq.Method = 'GET') and (AReq.Path = '/') then
+  begin
+    AStatus := 200;
+    ABody   := TEncoding.UTF8.GetBytes('{"ok":true}');
+  end
+  else if (AReq.Method = 'GET') and AReq.Path.StartsWith('/echo/') then
+  begin
+    AStatus := 200;
+    ABody   := TEncoding.UTF8.GetBytes(
+      '{"param":"' + Copy(AReq.Path, 7, MaxInt) + '"}');
+  end
+  else if AReq.Method = 'POST' then
+  begin
+    AStatus := 201;
+    ABody   := AReq.RawBody;
+  end
+  else if (AReq.Method = 'GET') and (AReq.Path = '/teapot') then
+  begin
+    AStatus      := 418;
+    AContentType := 'text/plain';
+    ABody        := TEncoding.UTF8.GetBytes('I am a teapot');
+  end
+  else
+  begin
+    AStatus := 404;
+    ABody   := TEncoding.UTF8.GetBytes('not found');
+  end;
+end;
+
+procedure TestOnListenReady;
+begin
+  GListenReady.SetEvent;
+end;
+
+procedure ListenThread;
+begin
+  GServer.Listen('127.0.0.1', INTEST_PORT, TestHttpHandler, TestOnListenReady);
+end;
 
 { TPoseidonHttpServerTests }
 
 procedure TPoseidonHttpServerTests.SetupFixture;
 begin
-  FEvent  := TEvent.Create(nil, True, False, '');
-  GServer := TPoseidonNativeServer.Create;
+  FEvent       := TEvent.Create(nil, True, False, '');
+  GServer      := TPoseidonNativeServer.Create;
+  GListenReady := FEvent;
 
-  TThread.CreateAnonymousThread(
-    procedure
-    begin
-      GServer.Listen('127.0.0.1', INTEST_PORT,
-        procedure(const AReq: TPoseidonNativeRequest;
-          out AStatus:       Integer;
-          out AContentType:  string;
-          out ABody:         TBytes;
-          out AExtraHeaders: TArray<TPair<string,string>>)
-        begin
-          AContentType  := 'application/json';
-          AExtraHeaders := [];
-
-          if (AReq.Method = 'GET') and (AReq.Path = '/') then
-          begin
-            AStatus := 200;
-            ABody   := TEncoding.UTF8.GetBytes('{"ok":true}');
-          end
-          else if (AReq.Method = 'GET') and AReq.Path.StartsWith('/echo/') then
-          begin
-            AStatus := 200;
-            ABody   := TEncoding.UTF8.GetBytes(
-              '{"param":"' + Copy(AReq.Path, 7, MaxInt) + '"}');
-          end
-          else if AReq.Method = 'POST' then
-          begin
-            AStatus := 201;
-            ABody   := AReq.RawBody;
-          end
-          else if (AReq.Method = 'GET') and (AReq.Path = '/teapot') then
-          begin
-            AStatus      := 418;
-            AContentType := 'text/plain';
-            ABody        := TEncoding.UTF8.GetBytes('I am a teapot');
-          end
-          else
-          begin
-            AStatus := 404;
-            ABody   := TEncoding.UTF8.GetBytes('not found');
-          end;
-        end,
-        procedure begin FEvent.SetEvent; end);
-    end).Start;
+  TThread.CreateAnonymousThread(ListenThread).Start;
 
   Assert.AreEqual(TWaitResult.wrSignaled,
     FEvent.WaitFor(5000), 'HTTP/1.1 server did not start within 5 s');
@@ -113,6 +128,7 @@ begin
   GServer.Stop;
   FreeAndNil(GServer);
   FreeAndNil(FEvent);
+  GListenReady := nil;
 end;
 
 procedure TPoseidonHttpServerTests.Get_RootPath_Returns200;

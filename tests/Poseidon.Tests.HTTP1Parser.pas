@@ -14,6 +14,7 @@ unit Poseidon.Tests.HTTP1Parser;
 interface
 
 uses
+  System.SysUtils,
   DUnitX.TestFramework;
 
 type
@@ -58,7 +59,6 @@ type
 implementation
 
 uses
-  System.SysUtils,
   System.Classes,
   System.Generics.Collections,
   Poseidon.Net.HTTP1.Parser;
@@ -66,6 +66,11 @@ uses
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+procedure CheckInt(AExpected, AActual: Integer; const AMsg: string = '');
+begin
+  Assert.AreEqual(AExpected, AActual, AMsg);
+end;
 
 function THTTP1ParseRequestTests.MakeReq(const AText: string): TBytes;
 begin
@@ -97,8 +102,8 @@ begin
   Assert.AreEqual('/',    LPath);
   Assert.AreEqual('',     LQS);
   Assert.IsTrue(LKeep);
-  Assert.AreEqual(0, Length(LBody));
-  Assert.AreEqual(Length(LBuf), LConsumed);
+  CheckInt(0, Length(LBody));
+  CheckInt(Length(LBuf), LConsumed);
 end;
 
 procedure THTTP1ParseRequestTests.Post_WithJsonBody_ParsesBodyAndHeaders;
@@ -308,7 +313,7 @@ begin
   Assert.IsTrue(ParseHTTP1Request(LBuf, Length(LBuf), 65536, 8388608,
     LMethod, LPath, LQS, LHeaders, LBody, LKeep, LConsumed, LBad));
 
-  Assert.AreEqual(3, Length(LHeaders));
+  CheckInt(3, Length(LHeaders));
   LFound := False;
   for I := 0 to High(LHeaders) do
     if (LHeaders[I].Key = 'X-Custom') and (LHeaders[I].Value = 'myvalue') then
@@ -378,7 +383,7 @@ begin
   LBuf := MakeReq(LReq);
   ParseHTTP1Request(LBuf, Length(LBuf), 65536, 8388608,
     LMethod, LPath, LQS, LHeaders, LBody, LKeep, LConsumed, LBad);
-  Assert.AreEqual(Length(LBuf), LConsumed);
+  CheckInt(Length(LBuf), LConsumed);
 end;
 
 procedure THTTP1ParseRequestTests.PipelinedRequests_OnlyFirstConsumed;
@@ -401,7 +406,7 @@ begin
   Assert.IsTrue(ParseHTTP1Request(LBuf, Length(LBuf), 65536, 8388608,
     LMethod, LPath, LQS, LHeaders, LBody, LKeep, LConsumed, LBad));
   Assert.AreEqual('/first', LPath);
-  Assert.AreEqual(Length(MakeReq(LReq1)), LConsumed);
+  CheckInt(Length(MakeReq(LReq1)), LConsumed);
 end;
 
 // ---------------------------------------------------------------------------
@@ -449,7 +454,7 @@ begin
   LRaw := TEncoding.ASCII.GetBytes('0'#13#10#13#10);
   Assert.IsTrue(DecodeHTTP1Chunked(@LRaw[0], Length(LRaw), 8388608,
     LBody, LConsumed, LMal));
-  Assert.AreEqual(0, Length(LBody));
+  CheckInt(0, Length(LBody));
 end;
 
 procedure TDecodeHTTP1ChunkedTests.Incomplete_ReturnsFalseNotMalformed;

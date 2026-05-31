@@ -18,6 +18,7 @@ unit Poseidon.Tests.ResponseBuilder;
 interface
 
 uses
+  System.SysUtils,
   DUnitX.TestFramework;
 
 type
@@ -56,10 +57,14 @@ type
 implementation
 
 uses
-  System.SysUtils,
   System.Classes,
   System.Generics.Collections,
   Poseidon.Net.ResponseBuilder;
+
+procedure CheckInt(AExpected, AActual: Integer; const AMsg: string = '');
+begin
+  Assert.AreEqual(AExpected, AActual, AMsg);
+end;
 
 function TResponseBuilderTests.ResponseToString(const ABytes: TBytes): string;
 begin
@@ -299,7 +304,7 @@ begin
   Assert.IsTrue(LHeaderEnd > 0, 'Must have CRLFCRLF between headers and body');
   // Body starts at LHeaderEnd + 4 (the CRLFCRLF is 4 bytes, Pos returns 1-based)
   // Length of body = total - (header section + 4 separator bytes)
-  Assert.AreEqual(Length(LBody), Length(LFull) - (LHeaderEnd + 3));
+  CheckInt(Length(LBody), Length(LFull) - (LHeaderEnd + 3));
 end;
 
 initialization

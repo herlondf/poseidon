@@ -51,13 +51,20 @@ uses
   System.Threading,
   Poseidon.Net.Pool.Buffer;
 
+// Wrap Assert.AreEqual with typed Integer params so Delphi 11 overload
+// resolution does not try the generic AreEqual<T> for integer comparisons.
+procedure CheckInt(AExpected, AActual: Integer; const AMsg: string = '');
+begin
+  Assert.AreEqual(AExpected, AActual, AMsg);
+end;
+
 procedure TBufferPoolTests.Acquire_ZeroSize_ReturnsTier0;
 var
   LBuf: TBytes;
 begin
   LBuf := TBufferPool.Acquire(0);
   try
-    Assert.AreEqual(POOL_TIER0_SIZE, Length(LBuf));
+    CheckInt(POOL_TIER0_SIZE, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -69,7 +76,7 @@ var
 begin
   LBuf := TBufferPool.Acquire(POOL_TIER0_SIZE);
   try
-    Assert.AreEqual(POOL_TIER0_SIZE, Length(LBuf));
+    CheckInt(POOL_TIER0_SIZE, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -81,7 +88,7 @@ var
 begin
   LBuf := TBufferPool.Acquire(POOL_TIER0_SIZE + 1);
   try
-    Assert.AreEqual(POOL_TIER1_SIZE, Length(LBuf));
+    CheckInt(POOL_TIER1_SIZE, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -93,7 +100,7 @@ var
 begin
   LBuf := TBufferPool.Acquire(POOL_TIER1_SIZE);
   try
-    Assert.AreEqual(POOL_TIER1_SIZE, Length(LBuf));
+    CheckInt(POOL_TIER1_SIZE, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -105,7 +112,7 @@ var
 begin
   LBuf := TBufferPool.Acquire(POOL_TIER1_SIZE + 1);
   try
-    Assert.AreEqual(POOL_TIER2_SIZE, Length(LBuf));
+    CheckInt(POOL_TIER2_SIZE, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -117,7 +124,7 @@ var
 begin
   LBuf := TBufferPool.Acquire(POOL_TIER2_SIZE);
   try
-    Assert.AreEqual(POOL_TIER2_SIZE, Length(LBuf));
+    CheckInt(POOL_TIER2_SIZE, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -131,7 +138,7 @@ begin
   LSize := POOL_TIER2_SIZE + 1;
   LBuf  := TBufferPool.Acquire(LSize);
   try
-    Assert.AreEqual(LSize, Length(LBuf));
+    CheckInt(LSize, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -185,7 +192,7 @@ begin
   TBufferPool.Release(LFirst);
   LSecond := TBufferPool.Acquire(0);
   try
-    Assert.AreEqual(POOL_TIER0_SIZE, Length(LSecond));
+    CheckInt(POOL_TIER0_SIZE, Length(LSecond));
   finally
     TBufferPool.Release(LSecond);
   end;
@@ -199,7 +206,7 @@ begin
   TBufferPool.Release(LBuf);
   LBuf := TBufferPool.Acquire(POOL_TIER0_SIZE + 1);
   try
-    Assert.AreEqual(POOL_TIER1_SIZE, Length(LBuf));
+    CheckInt(POOL_TIER1_SIZE, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -213,7 +220,7 @@ begin
   TBufferPool.Release(LBuf);
   LBuf := TBufferPool.Acquire(POOL_TIER1_SIZE + 1);
   try
-    Assert.AreEqual(POOL_TIER2_SIZE, Length(LBuf));
+    CheckInt(POOL_TIER2_SIZE, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -225,7 +232,7 @@ var
 begin
   LBuf := TBufferPool.Acquire(100);
   try
-    Assert.AreEqual(POOL_TIER0_SIZE, Length(LBuf));
+    CheckInt(POOL_TIER0_SIZE, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -237,7 +244,7 @@ var
 begin
   LBuf := TBufferPool.Acquire(1);
   try
-    Assert.AreEqual(POOL_TIER0_SIZE, Length(LBuf));
+    CheckInt(POOL_TIER0_SIZE, Length(LBuf));
   finally
     TBufferPool.Release(LBuf);
   end;
@@ -252,22 +259,21 @@ const
 var
   LTasks: array[0..TASK_COUNT - 1] of ITask;
   I:      Integer;
+  LWork:  TProc;
 begin
-  for I := 0 to TASK_COUNT - 1 do
-  begin
-    LTasks[I] := TTask.Run(
-      procedure
-      var
-        J:    Integer;
-        LBuf: TBytes;
+  LWork := procedure
+    var
+      J:    Integer;
+      LBuf: TBytes;
+    begin
+      for J := 0 to ITER_COUNT - 1 do
       begin
-        for J := 0 to ITER_COUNT - 1 do
-        begin
-          LBuf := TBufferPool.Acquire(0);
-          TBufferPool.Release(LBuf);
-        end;
-      end);
-  end;
+        LBuf := TBufferPool.Acquire(0);
+        TBufferPool.Release(LBuf);
+      end;
+    end;
+  for I := 0 to TASK_COUNT - 1 do
+    LTasks[I] := TTask.Run(LWork);
   TTask.WaitForAll(LTasks);
   // If we reach here without hanging/crashing: pass.
   Assert.Pass;
@@ -275,13 +281,19 @@ end;
 
 procedure TBufferPoolTests.Release_NilBuffer_DoesNotCrash;
 var
-  LBuf: TBytes;
+  LBuf:    TBytes;
+  LRaised: Boolean;
 begin
   // A nil/empty TBytes should be released without crash or exception.
-  LBuf := nil;
-  Assert.WillNotRaise(
-    procedure begin TBufferPool.Release(LBuf); end);
-  Assert.AreEqual(0, Length(LBuf));
+  LBuf    := nil;
+  LRaised := False;
+  try
+    TBufferPool.Release(LBuf);
+  except
+    LRaised := True;
+  end;
+  Assert.IsFalse(LRaised, 'Release(nil) should not raise an exception');
+  CheckInt(0, Length(LBuf));
 end;
 
 procedure TBufferPoolTests.ConcurrentAcquireRelease_MultiTier_NoDeadlock;
@@ -292,28 +304,27 @@ const
 var
   LTasks: array[0..TASK_COUNT - 1] of ITask;
   I:      Integer;
+  LWork:  TProc;
 begin
-  for I := 0 to TASK_COUNT - 1 do
-  begin
-    LTasks[I] := TTask.Run(
-      procedure
-      var
-        J:     Integer;
-        LBuf0: TBytes;
-        LBuf1: TBytes;
-        LBuf2: TBytes;
+  LWork := procedure
+    var
+      J:     Integer;
+      LBuf0: TBytes;
+      LBuf1: TBytes;
+      LBuf2: TBytes;
+    begin
+      for J := 0 to ITER_COUNT - 1 do
       begin
-        for J := 0 to ITER_COUNT - 1 do
-        begin
-          LBuf0 := TBufferPool.Acquire(0);
-          LBuf1 := TBufferPool.Acquire(POOL_TIER0_SIZE + 1);
-          LBuf2 := TBufferPool.Acquire(POOL_TIER1_SIZE + 1);
-          TBufferPool.Release(LBuf0);
-          TBufferPool.Release(LBuf1);
-          TBufferPool.Release(LBuf2);
-        end;
-      end);
-  end;
+        LBuf0 := TBufferPool.Acquire(0);
+        LBuf1 := TBufferPool.Acquire(POOL_TIER0_SIZE + 1);
+        LBuf2 := TBufferPool.Acquire(POOL_TIER1_SIZE + 1);
+        TBufferPool.Release(LBuf0);
+        TBufferPool.Release(LBuf1);
+        TBufferPool.Release(LBuf2);
+      end;
+    end;
+  for I := 0 to TASK_COUNT - 1 do
+    LTasks[I] := TTask.Run(LWork);
   TTask.WaitForAll(LTasks);
   Assert.Pass;
 end;
