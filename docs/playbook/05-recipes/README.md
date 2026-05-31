@@ -10,3 +10,5 @@ Runnable patterns. Each recipe maps to a sample in [`samples/`](../../../samples
 | [HTTP/2 server](http2-server.md) | `samples/04-http2/` |
 | [Horse provider](horse-provider.md) | `samples/05-horse-provider/` |
 | [Security hardening](security-hardening.md) | `samples/06-security/` |
+| [HTTP/2 server push](http2-server-push.md) | `samples/07-http2-server-push/` |
+| [Throughput benchmark](../07-benchmarking/throughput.md) | `samples/08-benchmark/` |

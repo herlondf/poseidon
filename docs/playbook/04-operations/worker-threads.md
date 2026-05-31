@@ -44,6 +44,18 @@ LServer.Stop;
 LServer.Free;
 ```
 
+### HTTP/2 and graceful shutdown
+
+For HTTP/2 connections, `Stop` additionally:
+
+1. Sends a `GOAWAY` frame to each active h2 connection (last processed stream ID +
+   `NO_ERROR` error code), giving clients a chance to retry streams on a new connection.
+2. Defers the TCP close until all active streams have finished sending their responses.
+3. After responses are flushed, performs a TCP half-close (`SD_SEND` / `SHUT_WR`) so
+   the client can read any bytes still in-flight before the socket is torn down.
+
+All of this is automatic — no extra configuration beyond `DrainTimeoutMs`.
+
 ## Notes
 
 - Workers are OS threads, not green threads. Each blocked worker holds a full stack.

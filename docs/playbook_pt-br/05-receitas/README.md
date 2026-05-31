@@ -10,3 +10,5 @@ Padrões executáveis. Cada receita corresponde a um sample em [`samples/`](../.
 | [Servidor HTTP/2](servidor-http2.md) | `samples/04-http2/` |
 | [Provider Horse](horse-provider.md) | `samples/05-horse-provider/` |
 | [Hardening de segurança](hardening-seguranca.md) | `samples/06-security/` |
+| [HTTP/2 server push](http2-server-push.md) | `samples/07-http2-server-push/` |
+| [Benchmark de throughput](../07-benchmarking/throughput.md) | `samples/08-benchmark/` |

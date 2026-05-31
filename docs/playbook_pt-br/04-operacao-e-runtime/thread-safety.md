@@ -54,7 +54,7 @@ TInterlocked.Increment(GContador);
 
 ## Separação de thread de I/O
 
-A thread de conclusão de I/O (IOCP/epoll) é separada do pool de workers.
+A thread de conclusão de I/O (IOCP / io_uring / epoll) é separada do pool de workers.
 Ela chama callbacks internos de `OnRecv`/`OnSend`, mas nunca invoca o handler
 da aplicação. Os únicos objetos compartilhados entre a thread de I/O e os workers
 são os objetos de conexão `TNativeConn`, que são ref-counted para controle seguro

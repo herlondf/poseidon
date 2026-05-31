@@ -25,7 +25,7 @@
 ┌───────────────────▼──────────────────────────┐
 │  Core server  — Poseidon.Net.HttpServer        │
 │  TPoseidonNativeServer                         │
-│  epoll (Linux) / IOCP (Windows) syscalls only │
+│  io_uring or epoll (Linux) / IOCP (Windows)   │
 └──────────────────────────────────────────────┘
 ```
 

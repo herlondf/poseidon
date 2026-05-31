@@ -10,3 +10,4 @@ Documentação técnica da biblioteca Poseidon.
 | [04 — Operação e Runtime](04-operacao-e-runtime/README.md) | Worker threads, buffer pool, observabilidade |
 | [05 — Receitas](05-receitas/README.md) | Padrões executáveis para casos de uso comuns |
 | [06 — Providers](06-providers/README.md) | Integrações com frameworks (Horse, …) |
+| [07 — Benchmarking](07-benchmarking/README.md) | Benchmark de throughput, io_uring vs epoll |

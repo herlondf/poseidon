@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  High-performance async HTTP server for Delphi — IOCP on Windows, epoll on Linux.<br/>
+  High-performance async HTTP server for Delphi — IOCP on Windows, io_uring/epoll on Linux.<br/>
   Zero external dependencies. Single WSASend per response. WebSocket, SSL/TLS and HTTP/2 built-in.
 </p>
 
@@ -29,13 +29,17 @@ It is used as the transport layer for [Pegasus](https://github.com/herlondf/pega
 | HTTP/2 (h2 via ALPN) | ✅ |
 | HTTP/2 cleartext (h2c upgrade) | ✅ |
 | HTTP/2 flow control (RFC 7540 §6.9) | ✅ |
+| HTTP/2 server push (RFC 7540 §8.2) | ✅ |
+| WebSocket permessage-deflate (RFC 7692) | ✅ |
+| TLS session resumption | ✅ |
 | gzip compression | ✅ |
 | Rate limiting (per-IP and global) | ✅ |
 | Prometheus metrics endpoint | ✅ |
 | Proxy Protocol v1/v2 | ✅ |
 | Security headers (opt-in) | ✅ |
 | Path traversal & request smuggling protection | ✅ |
-| Linux 64-bit (epoll) | ✅ |
+| Linux 64-bit (io_uring, kernel ≥ 5.1) | ✅ |
+| Linux 64-bit (epoll fallback, kernel < 5.1) | ✅ |
 | Windows 64-bit (IOCP) | ✅ |
 
 ## Requirements
@@ -114,6 +118,7 @@ See [`samples/`](samples/) for runnable examples.
 | `HTTP2Enabled` | `False` | Enable HTTP/2 via ALPN (requires SSL) |
 | `H2MaxConcurrentStreams` | 100 | `SETTINGS_MAX_CONCURRENT_STREAMS` sent to clients |
 | `H2InitialWindowSize` | 65535 | `SETTINGS_INITIAL_WINDOW_SIZE` sent to clients |
+| `OnH2Push` | `nil` | Server push callback — populate `APushResources` to proactively push assets before the response |
 | `TCPFastOpen` | `False` | Enable TCP Fast Open (RFC 7413); silently ignored if unsupported |
 
 ### Observability
@@ -153,7 +158,7 @@ Pass a spy or stub in tests; pass `nil` in production for the real defaults.
 
 ```
 src/
-  Poseidon.Net.HttpServer.pas        ← core server (IOCP / epoll)
+  Poseidon.Net.HttpServer.pas        ← core server (IOCP / io_uring / epoll)
   Poseidon.Net.Connection.pas        ← connection object (ref-counted)
   Poseidon.Net.Dispatcher.pas        ← protocol dispatcher (HTTP/WS/H2)
   Poseidon.Net.HTTP1.Parser.pas      ← HTTP/1.1 request parser
@@ -166,9 +171,10 @@ src/
   Poseidon.Net.Interfaces.pas        ← IBufferPool, ISSLProvider, ICompressionProvider
   Poseidon.Net.Metrics.pas           ← Prometheus exposition format
   Poseidon.Net.ProxyProtocol.pas     ← Proxy Protocol v1/v2 parser
-  Poseidon.Net.IO.pas                ← IO backend interface
+  Poseidon.Net.IO.pas                ← IO backend interface (IIOBackend)
   Poseidon.Net.IO.IOCP.pas           ← Windows IOCP backend
-  Poseidon.Net.IO.Epoll.pas          ← Linux epoll backend
+  Poseidon.Net.IO.IOUring.pas        ← Linux io_uring backend (kernel ≥ 5.1)
+  Poseidon.Net.IO.Epoll.pas          ← Linux epoll backend (fallback)
 ```
 
 ## The Olympian Family
@@ -180,7 +186,7 @@ src/
 
 | Project | Myth | Role |
 |---------|------|------|
-| **Poseidon** (this lib) | God of the seas | Async transport layer — IOCP/epoll, raw I/O |
+| **Poseidon** (this lib) | God of the seas | Async transport layer — IOCP/io_uring/epoll, raw I/O |
 | [**Triton**](https://github.com/herlondf/triton) | Son of Poseidon, guardian of the depths | Generic resource pool — connections, clients, SMTP |
 | [**Pegasus**](https://github.com/herlondf/pegasus) | Born from Poseidon's blood, ridden by heroes | HTTP framework — routing, middleware, providers |
 | **Hermes** *(Redis4D)* | Messenger of the gods, guide between realms | Redis client — fast key-value, pub/sub, messaging |

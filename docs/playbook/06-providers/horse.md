@@ -1,7 +1,7 @@
 ﻿# Horse Provider
 
 `Horse.Provider.Poseidon` replaces Horse's default Indy transport with Poseidon's
-IOCP/epoll engine. The application code stays exactly the same — only the define changes.
+IOCP/io_uring/epoll engine. The application code stays exactly the same — only the define changes.
 
 ## Why use it
 
@@ -9,7 +9,7 @@ The default Horse/Indy provider creates **one OS thread per connection**.
 At 700–800 concurrent connections: 800 threads × 8 MB stack = 6.4 GB virtual memory,
 which corrupts the glibc heap on Linux → double free → crash.
 
-Poseidon uses IOCP/epoll: all connections share a bounded worker pool (`WorkerCount`,
+Poseidon uses IOCP/io_uring/epoll: all connections share a bounded worker pool (`WorkerCount`,
 default 200). Thread count is **fixed regardless of concurrent connections**.
 200 workers × 8 MB = 1.6 GB — safe at any scale.
 
@@ -76,7 +76,7 @@ See full runnable project at [`samples/05-horse-provider/`](../../../samples/05-
 
 | | Poseidon provider | Indy (default) |
 |---|---|---|
-| Thread model | Fixed pool (IOCP/epoll) | 1 thread per connection |
+| Thread model | Fixed pool (IOCP/io_uring/epoll) | 1 thread per connection |
 | 800 concurrent conns | ~1.6 GB RAM | ~6.4 GB RAM |
 | Linux crash at high load | No | Yes (glibc heap corruption) |
 | Horse middleware | Full compatibility | Full compatibility |

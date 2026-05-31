@@ -9,7 +9,7 @@
 
 ## Não é adequado para
 
-- Targets 32-bit (implementação epoll/IOCP é exclusivamente 64-bit)
+- Targets 32-bit (implementação io_uring/epoll/IOCP é exclusivamente 64-bit)
 - Targets macOS / ARM (não implementado)
 - Aplicações que precisam do pipeline completo WebBroker sem Horse ou Pegasus
 
@@ -18,7 +18,8 @@
 | | Poseidon | Indy | Delphi-Cross-Socket |
 |---|---|---|---|
 | Dependências externas | nenhuma | nenhuma | CnPack (crypto) |
-| epoll Linux | ✅ | ❌ | ✅ |
+| Linux io_uring (kernel ≥ 5.1) | ✅ | ❌ | ❌ |
+| Linux epoll (fallback) | ✅ | ❌ | ✅ |
 | IOCP Windows | ✅ | ❌ (blocking) | ✅ |
 | HTTP/2 | ✅ | ❌ | ❌ |
 | WebSocket | ✅ | parcial | ✅ |

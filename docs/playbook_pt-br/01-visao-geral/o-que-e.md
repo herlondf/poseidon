@@ -4,7 +4,8 @@ Poseidon é uma biblioteca Delphi nativa de I/O assíncrono para servidores HTTP
 Ela ignora os stacks Delphi-Cross-Socket e Indy em favor de syscalls diretas do SO:
 
 - **Windows**: I/O Completion Ports (IOCP) via `WSARecv` / `WSASend`
-- **Linux**: epoll edge-triggered via `epoll_wait` / `sendfile`
+- **Linux (kernel ≥ 5.1)**: io_uring via `io_uring_setup` / `io_uring_enter` (preferido)
+- **Linux (kernel < 5.1)**: epoll level-triggered + `EPOLLONESHOT` (fallback automático)
 
 Um único `WSASend` (ou `write`) entrega a resposta HTTP completa — sem travamento do Nagle,
 sem double-write, sem necessidade de `TCP_NODELAY`.

@@ -4,17 +4,17 @@
 
 O Poseidon busca ser uma biblioteca Delphi de I/O assíncrono com zero dependências, focada em:
 
-- **Apenas syscalls nativas** — epoll no Linux, IOCP no Windows; sem camada de transporte de terceiros
+- **Apenas syscalls nativas** — io_uring/epoll no Linux, IOCP no Windows; sem camada de transporte de terceiros
 - **Um único WSASend por resposta** — elimina o stall de Nagle causado por padrões de dupla escrita
 - **Hot path lock-free** — buffer pool e context pool com TMonitor; sem lock global no despacho de requisições
 - **Separação de protocolos** — HttpServer cuida do I/O; adapters traduzem protocolos; pools gerenciam memória — nunca misturar
 
 ## Diretrizes técnicas
 
-- `Poseidon.Net.HttpServer` é a **única** unit que faz syscalls diretas (epoll/IOCP). Todas as demais são adapters.
+- `Poseidon.Net.HttpServer` seleciona e gerencia o backend de I/O (`TIOUringBackend` / `TEpollBackend` / `TIOCPBackend`). Todas as demais units são adapters — nunca adicionar syscalls fora de `Poseidon.Net.IO.*`.
 - Nunca adicionar `uses` de bibliotecas de terceiros em qualquer unit `Poseidon.Net.*` — zero dependências externas é uma restrição rígida.
 - Novas units seguem a convenção de nomenclatura `Poseidon.Net.<Modulo>.pas`.
-- Compatibilidade de plataforma: Linux 64-bit (epoll) **e** Windows 64-bit (IOCP). Qualquer bloco `{$IFDEF}` deve cobrir ambos.
+- Compatibilidade de plataforma: Linux 64-bit (io_uring ≥ 5.1 / epoll fallback) **e** Windows 64-bit (IOCP). Qualquer bloco `{$IFDEF}` deve cobrir ambas as plataformas. Novos backends de I/O vão em `Poseidon.Net.IO.<Nome>.pas` e implementam `IIOBackend`.
 - `class var` compartilhados entre threads → proteger com `TMonitor` ou `TCriticalSection`. Ver `Poseidon.Net.Pool.Buffer` como referência.
 - `try/finally` obrigatório sempre que um objeto é alocado e precisa ser liberado.
 - Sem blocos `except` vazios. Logar ou relançar.
@@ -39,7 +39,7 @@ Sempre valide:
 
 ## Adicionando uma nova funcionalidade de protocolo
 
-1. Se requer novas syscalls, adicioná-las a `Poseidon.Net.HttpServer.pas` com guards `{$IFDEF MSWINDOWS}` / `{$IFDEF LINUX}`.
+1. Se requer novas syscalls, criar `Poseidon.Net.IO.<Nome>.pas` implementando `IIOBackend`, ou estender um backend existente. Nunca adicionar syscalls diretamente no `HttpServer.pas`.
 2. Criar uma unit dedicada `Poseidon.Net.<Funcionalidade>.pas` para a lógica do protocolo.
 3. Expor via método em `TPoseidonNativeServer` — callers não devem precisar referenciar a nova unit diretamente.
 4. Adicionar um sample em `samples/` e documentar em `docs/playbook/03-protocols/`.

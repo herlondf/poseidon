@@ -76,6 +76,35 @@ LText := TEncoding.UTF8.GetString(AFrame.Payload);
 - `TWebSocketUtils` exposes the raw protocol helpers (`ParseFrame`, `BuildFrame`,
   `HandshakeAccept`) if you need lower-level control.
 
+## permessage-deflate compression (RFC 7692)
+
+Poseidon automatically negotiates `permessage-deflate` when the client advertises it
+in the `Sec-WebSocket-Extensions` header during the upgrade handshake. No configuration
+is required — the extension is enabled per-connection when both sides agree.
+
+When active:
+
+- Outgoing `Send` and `SendBinary` calls compress the payload with raw DEFLATE
+  (windowBits = -15, stateless — `no-context-takeover` on both sides).
+- Incoming frames with the RSV1 bit set are transparently decompressed before the
+  handler receives them.
+- `TWebSocketFrame.RSV1` is `True` for compressed frames if you need to detect them.
+
+To check whether compression is active on a connection:
+
+```pascal
+LServer.RegisterWSHandler('/ws',
+  procedure(AConn: IPoseidonWSConn; const AFrame: TWebSocketFrame)
+  begin
+    if AConn.DeflateEnabled then
+      // compression is active for this connection
+    AConn.Send('pong');
+  end);
+```
+
+The `TWSDeflateUtils` class in `Poseidon.Net.WebSocket` exposes the raw
+`Compress` / `Decompress` helpers if you need them independently.
+
 ## Frame encoding internals
 
 `TextFrame` and `CloseFrame` use a zero-copy strategy: the payload bytes are

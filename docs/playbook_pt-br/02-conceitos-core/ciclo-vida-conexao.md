@@ -46,6 +46,34 @@ Conexões HTTP/1.1 com `Connection: keep-alive` reutilizam a mesma conexão TCP 
 múltiplas requisições. O buffer de acumulação (`AccumBuf`) é mantido entre requisições
 e reutilizado sem realocação.
 
+## TCP half-close no shutdown (R-6)
+
+Quando `_CloseConn` é chamado, o Poseidon realiza um **TCP half-close** antes de
+`closesocket` / `close(fd)`:
+
+```
+shutdown(socket, SD_SEND / SHUT_WR)   — para de enviar; peer ainda pode ler
+closesocket / close(fd)                — encerra após o peer drenar
+```
+
+`SD_SEND` (Windows) / `SHUT_WR` (Linux) sinaliza ao peer remoto que não haverá mais
+envios, mas o socket permanece aberto para leitura. Isso permite que o cliente receba
+os bytes que já estão no buffer de envio do kernel antes de a conexão ser completamente
+encerrada — prevenindo perda silenciosa de dados em shutdowns abruptos.
+
+Esse comportamento é automático e não requer configuração.
+
+## GOAWAY HTTP/2 no shutdown (R-2)
+
+Quando o servidor é parado enquanto uma conexão HTTP/2 está ativa, o Poseidon envia
+um frame `GOAWAY` antes de fechar o socket. O `GOAWAY` carrega o último stream ID
+processado e o código `NO_ERROR`, sinalizando ao cliente que pode com segurança
+reattempt streams com IDs maiores que o último processado em uma nova conexão.
+
+O callback de fechamento (`FCloseProc`) é adiado até que todos os streams ativos
+tenham terminado de enviar suas respostas. Se `DrainTimeoutMs` expirar primeiro,
+a conexão é fechada incondicionalmente.
+
 ## Upgrade para WebSocket / HTTP/2
 
 Quando o dispatcher detecta um upgrade WebSocket (`Upgrade: websocket`) ou um upgrade

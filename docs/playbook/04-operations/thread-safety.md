@@ -54,7 +54,7 @@ TInterlocked.Increment(GRequestCount);
 
 ## I/O thread separation
 
-The I/O completion thread (IOCP/epoll) is separate from the worker pool.
+The I/O completion thread (IOCP / io_uring / epoll) is separate from the worker pool.
 It calls `OnRecv`/`OnSend` callbacks internally but never invokes the application
 handler. The only shared objects between I/O thread and workers are the
 `TNativeConn` connection objects, which are ref-counted for safe cross-thread lifetime.
