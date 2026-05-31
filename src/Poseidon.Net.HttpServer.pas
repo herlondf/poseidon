@@ -28,7 +28,8 @@ uses
   Poseidon.Net.HTTP2,
   Poseidon.Net.Metrics,
   Poseidon.Net.ProxyProtocol,
-  Poseidon.Net.IO;
+  Poseidon.Net.IO,
+  Poseidon.Net.Interfaces;
 
 type
   // R-5: TPoseidonNativeServer implements IDispatchCallbacks (non-ref-counted).
@@ -87,6 +88,10 @@ type
     FIOBackend:       IIOBackend;
     // R-5: protocol dispatcher
     FDispatcher:      TProtocolDispatcher;
+    // R-6: injected dependencies (DIP) — nil = use DefaultXxx singleton
+    FBufferPool:      IBufferPool;
+    FSSLProvider:     ISSLProvider;
+    FCompression:     ICompressionProvider;
 
     procedure _OnNewSocket(ASocket: NativeUInt; const ARemoteAddr: string);
     procedure _PostRecv(AConn: Pointer);
@@ -123,7 +128,12 @@ type
     // Returns True when the request should proceed; False = rate-limited.
     function  _CheckRateLimit(const ARemoteAddr: string): Boolean;
   public
-    constructor Create;
+    // ABufferPool, ASSLProvider, ACompression: nil selects the built-in default
+    // (backward-compatible — existing code that calls Create without args unchanged).
+    constructor Create(
+      ABufferPool:  IBufferPool          = nil;
+      ASSLProvider: ISSLProvider         = nil;
+      ACompression: ICompressionProvider = nil); overload;
     destructor  Destroy; override;
     procedure ConfigureSSL(const ACertFile, AKeyFile: string);
     procedure AddSSLCert(const AHostName, ACertFile, AKeyFile: string);
@@ -321,13 +331,13 @@ begin
 
   if LSendLen > 0 then
   begin
-    if TPoseidonSSL.SSL_Write(LConn.SSLHandle, @AAppData[0], LSendLen) <= 0 then
+    if FSSLProvider.SSLWrite(LConn.SSLHandle, @AAppData[0], LSendLen) <= 0 then
     begin
       // P-4: release pool buffer before closing connection
       if AActualLen > 0 then
       begin
         LTmp := AAppData;
-        TBufferPool.Release(LTmp);
+        FBufferPool.Release(LTmp);
       end;
       _CloseConn(AConn);
       Exit;
@@ -336,11 +346,11 @@ begin
     if AActualLen > 0 then
     begin
       LTmp := AAppData;
-      TBufferPool.Release(LTmp);
+      FBufferPool.Release(LTmp);
     end;
   end;
 
-  LPending := TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio);
+  LPending := FSSLProvider.BIOPending(LConn.SSLWriteBio);
   if LPending <= 0 then
   begin
     _PostSend(AConn, nil);
@@ -348,7 +358,7 @@ begin
   end;
 
   SetLength(LEnc, LPending);
-  LN := TPoseidonSSL.BIO_Read(LConn.SSLWriteBio, @LEnc[0], LPending);
+  LN := FSSLProvider.BIORead(LConn.SSLWriteBio, @LEnc[0], LPending);
   if LN <= 0 then
   begin
     _CloseConn(AConn);
@@ -366,10 +376,10 @@ var
   LN:       Integer;
 begin
   if LConn.SSLWriteBio = nil then Exit;
-  LPending := TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio);
+  LPending := FSSLProvider.BIOPending(LConn.SSLWriteBio);
   if LPending <= 0 then Exit;
   SetLength(LEnc, LPending);
-  LN := TPoseidonSSL.BIO_Read(LConn.SSLWriteBio, @LEnc[0], LPending);
+  LN := FSSLProvider.BIORead(LConn.SSLWriteBio, @LEnc[0], LPending);
   if LN <= 0 then Exit;
   if LN < LPending then SetLength(LEnc, LN);
   _PostSend(AConn, LEnc);
@@ -574,11 +584,11 @@ begin
   if AArg = nil then Exit;
   LServer := TPoseidonNativeServer(AArg);
   if LServer.FCertCtxByHost = nil then Exit;
-  LHost := LowerCase(TPoseidonSSL.SSL_GetServername(ASSL));
+  LHost := LowerCase(LServer.FSSLProvider.GetServername(ASSL));
   if LHost = '' then Exit;
   if LServer.FCertCtxByHost.TryGetValue(LHost, LCtx) and (LCtx <> nil) then
   begin
-    TPoseidonSSL.SSL_SetCTX(ASSL, LCtx);
+    LServer.FSSLProvider.SetCTXOnSSL(ASSL, LCtx);
     Result := SSL_TLSEXT_ERR_OK;
   end;
 end;
@@ -589,23 +599,23 @@ begin
     raise Exception.Create('ConfigureSSL must be called before Listen()');
   if FSSLCtx <> nil then
   begin
-    TPoseidonSSL.CTX_Free(FSSLCtx);
+    FSSLProvider.FreeContext(FSSLCtx);
     FSSLCtx := nil;
   end;
-  TPoseidonSSL.EnsureLoaded;
-  FSSLCtx := TPoseidonSSL.CTX_New;
-  TPoseidonSSL.CTX_LoadCert(FSSLCtx, ACertFile);
-  TPoseidonSSL.CTX_LoadKey(FSSLCtx, AKeyFile);
-  TPoseidonSSL.CTX_VerifyKey(FSSLCtx);
+  FSSLProvider.EnsureLoaded;
+  FSSLCtx := FSSLProvider.NewContext;
+  FSSLProvider.LoadCert(FSSLCtx, ACertFile);
+  FSSLProvider.LoadKey(FSSLCtx, AKeyFile);
+  FSSLProvider.VerifyKey(FSSLCtx);
   // S-6: enforce minimum TLS version (default TLS 1.2; set MinTLSVersion := 0 to disable)
-  TPoseidonSSL.CTX_SetMinVersion(FSSLCtx, FMinTLSVersion);
+  FSSLProvider.SetMinVersion(FSSLCtx, FMinTLSVersion);
   // A-4: enable session cache to reduce handshake cost on reconnections
-  TPoseidonSSL.CTX_EnableSessionCache(FSSLCtx);
+  FSSLProvider.EnableSessionCache(FSSLCtx);
   // Register SNI callback so hostnames registered via AddSSLCert can switch CTX.
-  TPoseidonSSL.CTX_SetSNICallback(FSSLCtx, @PoseidonSNIServernameCallback, Self);
+  FSSLProvider.SetSNICallback(FSSLCtx, @PoseidonSNIServernameCallback, Self);
   // Register ALPN callback to negotiate "h2" when HTTP2Enabled is True.
   if FH2Enabled then
-    TPoseidonSSL.CTX_SetALPN(FSSLCtx, Self);
+    FSSLProvider.SetALPN(FSSLCtx, Self);
   FSSLEnabled := True;
 end;
 
@@ -615,7 +625,7 @@ begin
     raise Exception.Create('ConfigureMTLS must be called before Listen()');
   if FSSLCtx = nil then
     raise Exception.Create('Call ConfigureSSL before ConfigureMTLS');
-  TPoseidonSSL.CTX_ConfigureMTLS(FSSLCtx, ACAFile);
+  FSSLProvider.ConfigureMTLS(FSSLCtx, ACAFile);
 end;
 
 procedure TPoseidonNativeServer.AddSSLCert(const AHostName, ACertFile, AKeyFile: string);
@@ -629,20 +639,20 @@ begin
   if FCertCtxByHost = nil then
     FCertCtxByHost := TDictionary<string, Pointer>.Create;
 
-  TPoseidonSSL.EnsureLoaded;
-  LCtx := TPoseidonSSL.CTX_New;
+  FSSLProvider.EnsureLoaded;
+  LCtx := FSSLProvider.NewContext;
   try
-    TPoseidonSSL.CTX_LoadCert(LCtx, ACertFile);
-    TPoseidonSSL.CTX_LoadKey(LCtx, AKeyFile);
-    TPoseidonSSL.CTX_VerifyKey(LCtx);
+    FSSLProvider.LoadCert(LCtx, ACertFile);
+    FSSLProvider.LoadKey(LCtx, AKeyFile);
+    FSSLProvider.VerifyKey(LCtx);
   except
-    TPoseidonSSL.CTX_Free(LCtx);
+    FSSLProvider.FreeContext(LCtx);
     raise;
   end;
 
   // If hostname already had a CTX, free the old one.
   if FCertCtxByHost.ContainsKey(LowerCase(AHostName)) then
-    TPoseidonSSL.CTX_Free(FCertCtxByHost[LowerCase(AHostName)]);
+    FSSLProvider.FreeContext(FCertCtxByHost[LowerCase(AHostName)]);
   FCertCtxByHost.AddOrSetValue(LowerCase(AHostName), LCtx);
 end;
 
@@ -681,7 +691,7 @@ begin
 
   // Feed encrypted bytes into the ReadBio
   if (ALen > 0) and
-     (TPoseidonSSL.BIO_Write(LConn.SSLReadBio, ABuf, ALen) <= 0) then
+     (FSSLProvider.BIOWrite(LConn.SSLReadBio, ABuf, ALen) <= 0) then
   begin
     AAborted := True;
     _CloseConn(AConn);
@@ -690,12 +700,12 @@ begin
 
   if not LConn.SSLHandshook then
   begin
-    LHsRet := TPoseidonSSL.Do_Handshake(LConn.SSLHandle);
+    LHsRet := FSSLProvider.DoHandshake(LConn.SSLHandle);
     if LHsRet = 1 then
     begin
       LConn.SSLHandshook := True;
       // ALPN: if client negotiated "h2", create TH2Conn for this connection.
-      if FH2Enabled and (TPoseidonSSL.SSL_GetSelectedProtocol(LConn.SSLHandle) = 'h2') then
+      if FH2Enabled and (FSSLProvider.GetSelectedProtocol(LConn.SSLHandle) = 'h2') then
       begin
         LConn.H2Conn := TH2Conn.Create(AConn, _H2Send, _H2Close, _H2OnRequest,
           FH2MaxConcurrentStreams, FH2InitialWindowSize);
@@ -705,11 +715,11 @@ begin
     end
     else
     begin
-      LErr := TPoseidonSSL.Get_Error(LConn.SSLHandle, LHsRet);
+      LErr := FSSLProvider.GetError(LConn.SSLHandle, LHsRet);
       if LErr = SSL_ERROR_WANT_READ then
       begin
         _SSLFlushWriteBio(AConn);
-        if TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio) <= 0 then
+        if FSSLProvider.BIOPending(LConn.SSLWriteBio) <= 0 then
           _PostRecv(AConn);
         AAborted := True;
         Exit;
@@ -719,7 +729,7 @@ begin
       Exit;
     end;
     _SSLFlushWriteBio(AConn);
-    if TPoseidonSSL.BIO_Pending(LConn.SSLWriteBio) > 0 then
+    if FSSLProvider.BIOPending(LConn.SSLWriteBio) > 0 then
     begin
       // Handshake response is being sent; wait for next recv to continue.
       AAborted := True;
@@ -729,16 +739,16 @@ begin
 
   // Drain decrypted application data into AccumBuf
   repeat
-    LDecN := TPoseidonSSL.SSL_Read(LConn.SSLHandle, @LDecBuf[0], RECV_BUF_SIZE);
+    LDecN := FSSLProvider.SSLRead(LConn.SSLHandle, @LDecBuf[0], RECV_BUF_SIZE);
     if LDecN > 0 then
     begin
       if LConn.AccumLen + LDecN > Length(LConn.AccumBuf) then
       begin
         // P-2: grow via pool tier instead of raw SetLength
-        LNew := TBufferPool.Acquire(
+        LNew := FBufferPool.Acquire(
           Max(LConn.AccumLen + LDecN, Length(LConn.AccumBuf) * 2));
         Move(LConn.AccumBuf[0], LNew[0], LConn.AccumLen);
-        TBufferPool.Release(LConn.AccumBuf);
+        FBufferPool.Release(LConn.AccumBuf);
         LConn.AccumBuf := LNew;
       end;
       Move(LDecBuf[0], LConn.AccumBuf[LConn.AccumLen], LDecN);
@@ -746,7 +756,7 @@ begin
     end
     else
     begin
-      LErr := TPoseidonSSL.Get_Error(LConn.SSLHandle, LDecN);
+      LErr := FSSLProvider.GetError(LConn.SSLHandle, LDecN);
       if LErr = SSL_ERROR_WANT_READ then Break;
       AAborted := True;
       _CloseConn(AConn);
@@ -764,10 +774,10 @@ begin
   if LConn.AccumLen + Integer(ALen) > Length(LConn.AccumBuf) then
   begin
     // P-2: grow via pool tier instead of raw SetLength
-    LNew := TBufferPool.Acquire(
+    LNew := FBufferPool.Acquire(
       Max(LConn.AccumLen + Integer(ALen), Length(LConn.AccumBuf) * 2));
     Move(LConn.AccumBuf[0], LNew[0], LConn.AccumLen);
-    TBufferPool.Release(LConn.AccumBuf);
+    FBufferPool.Release(LConn.AccumBuf);
     LConn.AccumBuf := LNew;
   end;
   Move(ABuf^, LConn.AccumBuf[LConn.AccumLen], ALen);
@@ -790,6 +800,7 @@ begin
   LCfg.InFlightCount        := @FInFlightCount;
   LCfg.RateLimitResponse    := FRateLimitResponse;
   LCfg.CompressionEnabled   := FCompressionEnabled;
+  LCfg.Compression          := FCompression;
   LCfg.MetricsEnabled       := FMetricsEnabled;
   LCfg.MetricsPath          := FMetricsPath;
   LCfg.MetricsAllowedCIDR   := FMetricsAllowedCIDR;
@@ -950,9 +961,19 @@ end;
 // Shared: lifecycle (constructor/destructor) — must precede any Listen path
 // ===========================================================================
 
-constructor TPoseidonNativeServer.Create;
+constructor TPoseidonNativeServer.Create(
+  ABufferPool:  IBufferPool;
+  ASSLProvider: ISSLProvider;
+  ACompression: ICompressionProvider);
 begin
   inherited Create;
+  // R-6: wire injected dependencies; nil = built-in defaults
+  if ABufferPool  <> nil then FBufferPool  := ABufferPool
+                          else FBufferPool  := DefaultBufferPool;
+  if ASSLProvider <> nil then FSSLProvider := ASSLProvider
+                          else FSSLProvider := DefaultSSLProvider;
+  if ACompression <> nil then FCompression := ACompression
+                          else FCompression := DefaultCompressionProvider;
   FIdleTimeoutMs           := 10000;
   FMaxConnections          := 0;
   FMaxConnectionsPerIP     := 0;
@@ -1001,12 +1022,12 @@ begin
   if FCertCtxByHost <> nil then
   begin
     for LPair in FCertCtxByHost do
-      if LPair.Value <> nil then TPoseidonSSL.CTX_Free(LPair.Value);
+      if LPair.Value <> nil then FSSLProvider.FreeContext(LPair.Value);
     FreeAndNil(FCertCtxByHost);
   end;
   if FSSLCtx <> nil then
   begin
-    TPoseidonSSL.CTX_Free(FSSLCtx);
+    FSSLProvider.FreeContext(FSSLCtx);
     FSSLCtx := nil;
   end;
   FreeAndNil(FMetrics);
@@ -1406,7 +1427,7 @@ begin
       FConnList.Delete(0);
       if LConn.SSLHandle <> nil then
       begin
-        TPoseidonSSL.Free_SSL(LConn.SSLHandle);
+        FSSLProvider.FreeSSL(LConn.SSLHandle);
         LConn.SSLHandle   := nil;
         LConn.SSLReadBio  := nil;
         LConn.SSLWriteBio := nil;
@@ -1436,8 +1457,8 @@ begin
   if FSSLEnabled then
   begin
     try
-      LConn.SSLHandle := TPoseidonSSL.New_SSL(FSSLCtx);
-      TPoseidonSSL.Setup_Server(LConn.SSLHandle,
+      LConn.SSLHandle := FSSLProvider.NewSSL(FSSLCtx);
+      FSSLProvider.SetupServerBIOs(LConn.SSLHandle,
         LConn.SSLReadBio, LConn.SSLWriteBio);
     except
       FIOBackend.SocketClose(LConn);  // epoll DEL silently fails (ENOENT) — harmless
@@ -1448,7 +1469,7 @@ begin
   // Connection limit + per-IP enforcement (atomic under FConnLock)
   if not _AdmitAndRegister(LConn) then
   begin
-    if LConn.SSLHandle <> nil then TPoseidonSSL.Free_SSL(LConn.SSLHandle);
+    if LConn.SSLHandle <> nil then FSSLProvider.FreeSSL(LConn.SSLHandle);
     FIOBackend.SocketClose(LConn);
     LConn.Free;
     Exit;
@@ -1466,7 +1487,7 @@ begin
       FConnLock.Leave;
     end;
     if Assigned(FMetrics) then FMetrics.AdjustConnections(-1);
-    if LConn.SSLHandle <> nil then TPoseidonSSL.Free_SSL(LConn.SSLHandle);
+    if LConn.SSLHandle <> nil then FSSLProvider.FreeSSL(LConn.SSLHandle);
     LConn.Free;
   end;
 end;
@@ -1509,7 +1530,7 @@ begin
   FreeAndNil(LConn.H2Conn);
   if LConn.SSLHandle <> nil then
   begin
-    TPoseidonSSL.Free_SSL(LConn.SSLHandle);  // also frees both BIOs
+    FSSLProvider.FreeSSL(LConn.SSLHandle);  // also frees both BIOs
     LConn.SSLHandle   := nil;
     LConn.SSLReadBio  := nil;
     LConn.SSLWriteBio := nil;

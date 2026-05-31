@@ -22,14 +22,14 @@ uses
   System.Classes,
   System.Generics.Collections,
   System.SyncObjs,
-  System.ZLib,
   System.Math,
   Poseidon.Net.Types,
   Poseidon.Net.Connection,
   Poseidon.Net.HTTP2,
   Poseidon.Net.ProxyProtocol,
   Poseidon.Net.Security,
-  Poseidon.Net.ResponseBuilder;
+  Poseidon.Net.ResponseBuilder,
+  Poseidon.Net.Interfaces;
 
 type
   // --------------------------------------------------------------------------
@@ -48,6 +48,7 @@ type
     InFlightCount:        PInt64;   // pointer to server's FInFlightCount (atomic)
     RateLimitResponse:    Integer;
     CompressionEnabled:   Boolean;
+    Compression:          ICompressionProvider;
     MetricsEnabled:       Boolean;
     MetricsPath:          string;
     MetricsAllowedCIDR:   string;
@@ -103,7 +104,7 @@ type
     // Gzip opt-in negotiation — runs after the user handler, before response build.
     // No server state needed beyond the CompressionEnabled flag from AConfig.
     procedure _TryGzipResponse(const AReq: TPoseidonNativeRequest;
-      ACompressionEnabled: Boolean;
+      ACompressionEnabled: Boolean; const ACompression: ICompressionProvider;
       const AContentType: string; var ABody: TBytes;
       var AExtra: TArray<TPair<string,string>>);
   public
@@ -126,7 +127,7 @@ begin
 end;
 
 procedure TProtocolDispatcher._TryGzipResponse(const AReq: TPoseidonNativeRequest;
-  ACompressionEnabled: Boolean;
+  ACompressionEnabled: Boolean; const ACompression: ICompressionProvider;
   const AContentType: string; var ABody: TBytes;
   var AExtra: TArray<TPair<string,string>>);
 const
@@ -135,9 +136,8 @@ var
   I:        Integer;
   LAccept:  string;
   LCTLower: string;
-  LSrc:     TBytesStream;
-  LDest:    TBytesStream;
-  LZip:     TZCompressionStream;
+  LOut:     TBytes;
+  LEnc:     string;
 begin
   if not ACompressionEnabled then Exit;
   if Length(ABody) < GZIP_MIN_SIZE then Exit;
@@ -155,30 +155,12 @@ begin
       LAccept := AReq.Headers[I].Value;
       Break;
     end;
-  if Pos('gzip', LowerCase(LAccept)) <= 0 then Exit;
 
-  LSrc := TBytesStream.Create(ABody);
-  try
-    LDest := TBytesStream.Create;
-    try
-      LZip := TZCompressionStream.Create(LDest, zcDefault, 31); // WindowBits=31 → gzip
-      try
-        LZip.CopyFrom(LSrc, 0);
-      finally
-        LZip.Free;
-      end;
-      SetLength(ABody, LDest.Size);
-      if LDest.Size > 0 then
-        Move(LDest.Bytes[0], ABody[0], LDest.Size);
-    finally
-      LDest.Free;
-    end;
-  finally
-    LSrc.Free;
-  end;
+  if not ACompression.TryCompress(ABody, LAccept, LOut, LEnc) then Exit;
 
+  ABody := LOut;
   SetLength(AExtra, Length(AExtra) + 1);
-  AExtra[High(AExtra)] := TPair<string,string>.Create('Content-Encoding', 'gzip');
+  AExtra[High(AExtra)] := TPair<string,string>.Create('Content-Encoding', LEnc);
 end;
 
 procedure TProtocolDispatcher.Dispatch(AConn: Pointer; const AConfig: TDispatchConfig);
@@ -414,7 +396,7 @@ begin
     FCallbacks.AdjustInflight(-1);
   end;
 
-  _TryGzipResponse(LReq, AConfig.CompressionEnabled, LCT, LBody, LExtra);
+  _TryGzipResponse(LReq, AConfig.CompressionEnabled, AConfig.Compression, LCT, LBody, LExtra);
 
   // P-4: pool-backed response buffer
   LResp       := BuildHTTPResponsePooled(LStatus, LCT, LBody, LReq.KeepAlive,
