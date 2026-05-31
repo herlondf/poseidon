@@ -347,4 +347,7 @@ begin
     CheckInt(I mod 256, LParsed.Payload[I]);
 end;
 
+initialization
+  TDUnitX.RegisterTestFixture(TPoseidonWebSocketTests);
+
 end.

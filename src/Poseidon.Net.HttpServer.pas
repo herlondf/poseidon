@@ -47,6 +47,8 @@ type
     FIdleTimeoutMs:   Integer;     // 0 = disabled; default 10_000
     FIdleSweepThread: TThread;
     FCompressionEnabled: Boolean;  // inline gzip negotiation; default False
+    FBrotliEnabled:  Boolean;      // Brotli compression; default False; requires libbrotlienc
+    FBrotliQuality:  Integer;      // Brotli quality 0-11; default 6
     FMaxConnections:      Integer; // 0 = unlimited; default 0
     FMaxConnectionsPerIP: Integer; // 0 = unlimited; default 0
     FPerIPCount:          TDictionary<string, Integer>;
@@ -154,6 +156,14 @@ type
     // Content-Type are compressed if the client sent Accept-Encoding: gzip.
     // Default False (gzip is CPU-expensive — opt-in).
     property CompressionEnabled: Boolean read FCompressionEnabled write FCompressionEnabled;
+    // Brotli compression: when True and libbrotlienc is available at runtime,
+    // responses > 1KB are compressed with Brotli when the client sends
+    // Accept-Encoding: br. Falls back to gzip when libbrotlienc is absent.
+    // Default False (opt-in). Requires CompressionEnabled = True.
+    property BrotliEnabled: Boolean read FBrotliEnabled write FBrotliEnabled;
+    // Brotli compression quality: 0 (fastest/worst) to 11 (slowest/best).
+    // Default 6 (good balance for APIs). BrotliEnabled must be True.
+    property BrotliQuality: Integer read FBrotliQuality write FBrotliQuality;
     // Maximum concurrent connections. 0 = unlimited. Defends against DoS
     // by sheer connection flood (each conn reserves 8KB AccumBuf). When
     // reached, _OnNewSocket closes the incoming socket immediately.
@@ -801,6 +811,8 @@ begin
   LCfg.RateLimitResponse    := FRateLimitResponse;
   LCfg.CompressionEnabled   := FCompressionEnabled;
   LCfg.Compression          := FCompression;
+  LCfg.BrotliEnabled        := FBrotliEnabled;
+  LCfg.BrotliQuality        := FBrotliQuality;
   LCfg.MetricsEnabled       := FMetricsEnabled;
   LCfg.MetricsPath          := FMetricsPath;
   LCfg.MetricsAllowedCIDR   := FMetricsAllowedCIDR;
@@ -986,6 +998,8 @@ begin
   FMaxWSFrameSize          := 16 * 1024 * 1024;    // R-3: 16MB
   FH2MaxConcurrentStreams  := 100;                 // P-1
   FH2InitialWindowSize     := 65535;               // P-1
+  FBrotliEnabled           := False;               // Brotli: opt-in
+  FBrotliQuality           := 6;                   // Brotli: balanced default
   FSecureHeadersEnabled    := False;               // A-1: opt-in
   FServerBanner            := 'Poseidon/1.0';      // A-2
   FTCPFastOpen             := False;               // TCP_FASTOPEN: opt-in

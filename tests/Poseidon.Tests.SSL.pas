@@ -378,4 +378,7 @@ begin
   IRef := nil;
 end;
 
+initialization
+  TDUnitX.RegisterTestFixture(TSSLInjectionTests);
+
 end.

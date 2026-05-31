@@ -17,6 +17,7 @@ uses
   Poseidon.Tests.ResponseBuilder,
   Poseidon.Tests.ProxyProtocol,
   Poseidon.Tests.SSL,
+  Poseidon.Tests.Brotli,
   Poseidon.Mock.SSLProvider;
 
 var

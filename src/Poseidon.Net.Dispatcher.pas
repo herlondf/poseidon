@@ -29,7 +29,8 @@ uses
   Poseidon.Net.ProxyProtocol,
   Poseidon.Net.Security,
   Poseidon.Net.ResponseBuilder,
-  Poseidon.Net.Interfaces;
+  Poseidon.Net.Interfaces,
+  Poseidon.Net.Brotli;
 
 type
   // --------------------------------------------------------------------------
@@ -49,6 +50,8 @@ type
     RateLimitResponse:    Integer;
     CompressionEnabled:   Boolean;
     Compression:          ICompressionProvider;
+    BrotliEnabled:        Boolean;
+    BrotliQuality:        Integer;   // 0-11; default 6
     MetricsEnabled:       Boolean;
     MetricsPath:          string;
     MetricsAllowedCIDR:   string;
@@ -101,10 +104,10 @@ type
   private
     FCallbacks: IDispatchCallbacks;
 
-    // Gzip opt-in negotiation — runs after the user handler, before response build.
-    // No server state needed beyond the CompressionEnabled flag from AConfig.
-    procedure _TryGzipResponse(const AReq: TPoseidonNativeRequest;
-      ACompressionEnabled: Boolean; const ACompression: ICompressionProvider;
+    // Content-encoding negotiation — gzip and/or Brotli, with q-value priority.
+    // Runs after the user handler, before response build.
+    procedure _TryCompressResponse(const AReq: TPoseidonNativeRequest;
+      const AConfig: TDispatchConfig;
       const AContentType: string; var ABody: TBytes;
       var AExtra: TArray<TPair<string,string>>);
   public
@@ -126,21 +129,70 @@ begin
   FCallbacks := ACallbacks;
 end;
 
-procedure TProtocolDispatcher._TryGzipResponse(const AReq: TPoseidonNativeRequest;
-  ACompressionEnabled: Boolean; const ACompression: ICompressionProvider;
+// Parse a single q-value token like "gzip;q=0.9" → name="gzip", q=0.9
+// Returns True when the token is a valid encoding with q > 0.
+function _ParseEncToken(const AToken: string;
+  out AName: string; out AQ: Double): Boolean;
+var
+  LSemi: Integer;
+  LQStr: string;
+begin
+  LSemi := Pos(';', AToken);
+  if LSemi = 0 then
+  begin
+    AName := Trim(LowerCase(AToken));
+    AQ    := 1.0;
+  end
+  else
+  begin
+    AName := Trim(LowerCase(Copy(AToken, 1, LSemi - 1)));
+    LQStr := Trim(LowerCase(Copy(AToken, LSemi + 1, MaxInt)));
+    if LQStr.StartsWith('q=') then
+    begin
+      if not TryStrToFloat(Copy(LQStr, 3, MaxInt), AQ) then AQ := 1.0;
+    end
+    else
+      AQ := 1.0;
+  end;
+  Result := (AName <> '') and (AQ > 0.0);
+end;
+
+// Parse Accept-Encoding header; returns q-value for a named encoding (0 if absent/q=0).
+function _AcceptQ(const AAccept, AEnc: string): Double;
+var
+  LParts: TArray<string>;
+  LPart:  string;
+  LName:  string;
+  LQ:     Double;
+begin
+  Result := 0.0;
+  LParts := LowerCase(AAccept).Split([',']);
+  for LPart in LParts do
+    if _ParseEncToken(Trim(LPart), LName, LQ) and (LName = LowerCase(AEnc)) then
+    begin
+      Result := LQ;
+      Exit;
+    end;
+end;
+
+procedure TProtocolDispatcher._TryCompressResponse(const AReq: TPoseidonNativeRequest;
+  const AConfig: TDispatchConfig;
   const AContentType: string; var ABody: TBytes;
   var AExtra: TArray<TPair<string,string>>);
 const
-  GZIP_MIN_SIZE = 1024;
+  MIN_SIZE = 1024;
 var
   I:        Integer;
   LAccept:  string;
   LCTLower: string;
   LOut:     TBytes;
   LEnc:     string;
+  LQBr:     Double;
+  LQGzip:   Double;
+  LUseBr:   Boolean;
 begin
-  if not ACompressionEnabled then Exit;
-  if Length(ABody) < GZIP_MIN_SIZE then Exit;
+  if not AConfig.CompressionEnabled then Exit;
+  if Length(ABody) < MIN_SIZE then Exit;
 
   LCTLower := LowerCase(AContentType);
   if LCTLower.StartsWith('image/') or LCTLower.StartsWith('video/') or
@@ -156,11 +208,36 @@ begin
       Break;
     end;
 
-  if not ACompression.TryCompress(ABody, LAccept, LOut, LEnc) then Exit;
+  // Determine preferred encoding respecting RFC 7231 §5.3.4 q-values.
+  // When q-values tie, prefer Brotli (better compression ratio).
+  LUseBr := False;
+  if AConfig.BrotliEnabled and TPoseidonBrotli.IsAvailable then
+  begin
+    LQBr   := _AcceptQ(LAccept, 'br');
+    LQGzip := _AcceptQ(LAccept, 'gzip');
+    LUseBr := (LQBr > 0.0) and (LQBr >= LQGzip);
+  end;
 
-  ABody := LOut;
-  SetLength(AExtra, Length(AExtra) + 1);
-  AExtra[High(AExtra)] := TPair<string,string>.Create('Content-Encoding', LEnc);
+  if LUseBr then
+  begin
+    try
+      LOut := TPoseidonBrotli.Compress(ABody, AConfig.BrotliQuality);
+      ABody := LOut;
+      SetLength(AExtra, Length(AExtra) + 1);
+      AExtra[High(AExtra)] := TPair<string,string>.Create('Content-Encoding', 'br');
+    except
+      // Brotli compress error — fall through to gzip below
+      LUseBr := False;
+    end;
+  end;
+
+  if not LUseBr then
+  begin
+    if not AConfig.Compression.TryCompress(ABody, LAccept, LOut, LEnc) then Exit;
+    ABody := LOut;
+    SetLength(AExtra, Length(AExtra) + 1);
+    AExtra[High(AExtra)] := TPair<string,string>.Create('Content-Encoding', LEnc);
+  end;
 end;
 
 procedure TProtocolDispatcher.Dispatch(AConn: Pointer; const AConfig: TDispatchConfig);
@@ -399,7 +476,7 @@ begin
     FCallbacks.AdjustInflight(-1);
   end;
 
-  _TryGzipResponse(LReq, AConfig.CompressionEnabled, AConfig.Compression, LCT, LBody, LExtra);
+  _TryCompressResponse(LReq, AConfig, LCT, LBody, LExtra);
 
   // P-4: pool-backed response buffer
   LResp       := BuildHTTPResponsePooled(LStatus, LCT, LBody, LReq.KeepAlive,
