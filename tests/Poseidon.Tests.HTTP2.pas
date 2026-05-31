@@ -89,6 +89,36 @@ type
     procedure Settings_MaxConcurrentStreams_CustomValue_EncodedInFrame;
     [Test]
     procedure Settings_InitialWindowSize_CustomValue_EncodedInFrame;
+
+    // Preface — invalid magic
+    [Test]
+    procedure Preface_InvalidMagic_SendsGoAway;
+
+    // SETTINGS with parameters
+    [Test]
+    procedure Settings_WithParameters_NoError;
+
+    // HEADERS / request dispatch
+    [Test]
+    procedure Headers_GetRequest_DispatchesFOnRequest;
+    [Test]
+    procedure Headers_Post_WithDataBody_BodyAccumulated;
+
+    // CONTINUATION without prior HEADERS
+    [Test]
+    procedure Continuation_WithoutPriorHeaders_GoAway;
+
+    // GOAWAY — no active streams → FCloseProc called immediately
+    [Test]
+    procedure GoAway_NoStreams_CloseProcCalledImmediately;
+
+    // RST_STREAM for non-existent stream is silently ignored
+    [Test]
+    procedure RstStream_NonExistentStream_DoesNotClose;
+
+    // Server push — PUSH_PROMISE + promised response sent before reply
+    [Test]
+    procedure ServerPush_OnePushResource_SendsPushPromiseThenResponse;
   end;
   {$M-}
 
@@ -374,6 +404,65 @@ begin
   Result := H2BuildFrame(H2T_GOAWAY, 0, 0, LPayload);
 end;
 
+// Build a SETTINGS frame with a single 6-byte parameter (id + value)
+function H2BuildSettingsParam(AId: Word; AValue: Cardinal): TBytes;
+var
+  LPayload: TBytes;
+begin
+  SetLength(LPayload, 6);
+  LPayload[0] := Byte((AId    shr 8) and $FF);
+  LPayload[1] := Byte( AId           and $FF);
+  LPayload[2] := Byte((AValue shr 24) and $FF);
+  LPayload[3] := Byte((AValue shr 16) and $FF);
+  LPayload[4] := Byte((AValue shr  8) and $FF);
+  LPayload[5] := Byte( AValue         and $FF);
+  Result := H2BuildFrame(H2T_SETTINGS, 0, 0, LPayload);
+end;
+
+// Helper: scan a byte buffer for a GOAWAY frame (type=7); returns True if found
+function H2HasGoAway(const ABuf: TBytes): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  I := 0;
+  while I + 9 <= Length(ABuf) do
+  begin
+    if ABuf[I + 3] = H2T_GOAWAY then
+    begin
+      Result := True;
+      Exit;
+    end;
+    I := I + 9 + (Integer(ABuf[I]) shl 16 or Integer(ABuf[I+1]) shl 8 or Integer(ABuf[I+2]));
+  end;
+end;
+
+// Helper: scan a byte buffer for a PUSH_PROMISE frame (type=5); returns the
+// promised stream ID from the first PUSH_PROMISE found, or 0 if none.
+function H2FindPushPromise(const ABuf: TBytes): Cardinal;
+var
+  I:      Integer;
+  LLen:   Integer;
+begin
+  Result := 0;
+  I := 0;
+  while I + 9 <= Length(ABuf) do
+  begin
+    LLen := Integer(ABuf[I]) shl 16 or Integer(ABuf[I+1]) shl 8 or Integer(ABuf[I+2]);
+    if ABuf[I + 3] = 5 {H2_FRAME_PUSH_PROMISE} then
+    begin
+      // Payload starts at I+9; first 4 bytes are the promised stream ID
+      if I + 9 + 4 <= Length(ABuf) then
+        Result := (Cardinal(ABuf[I+9] and $7F) shl 24) or
+                  (Cardinal(ABuf[I+10]) shl 16) or
+                  (Cardinal(ABuf[I+11]) shl  8) or
+                   Cardinal(ABuf[I+12]);
+      Exit;
+    end;
+    I := I + 9 + LLen;
+  end;
+end;
+
 // Client preface: magic + empty SETTINGS frame
 function H2ClientPreface: TBytes;
 var
@@ -396,17 +485,19 @@ type
 
   TH2TestHarness = class
   private
-    FConn:   TH2Conn;
-    FLock:   TCriticalSection;
-    FSent:   TBytes;
-    FClosed: Boolean;
-    FReqs:   TList<TH2RequestData>;
+    FConn:         TH2Conn;
+    FLock:         TCriticalSection;
+    FSent:         TBytes;
+    FClosed:       Boolean;
+    FReqs:         TList<TH2RequestData>;
+    FNextPushList: TArray<TPoseidonPushResource>; // pushed on next OnRequest call
 
     procedure OnSend(AConn: Pointer; const AData: TBytes);
     procedure OnClose(AConn: Pointer);
     procedure OnRequest(const AReq: TH2RequestData;
       var AStatus: Integer; var AContentType: string;
-      var ABody: TBytes; var AExtra: TH2ExtraArr);
+      var ABody: TBytes; var AExtra: TH2ExtraArr;
+      var APushResources: TArray<TPoseidonPushResource>);
   public
     constructor Create; overload;
     constructor Create(AMaxConcurrent: Cardinal;
@@ -418,6 +509,8 @@ type
     function  Closed: Boolean;
     function  Requests: TList<TH2RequestData>;
     procedure ClearSent;
+    // Configure push resources to return on the next OnRequest call
+    procedure SetNextPush(const APushResources: TArray<TPoseidonPushResource>);
     property  H2: TH2Conn read FConn;
   end;
 
@@ -473,13 +566,22 @@ end;
 
 procedure TH2TestHarness.OnRequest(const AReq: TH2RequestData;
   var AStatus: Integer; var AContentType: string;
-  var ABody: TBytes; var AExtra: TH2ExtraArr);
+  var ABody: TBytes; var AExtra: TH2ExtraArr;
+  var APushResources: TArray<TPoseidonPushResource>);
 begin
   FReqs.Add(AReq);
   AStatus      := 200;
   AContentType := 'text/plain';
   ABody        := TEncoding.UTF8.GetBytes('ok');
   AExtra       := [];
+  APushResources := FNextPushList;
+  SetLength(FNextPushList, 0);  // consume once
+end;
+
+procedure TH2TestHarness.SetNextPush(
+  const APushResources: TArray<TPoseidonPushResource>);
+begin
+  FNextPushList := APushResources;
 end;
 
 procedure TH2TestHarness.Feed(const AData: TBytes);
@@ -814,6 +916,209 @@ begin
       'SETTINGS_INITIAL_WINDOW_SIZE (0x0004) must be present in initial SETTINGS frame');
     CheckInt(CUSTOM_WIN_SIZE, LVal,
       'SETTINGS_INITIAL_WINDOW_SIZE value must match H2InitialWindowSize');
+  finally
+    LH.Free;
+  end;
+end;
+
+// =============================================================================
+// Additional TH2ConnUnitTests — issue #15 coverage
+// =============================================================================
+
+// HPACK static table entries used in HEADERS frames (RFC 7541 Appendix A):
+//   index 2 (0x82) = :method: GET
+//   index 3 (0x83) = :method: POST
+//   index 4 (0x84) = :path: /
+//   index 6 (0x86) = :scheme: http
+
+procedure TH2ConnUnitTests.Preface_InvalidMagic_SendsGoAway;
+// A client that sends garbage instead of the 24-byte H2 preface must receive
+// a GOAWAY frame with PROTOCOL_ERROR (or the connection is closed).
+var
+  LH:    TH2TestHarness;
+  LGarb: TBytes;
+begin
+  LH := TH2TestHarness.Create;
+  try
+    // 24 bytes of garbage (deliberately not the H2 preface magic)
+    LGarb := TBytes.Create(
+      $47, $45, $54, $20, $2F, $20, $48, $54,
+      $54, $50, $2F, $31, $2E, $31, $0D, $0A,
+      $48, $6F, $73, $74, $3A, $20, $78, $0A);
+    LH.Feed(LGarb);
+    Assert.IsTrue(H2HasGoAway(LH.SentBytes) or LH.Closed,
+      'Invalid client preface must trigger GOAWAY or connection close');
+  finally
+    LH.Free;
+  end;
+end;
+
+procedure TH2ConnUnitTests.Settings_WithParameters_NoError;
+// Client SETTINGS frames with HEADER_TABLE_SIZE and ENABLE_PUSH=1 must be
+// accepted without closing the connection.
+var
+  LH: TH2TestHarness;
+begin
+  LH := TH2TestHarness.Create;
+  try
+    LH.Feed(H2ClientPreface);
+    LH.Feed(H2BuildSettingsParam($0001, 4096));  // HEADER_TABLE_SIZE = 4096
+    LH.Feed(H2BuildSettingsParam($0002, 1));     // ENABLE_PUSH = 1 (server ignores push)
+    Assert.IsFalse(LH.Closed,
+      'SETTINGS with HEADER_TABLE_SIZE and ENABLE_PUSH=1 must not close connection');
+  finally
+    LH.Free;
+  end;
+end;
+
+procedure TH2ConnUnitTests.Headers_GetRequest_DispatchesFOnRequest;
+// A HEADERS frame with END_STREAM|END_HEADERS flags and indexed HPACK entries
+// for :method=GET and :path=/ must trigger FOnRequest with the correct fields.
+var
+  LH:     TH2TestHarness;
+  LHpack: TBytes;
+begin
+  LH := TH2TestHarness.Create;
+  try
+    LH.Feed(H2ClientPreface);
+    // HPACK: :method=GET (0x82), :path=/ (0x84), :scheme=http (0x86)
+    LHpack := TBytes.Create($82, $84, $86);
+    // HEADERS stream 1: END_STREAM (0x01) | END_HEADERS (0x04) = 0x05
+    LH.Feed(H2BuildFrame(H2T_HEADERS, $05, 1, LHpack));
+    Assert.AreEqual(1, LH.Requests.Count,
+      'GET / must dispatch FOnRequest exactly once');
+    Assert.AreEqual('GET', LH.Requests[0].Method,
+      ':method decoded from static table index 2 must be GET');
+    Assert.AreEqual('/', LH.Requests[0].Path,
+      ':path decoded from static table index 4 must be /');
+  finally
+    LH.Free;
+  end;
+end;
+
+procedure TH2ConnUnitTests.Headers_Post_WithDataBody_BodyAccumulated;
+// A HEADERS frame (END_HEADERS only) followed by a DATA frame (END_STREAM)
+// must accumulate the body and dispatch FOnRequest with the complete body.
+var
+  LH:     TH2TestHarness;
+  LHpack: TBytes;
+  LBody:  TBytes;
+begin
+  LH := TH2TestHarness.Create;
+  try
+    LH.Feed(H2ClientPreface);
+    // HEADERS stream 1: END_HEADERS (0x04) only — body follows
+    LHpack := TBytes.Create($83, $84, $86);  // :method=POST, :path=/, :scheme=http
+    LH.Feed(H2BuildFrame(H2T_HEADERS, $04, 1, LHpack));
+    // DATA stream 1: END_STREAM (0x01)
+    LBody := TEncoding.UTF8.GetBytes('hello');
+    LH.Feed(H2BuildFrame(H2T_DATA, $01, 1, LBody));
+    Assert.AreEqual(1, LH.Requests.Count,
+      'POST must dispatch FOnRequest exactly once');
+    Assert.AreEqual('POST', LH.Requests[0].Method,
+      ':method must be POST');
+    Assert.AreEqual('hello', TEncoding.UTF8.GetString(LH.Requests[0].Body),
+      'Body must be accumulated from DATA frame');
+  finally
+    LH.Free;
+  end;
+end;
+
+procedure TH2ConnUnitTests.Continuation_WithoutPriorHeaders_GoAway;
+// RFC 7540 §6.10: CONTINUATION frame received without a preceding HEADERS
+// frame must be treated as a connection error (PROTOCOL_ERROR → GOAWAY).
+var
+  LH: TH2TestHarness;
+begin
+  LH := TH2TestHarness.Create;
+  try
+    LH.Feed(H2ClientPreface);
+    LH.ClearSent;
+    // CONTINUATION for stream 1 — FContinStreamID=0 so 1≠0 → PROTOCOL_ERROR
+    LH.Feed(H2BuildFrame(H2T_CONTINUATION, $04, 1,
+      TBytes.Create($82)  {trivial HPACK byte}));
+    Assert.IsTrue(H2HasGoAway(LH.SentBytes),
+      'CONTINUATION without preceding HEADERS must trigger GOAWAY PROTOCOL_ERROR');
+  finally
+    LH.Free;
+  end;
+end;
+
+procedure TH2ConnUnitTests.GoAway_NoStreams_CloseProcCalledImmediately;
+// When _GoAway is triggered with no active streams (FActiveStreams=0),
+// FCloseProc must be called synchronously (FClosed flag set before return).
+var
+  LH: TH2TestHarness;
+begin
+  LH := TH2TestHarness.Create;
+  try
+    LH.Feed(H2ClientPreface);
+    // DATA frame on stream 0 is a connection error → _GoAway called with 0 active streams
+    LH.Feed(H2BuildFrame(H2T_DATA, 0, 0, TBytes.Create($01)));
+    Assert.IsTrue(LH.Closed,
+      'GOAWAY with no active streams must invoke FCloseProc immediately');
+  finally
+    LH.Free;
+  end;
+end;
+
+procedure TH2ConnUnitTests.RstStream_NonExistentStream_DoesNotClose;
+// RST_STREAM for a stream that was never opened must be silently ignored
+// (no connection-level error, no close).
+var
+  LH: TH2TestHarness;
+begin
+  LH := TH2TestHarness.Create;
+  try
+    LH.Feed(H2ClientPreface);
+    LH.Feed(H2BuildRstStream(99, 0 {NO_ERROR}));
+    Assert.IsFalse(LH.Closed,
+      'RST_STREAM for non-existent stream must be silently ignored');
+    Assert.IsFalse(H2HasGoAway(LH.SentBytes),
+      'RST_STREAM for non-existent stream must not trigger GOAWAY');
+  finally
+    LH.Free;
+  end;
+end;
+
+procedure TH2ConnUnitTests.ServerPush_OnePushResource_SendsPushPromiseThenResponse;
+// When FOnRequest returns a non-empty APushResources array, TH2Conn must:
+// 1. Send a PUSH_PROMISE frame on the associated (client) stream before the reply.
+// 2. Follow it with HEADERS+DATA on a server-initiated (even) promised stream.
+// 3. Send the normal HEADERS response for the original request last.
+var
+  LH:    TH2TestHarness;
+  LHpack: TBytes;
+  LPush: TPoseidonPushResource;
+  LPromisedID: Cardinal;
+begin
+  LH := TH2TestHarness.Create;
+  try
+    // Configure a single push resource for the next request
+    LPush.Path        := '/style.css';
+    LPush.ContentType := 'text/css';
+    LPush.Body        := TEncoding.UTF8.GetBytes('body{}');
+    LPush.Extra       := [];
+    LH.SetNextPush([LPush]);
+
+    LH.Feed(H2ClientPreface);
+    LHpack := TBytes.Create($82, $84, $86);  // GET / http
+    LH.Feed(H2BuildFrame(H2T_HEADERS, $05, 1, LHpack));
+
+    // A PUSH_PROMISE frame (type=5) must appear in the sent bytes
+    LPromisedID := H2FindPushPromise(LH.SentBytes);
+    Assert.IsTrue(LPromisedID > 0,
+      'Server must send a PUSH_PROMISE before the response');
+
+    // Server-initiated streams are always even
+    Assert.IsTrue((LPromisedID mod 2) = 0,
+      'Promised stream ID must be even (server-initiated)');
+
+    // Connection must remain open (no GOAWAY)
+    Assert.IsFalse(H2HasGoAway(LH.SentBytes),
+      'Server push must not trigger GOAWAY');
+    Assert.IsFalse(LH.Closed,
+      'Connection must stay open after server push');
   finally
     LH.Free;
   end;

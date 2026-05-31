@@ -56,6 +56,9 @@
     <DCCReference Include="Poseidon.Tests.ProxyProtocol.pas"/>
     <DCCReference Include="Poseidon.Tests.SSL.pas"/>
     <DCCReference Include="Poseidon.Tests.Brotli.pas"/>
+    <DCCReference Include="Poseidon.Tests.HPACK.pas"/>
+    <DCCReference Include="Poseidon.Tests.Metrics.pas"/>
+    <DCCReference Include="Poseidon.Tests.Dispatcher.pas"/>
     <DCCReference Include="mocks\Poseidon.Mock.SSLProvider.pas"/>
   </ItemGroup>
   <ProjectExtensions>

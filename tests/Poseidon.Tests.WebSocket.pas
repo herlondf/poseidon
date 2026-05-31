@@ -71,6 +71,20 @@ type
     procedure BuildFrame_ReservedOpcode_RaisesArgumentException;
     [Test]
     procedure BuildFrame_ReservedOpcode0B_RaisesArgumentException;
+
+    // permessage-deflate (RFC 7692)
+    [Test]
+    procedure DeflateUtils_CompressDecompress_RoundTrip;
+    [Test]
+    procedure BuildFrame_DeflateTrue_SetsRSV1Bit;
+    [Test]
+    procedure ParseFrame_FrameWithRSV1_RSV1IsTrue;
+    [Test]
+    procedure ParseFrame_FrameWithoutRSV1_RSV1IsFalse;
+    [Test]
+    procedure BuildHandshakeResponse_DeflateEnabled_ContainsExtensionHeader;
+    [Test]
+    procedure BuildHandshakeResponse_DeflateDisabled_NoExtensionHeader;
   end;
   {$M-}
 
@@ -345,6 +359,97 @@ begin
   CheckInt(200, Length(LParsed.Payload));
   for I := 0 to 199 do
     CheckInt(I mod 256, LParsed.Payload[I]);
+end;
+
+// =============================================================================
+// permessage-deflate tests (RFC 7692)
+// =============================================================================
+
+procedure TPoseidonWebSocketTests.DeflateUtils_CompressDecompress_RoundTrip;
+// Compress then decompress a string; result must match the original.
+var
+  LOriginal: TBytes;
+  LCompressed: TBytes;
+  LRestored:   TBytes;
+begin
+  LOriginal   := TEncoding.UTF8.GetBytes('Hello, WebSocket permessage-deflate! Repeat: Hello Hello Hello.');
+  LCompressed := TWSDeflateUtils.Compress(LOriginal);
+  Assert.IsTrue(Length(LCompressed) > 0,
+    'Compressed output must be non-empty');
+  LRestored := TWSDeflateUtils.Decompress(LCompressed);
+  Assert.AreEqual(Length(LOriginal), Length(LRestored),
+    'Decompressed length must equal original');
+  Assert.AreEqual(TEncoding.UTF8.GetString(LOriginal),
+                  TEncoding.UTF8.GetString(LRestored),
+    'Decompressed content must match original');
+end;
+
+procedure TPoseidonWebSocketTests.BuildFrame_DeflateTrue_SetsRSV1Bit;
+// BuildFrame with ADeflate=True must set bit 6 (RSV1) in the first byte.
+var
+  LPayload: TBytes;
+  LFrame:   TBytes;
+begin
+  LPayload := TEncoding.UTF8.GetBytes('test');
+  LFrame   := TWebSocketUtils.BuildFrame(OPCODE_TEXT, True, True, LPayload);
+  Assert.IsTrue(Length(LFrame) >= 2, 'Frame must have at least 2 bytes');
+  Assert.IsTrue((LFrame[0] and $40) <> 0,
+    'RSV1 bit (bit 6 = $40) must be set in first byte of deflate frame');
+  Assert.AreEqual($C1, Integer(LFrame[0]),  // $80 (FIN) or $40 (RSV1) or $01 (text) = $C1
+    'First byte of deflate text frame with FIN must be $C1');
+end;
+
+procedure TPoseidonWebSocketTests.ParseFrame_FrameWithRSV1_RSV1IsTrue;
+// A manually crafted frame with RSV1 bit set must have RSV1=True after ParseFrame.
+var
+  LRaw:      TBytes;
+  LFrame:    TWebSocketFrame;
+  LConsumed: Integer;
+begin
+  // Build a minimal frame: byte0 = $C1 (FIN|RSV1|text), byte1 = $00 (no mask, len=0)
+  LRaw    := TBytes.Create($C1, $00);
+  Assert.IsTrue(TWebSocketUtils.ParseFrame(@LRaw[0], Length(LRaw), LFrame, LConsumed));
+  Assert.IsTrue(LFrame.RSV1,
+    'ParseFrame must set RSV1=True when RSV1 bit is present in frame header');
+end;
+
+procedure TPoseidonWebSocketTests.ParseFrame_FrameWithoutRSV1_RSV1IsFalse;
+// A normal frame (no RSV1) must have RSV1=False after ParseFrame.
+var
+  LFrame:    TBytes;
+  LParsed:   TWebSocketFrame;
+  LConsumed: Integer;
+begin
+  LFrame := TWebSocketUtils.TextFrame('hello');
+  Assert.IsTrue(TWebSocketUtils.ParseFrame(@LFrame[0], Length(LFrame), LParsed, LConsumed));
+  Assert.IsFalse(LParsed.RSV1,
+    'ParseFrame must set RSV1=False for normal (non-deflate) frame');
+end;
+
+procedure TPoseidonWebSocketTests.BuildHandshakeResponse_DeflateEnabled_ContainsExtensionHeader;
+// When ADeflateEnabled=True, the 101 response must contain the extension header.
+var
+  LResp:    TBytes;
+  LRespStr: string;
+begin
+  LResp    := TWebSocketUtils.BuildHandshakeResponse('dGhlIHNhbXBsZSBub25jZQ==', True);
+  LRespStr := TEncoding.ASCII.GetString(LResp);
+  Assert.IsTrue(Pos('Sec-WebSocket-Extensions', LRespStr) > 0,
+    'Deflate-enabled handshake response must contain Sec-WebSocket-Extensions header');
+  Assert.IsTrue(Pos('permessage-deflate', LRespStr) > 0,
+    'Extensions header must contain permessage-deflate');
+end;
+
+procedure TPoseidonWebSocketTests.BuildHandshakeResponse_DeflateDisabled_NoExtensionHeader;
+// When ADeflateEnabled=False (default), no extension header should appear.
+var
+  LResp:    TBytes;
+  LRespStr: string;
+begin
+  LResp    := TWebSocketUtils.BuildHandshakeResponse('dGhlIHNhbXBsZSBub25jZQ==');
+  LRespStr := TEncoding.ASCII.GetString(LResp);
+  Assert.IsFalse(Pos('Sec-WebSocket-Extensions', LRespStr) > 0,
+    'Default handshake response must not contain Sec-WebSocket-Extensions header');
 end;
 
 initialization

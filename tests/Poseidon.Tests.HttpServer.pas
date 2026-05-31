@@ -41,6 +41,10 @@ type
     procedure Get_UnknownRoute_Returns404;
     [Test]
     procedure Get_HandlerSetsStatus_ReturnsOverriddenStatus;
+    [Test]
+    procedure Post_Echo_ReflectsBody;
+    [Test]
+    procedure KeepAlive_MultipleRequests_ReuseConnection;
   end;
 
   // ── Fixture 2: security / reliability properties ────────────────────────────
@@ -63,6 +67,12 @@ type
     // Path traversal (S-2)
     [Test]
     procedure PathTraversal_DotDotSegment_Returns400;
+    [Test]
+    procedure PathTraversal_PercentEncodedDotDot_Returns400;
+
+    // Request smuggling (S-4)
+    [Test]
+    procedure Smuggling_CLAndChunked_Returns400;
 
     // MaxRequestSize (R-4)
     [Test]
@@ -87,6 +97,29 @@ type
     // Rate limit
     [Test]
     procedure RateLimit_PerIP_ExceededReturns429;
+    [Test]
+    procedure RateLimit_Global_ExceededReturns429;
+  end;
+
+  // ── Fixture 6: idle timeout ─────────────────────────────────────────────────
+  [TestFixture]
+  TPoseidonHttpServerIdleTests = class  // port 19008
+  private
+    FEvent: TEvent;
+  public
+    [SetupFixture]
+    procedure SetupFixture;
+    [TeardownFixture]
+    procedure TeardownFixture;
+
+    // Idle timeout: an open keep-alive TCP connection that sends no data
+    // must be closed by the server after IdleTimeoutMs.
+    [Test]
+    procedure IdleTimeout_InactiveConnection_ClosedByServer;
+
+    // A connection that keeps sending requests must NOT be closed by idle sweep.
+    [Test]
+    procedure IdleTimeout_ActiveConnection_NotClosed;
   end;
 
   // ── Fixture 3: graceful drain (R-1) ────────────────────────────────────────
@@ -164,6 +197,12 @@ uses
   Poseidon.Net.Types,
   Poseidon.Net.WebSocket,
   Poseidon.Net.HttpServer;
+
+// Forward declarations — implementations are in the WS fixture section below,
+// but these helpers are also used by the Adv fixture (raw socket tests).
+function OpenTCPSocket(APort: Word): TSocket; forward;
+function SendAll(ASocket: TSocket; const ABuf: TBytes): Boolean; forward;
+function RecvSome(ASocket: TSocket; out AOut: TBytes; AMax: Integer = 4096): Integer; forward;
 
 const
   INTEST_PORT = 19001;
@@ -321,6 +360,58 @@ begin
     LClient.HandleRedirects := False;
     LResponse := LClient.Get(BASE_URL + '/teapot');
     Assert.AreEqual(418, LResponse.StatusCode);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TPoseidonHttpServerTests.Post_Echo_ReflectsBody;
+// Verifies that the handler receives RawBody and can echo it verbatim back to
+// the caller — covers the POST branch of TestHttpHandler and body parsing.
+var
+  LClient:   THTTPClient;
+  LResponse: IHTTPResponse;
+  LBody:     TStringStream;
+const
+  PAYLOAD = '{"reflected":true}';
+begin
+  LClient := THTTPClient.Create;
+  LBody   := TStringStream.Create(PAYLOAD, TEncoding.UTF8);
+  try
+    LResponse := LClient.Post(BASE_URL + '/anything', LBody, nil,
+      [TNameValuePair.Create('Content-Type', 'application/json')]);
+    Assert.AreEqual(201, LResponse.StatusCode,
+      'POST must return 201');
+    Assert.AreEqual(PAYLOAD, LResponse.ContentAsString,
+      'POST response body must reflect request body verbatim');
+  finally
+    LBody.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TPoseidonHttpServerTests.KeepAlive_MultipleRequests_ReuseConnection;
+// HTTP/1.1 keep-alive: a single THTTPClient maintains a persistent connection
+// and the server must correctly handle multiple sequential requests on it.
+var
+  LClient:    THTTPClient;
+  LResponse1: IHTTPResponse;
+  LResponse2: IHTTPResponse;
+  LResponse3: IHTTPResponse;
+begin
+  LClient := THTTPClient.Create;
+  try
+    LResponse1 := LClient.Get(BASE_URL + '/');
+    Assert.AreEqual(200, LResponse1.StatusCode,
+      'First request on keep-alive connection must return 200');
+
+    LResponse2 := LClient.Get(BASE_URL + '/');
+    Assert.AreEqual(200, LResponse2.StatusCode,
+      'Second request on persistent connection must return 200');
+
+    LResponse3 := LClient.Get(BASE_URL + '/');
+    Assert.AreEqual(200, LResponse3.StatusCode,
+      'Third request on persistent connection must return 200');
   finally
     LClient.Free;
   end;
@@ -628,6 +719,110 @@ begin
   finally
     LClient.Free;
     GAdvServer.RateLimitPerIP := 0;  // restore unlimited
+  end;
+end;
+
+procedure TPoseidonHttpServerAdvTests.RateLimit_Global_ExceededReturns429;
+// RateLimitGlobal: maximum requests per second across ALL clients.
+// Fire sequential requests until we get a 429, then restore.
+var
+  LClient:  THTTPClient;
+  LResponse: IHTTPResponse;
+  LGot429:  Boolean;
+  I:        Integer;
+begin
+  GAdvServer.RateLimitGlobal := 1;  // at most 1 req/s globally
+  LClient := THTTPClient.Create;
+  LGot429 := False;
+  try
+    for I := 1 to 10 do
+    begin
+      LClient.HandleRedirects := False;
+      try
+        LResponse := LClient.Get(ADV_BASE + '/');
+        if LResponse.StatusCode = 429 then
+        begin
+          LGot429 := True;
+          Break;
+        end;
+      except
+      end;
+    end;
+    Assert.IsTrue(LGot429,
+      'Requests exceeding RateLimitGlobal should receive 429');
+  finally
+    LClient.Free;
+    GAdvServer.RateLimitGlobal := 0;  // restore unlimited
+  end;
+end;
+
+// ── Path traversal — percent-encoded ─────────────────────────────────────────
+
+procedure TPoseidonHttpServerAdvTests.PathTraversal_PercentEncodedDotDot_Returns400;
+// S-2: %2e%2e is the percent-encoded representation of ".." and must be decoded
+// and rejected before dispatching to any handler.
+// A raw TCP socket bypasses THTTPClient URL normalisation so the server receives
+// the literal %2e%2e sequence.
+var
+  LSock:    TSocket;
+  LReq:     TBytes;
+  LResp:    TBytes;
+  LRespStr: string;
+begin
+  LSock := OpenTCPSocket(ADV_PORT);
+  try
+    Assert.IsTrue(LSock <> INVALID_SOCKET,
+      'Could not open raw socket to Adv server');
+    LReq := TEncoding.ASCII.GetBytes(
+      'GET /%2e%2e/etc/passwd HTTP/1.1'#13#10 +
+      'Host: 127.0.0.1'#13#10 +
+      'Connection: close'#13#10#13#10);
+    Assert.IsTrue(SendAll(LSock, LReq), 'Failed to send raw request');
+    Sleep(300);
+    RecvSome(LSock, LResp, 1024);
+    LRespStr := TEncoding.ASCII.GetString(LResp);
+    Assert.IsTrue(
+      Pos('400', LRespStr) > 0,
+      'Path with %2e%2e (percent-encoded ..) must return 400. Got: ' +
+      Copy(LRespStr, 1, 80));
+  finally
+    closesocket(LSock);
+  end;
+end;
+
+// ── Request smuggling (S-4) ───────────────────────────────────────────────────
+
+procedure TPoseidonHttpServerAdvTests.Smuggling_CLAndChunked_Returns400;
+// S-4 / RFC 7230 §3.3.3: presence of BOTH Content-Length and
+// Transfer-Encoding: chunked in the same request is a request-smuggling
+// indicator and must be rejected with 400 Bad Request.
+var
+  LSock:    TSocket;
+  LReq:     TBytes;
+  LResp:    TBytes;
+  LRespStr: string;
+begin
+  LSock := OpenTCPSocket(ADV_PORT);
+  try
+    Assert.IsTrue(LSock <> INVALID_SOCKET,
+      'Could not open raw socket to Adv server');
+    LReq := TEncoding.ASCII.GetBytes(
+      'POST / HTTP/1.1'#13#10 +
+      'Host: 127.0.0.1'#13#10 +
+      'Content-Length: 5'#13#10 +
+      'Transfer-Encoding: chunked'#13#10 +
+      'Connection: close'#13#10#13#10 +
+      '0'#13#10#13#10);
+    Assert.IsTrue(SendAll(LSock, LReq), 'Failed to send smuggling request');
+    Sleep(300);
+    RecvSome(LSock, LResp, 1024);
+    LRespStr := TEncoding.ASCII.GetString(LResp);
+    Assert.IsTrue(
+      Pos('400', LRespStr) > 0,
+      'Request with both Content-Length and Transfer-Encoding: chunked must ' +
+      'return 400. Got: ' + Copy(LRespStr, 1, 80));
+  finally
+    closesocket(LSock);
   end;
 end;
 
@@ -1181,11 +1376,157 @@ begin
   end;
 end;
 
+// =============================================================================
+// Fixture 6 — TPoseidonHttpServerIdleTests (port 19008)
+// IdleTimeoutMs: connections with no inbound bytes for IdleTimeoutMs are closed.
+// =============================================================================
+
+const
+  IDLE_PORT = 19008;
+
+type
+  TIdleExtraHeaders = TArray<TPair<string,string>>;
+
+var
+  GIdleServer:      TPoseidonNativeServer;
+  GIdleListenReady: TEvent;
+
+procedure IdleOnReady;
+begin
+  GIdleListenReady.SetEvent;
+end;
+
+procedure IdleListenThread;
+begin
+  GIdleServer.Listen('127.0.0.1', IDLE_PORT,
+    procedure(const AReq: TPoseidonNativeRequest;
+      out AStatus: Integer; out AContentType: string;
+      out ABody: TBytes;
+      out AExtraHeaders: TIdleExtraHeaders)
+    begin
+      AStatus := 200; AContentType := 'text/plain';
+      ABody := TEncoding.UTF8.GetBytes('ok'); AExtraHeaders := [];
+    end,
+    IdleOnReady);
+end;
+
+{ TPoseidonHttpServerIdleTests }
+
+procedure TPoseidonHttpServerIdleTests.SetupFixture;
+begin
+  FEvent           := TEvent.Create(nil, True, False, '');
+  GIdleServer      := TPoseidonNativeServer.Create;
+  GIdleServer.IdleTimeoutMs := 500;   // very short — makes tests fast
+  GIdleListenReady := FEvent;
+  TThread.CreateAnonymousThread(IdleListenThread).Start;
+  Assert.AreEqual(TWaitResult.wrSignaled,
+    FEvent.WaitFor(5000), 'Idle server did not start within 5 s');
+end;
+
+procedure TPoseidonHttpServerIdleTests.TeardownFixture;
+begin
+  GIdleServer.Stop;
+  FreeAndNil(GIdleServer);
+  FreeAndNil(FEvent);
+  GIdleListenReady := nil;
+end;
+
+procedure TPoseidonHttpServerIdleTests.IdleTimeout_InactiveConnection_ClosedByServer;
+// Open a raw TCP connection, perform the HTTP/1.1 handshake to ensure the
+// connection is accepted (LastActivity is set), then go silent.
+// After IdleTimeoutMs + sweep interval the server should close the socket —
+// observed as recv() returning 0 (FIN) on the client side.
+var
+  LSock:    TSocket;
+  LReq:     TBytes;
+  LResp:    TBytes;
+  LRecv:    Integer;
+  LTimeout: DWORD;
+begin
+  LSock := OpenTCPSocket(IDLE_PORT);
+  try
+    Assert.IsTrue(LSock <> INVALID_SOCKET,
+      'Could not connect to idle-timeout server');
+
+    // Send one complete request so the server accepts the connection and sets
+    // LastActivity on it.
+    LReq := TEncoding.ASCII.GetBytes(
+      'GET / HTTP/1.1'#13#10 +
+      'Host: 127.0.0.1'#13#10 +
+      'Connection: keep-alive'#13#10#13#10);
+    Assert.IsTrue(SendAll(LSock, LReq), 'Failed to send initial request');
+
+    // Consume the response so the socket buffer is drained.
+    Sleep(200);
+    RecvSome(LSock, LResp, 4096);
+
+    // Now go silent for 2× IdleTimeoutMs + 1.5 s sweep window.
+    // GIdleServer.IdleTimeoutMs = 500; sweep runs every ~1 s; worst case ~1.5 s.
+    Sleep(2200);
+
+    // The server should have sent a FIN — recv() must return 0 or an error.
+    LTimeout := 500;  // ms
+    setsockopt(LSock, SOL_SOCKET, SO_RCVTIMEO,
+      PAnsiChar(@LTimeout), SizeOf(LTimeout));
+    LRecv := RecvSome(LSock, LResp, 1);
+    Assert.IsTrue(LRecv <= 0,
+      'Server should have closed the idle connection (recv must return 0 or error)');
+  finally
+    closesocket(LSock);
+  end;
+end;
+
+procedure TPoseidonHttpServerIdleTests.IdleTimeout_ActiveConnection_NotClosed;
+// A connection that sends a request every 200 ms must never be swept.
+// After 1.5 s (3× sweep window) the connection should still be alive.
+var
+  LSock:   TSocket;
+  LReq:    TBytes;
+  LResp:   TBytes;
+  I:       Integer;
+  LRecv:   Integer;
+  LTimeout: DWORD;
+begin
+  LSock := OpenTCPSocket(IDLE_PORT);
+  try
+    Assert.IsTrue(LSock <> INVALID_SOCKET,
+      'Could not connect to idle-timeout server');
+
+    LReq := TEncoding.ASCII.GetBytes(
+      'GET / HTTP/1.1'#13#10 +
+      'Host: 127.0.0.1'#13#10 +
+      'Connection: keep-alive'#13#10#13#10);
+
+    for I := 1 to 6 do
+    begin
+      Assert.IsTrue(SendAll(LSock, LReq),
+        Format('Request %d failed on active connection', [I]));
+      Sleep(100);
+      RecvSome(LSock, LResp, 4096);
+      Sleep(100);
+    end;
+
+    // Connection must still be alive — a fresh request should succeed.
+    Assert.IsTrue(SendAll(LSock, LReq),
+      'Active connection should still be open after 1.2 s of activity');
+    Sleep(300);
+    LTimeout := 500;
+    setsockopt(LSock, SOL_SOCKET, SO_RCVTIMEO,
+      PAnsiChar(@LTimeout), SizeOf(LTimeout));
+    LRecv := RecvSome(LSock, LResp, 4096);
+    Assert.IsTrue(LRecv > 0,
+      'Active connection must still receive a response after continuous activity');
+  finally
+    closesocket(LSock);
+  end;
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TPoseidonHttpServerTests);
   TDUnitX.RegisterTestFixture(TPoseidonHttpServerAdvTests);
   TDUnitX.RegisterTestFixture(TPoseidonHttpServerDrainTests);
   TDUnitX.RegisterTestFixture(TPoseidonHttpServerWSTests);
   TDUnitX.RegisterTestFixture(TPoseidonHttpServerH2CTests);
+  TDUnitX.RegisterTestFixture(TPoseidonHttpServerIdleTests);
 
 end.
