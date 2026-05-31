@@ -20,7 +20,7 @@
     <SanitizedProjectName>PoseidonTests</SanitizedProjectName>
     <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;$(DCC_Namespace)</DCC_Namespace>
     <VerInfo_Locale>1046</VerInfo_Locale>
-    <DCC_UnitSearchPath>.\;..\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+    <DCC_UnitSearchPath>.\;.\mocks;..\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
     <DCC_DcuOutput>.\dcu\$(Config)</DCC_DcuOutput>
     <DCC_ExeOutput>.\bin\$(Config)</DCC_ExeOutput>
   </PropertyGroup>

@@ -15,7 +15,9 @@ uses
   Poseidon.Tests.BufferPool,
   Poseidon.Tests.HTTP1Parser,
   Poseidon.Tests.ResponseBuilder,
-  Poseidon.Tests.ProxyProtocol;
+  Poseidon.Tests.ProxyProtocol,
+  Poseidon.Tests.SSL,
+  Poseidon.Mock.SSLProvider;
 
 var
   LRunner:  ITestRunner;
