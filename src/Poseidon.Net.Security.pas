@@ -142,9 +142,10 @@ begin
   Result := True;  // fail-open: parse errors do not block scraping
   try
     // Strip port from ARemoteAddr ("1.2.3.4:port" → "1.2.3.4")
+    // TStringHelper.LastDelimiter returns a 0-based index (-1 if not found)
     LColonPos := ARemoteAddr.LastDelimiter(':');
-    if LColonPos > 0 then
-      LIPStr := Copy(ARemoteAddr, 1, LColonPos - 1)
+    if LColonPos >= 0 then
+      LIPStr := Copy(ARemoteAddr, 1, LColonPos)
     else
       LIPStr := ARemoteAddr;
     // Remove brackets from IPv6 literal "[::1]" — CIDR check only works for IPv4

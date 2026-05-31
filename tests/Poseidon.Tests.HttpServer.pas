@@ -340,11 +340,16 @@ type
 var
   GAdvServer:      TPoseidonNativeServer;
   GAdvListenReady: TEvent;
+  GAdvSlowGate:    TEvent = nil;  // nil = fast; signaled event = blocking handler
 
 procedure AdvHandler(const AReq: TPoseidonNativeRequest;
   out AStatus: Integer; out AContentType: string;
   out ABody: TBytes; out AExtraHeaders: TAdvExtraHeaders);
 begin
+  // R-5 test: when a gate is installed, block until released so that
+  // concurrent requests accumulate and trigger MaxQueueDepth 503s.
+  if Assigned(GAdvSlowGate) then
+    GAdvSlowGate.WaitFor(5000);
   AStatus       := 200;
   AContentType  := 'text/plain';
   ABody         := TEncoding.UTF8.GetBytes('ok');
@@ -464,15 +469,21 @@ end;
 // ── MaxQueueDepth / backpressure ──────────────────────────────────────────────
 
 procedure TPoseidonHttpServerAdvTests.MaxQueueDepth_QueueFull_Returns503;
+// R-5: backpressure test.
+// Strategy: install a gate in AdvHandler so the first request blocks inside the
+// handler (holding InFlightCount = 1). All subsequent concurrent requests arrive
+// while InFlightCount >= MaxQueueDepth and receive 503.
 var
-  LTasks:    TArray<ITask>;
-  LWork:     TProc;
-  I:         Integer;
-  LGot503:   Integer;  // 0 = false, 1 = true (atomic via TInterlocked)
+  LTasks:  TArray<ITask>;
+  LWork:   TProc;
+  I:       Integer;
+  LGot503: Integer;  // 0 = false, 1 = true (atomic via TInterlocked)
 const
   QUEUE_LIMIT = 1;
   FLOOD_COUNT = 20;
 begin
+  // Create a manual-reset event that starts unsignaled — handler will block.
+  GAdvSlowGate := TEvent.Create(nil, True, False, '');
   GAdvServer.MaxQueueDepth := QUEUE_LIMIT;
   LGot503 := 0;
   SetLength(LTasks, FLOOD_COUNT);
@@ -497,11 +508,18 @@ begin
   try
     for I := 0 to FLOOD_COUNT - 1 do
       LTasks[I] := TTask.Run(LWork);
+    // Allow time for all FLOOD_COUNT tasks to have sent their requests and for
+    // the server to have accepted them. The first gets past the 503 check and
+    // blocks; the rest should receive 503 while InFlightCount >= QUEUE_LIMIT.
+    Sleep(400);
+    // Release the gate so the blocked handler can finish and tasks can complete.
+    GAdvSlowGate.SetEvent;
     TTask.WaitForAll(LTasks, 8000);
     Assert.IsTrue(LGot503 = 1,
       'At least one request should receive 503 when MaxQueueDepth is exceeded');
   finally
-    GAdvServer.MaxQueueDepth := 0;  // restore unlimited
+    GAdvServer.MaxQueueDepth := 0;
+    FreeAndNil(GAdvSlowGate);
   end;
 end;
 

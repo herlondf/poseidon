@@ -14,8 +14,7 @@ interface
 uses
   System.SysUtils,
   System.Classes,
-  System.Generics.Collections,
-  Poseidon.Net.Security;
+  System.Generics.Collections;
 
 // Assembles a complete HTTP/1.1 response into a single TBytes:
 //   Status-Line CRLF
@@ -80,6 +79,22 @@ var
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// S-3: Sanitize a response header value by truncating at the first CR/LF/NUL.
+// Truncating (rather than stripping) ensures injected text never reaches the
+// wire — e.g. "value\r\nX-Evil: hdr" → "value", not "valueX-Evil: hdr".
+function _SanitizeHeaderValue(const AValue: string): string;
+var
+  LPos: Integer;
+begin
+  for LPos := 1 to Length(AValue) do
+    if (AValue[LPos] = #13) or (AValue[LPos] = #10) or (AValue[LPos] = #0) then
+    begin
+      Result := Copy(AValue, 1, LPos - 1);
+      Exit;
+    end;
+  Result := AValue;
+end;
 
 function DigitCount(AValue: Integer): Integer; inline;
 begin
@@ -196,9 +211,9 @@ begin
 
   LExtraStr := '';
   for I := 0 to High(AExtra) do
-    // S-3: strip CR/LF/NUL from header values to prevent header injection
+    // S-3: truncate header values at first CR/LF/NUL to prevent header injection
     LExtraStr := LExtraStr + AExtra[I].Key + ': ' +
-      StripCRLF(AExtra[I].Value) + #13#10;
+      _SanitizeHeaderValue(AExtra[I].Value) + #13#10;
   // A-1: opt-in security headers
   if ASecureHeaders then
     LExtraStr := LExtraStr
@@ -270,7 +285,7 @@ begin
   LExtraStr := '';
   for I := 0 to High(AExtra) do
     LExtraStr := LExtraStr + AExtra[I].Key + ': ' +
-      StripCRLF(AExtra[I].Value) + #13#10;
+      _SanitizeHeaderValue(AExtra[I].Value) + #13#10;
   if ASecureHeaders then
     LExtraStr := LExtraStr
       + 'X-Content-Type-Options: nosniff'#13#10

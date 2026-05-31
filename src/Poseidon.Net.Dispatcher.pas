@@ -238,7 +238,10 @@ begin
 
   if LConn.AccumLen > AConfig.MaxRequestSize then
   begin
-    FCallbacks.CloseConn(AConn);
+    LResp := BuildHTTPResponse(413, 'text/plain',
+      TEncoding.ASCII.GetBytes('Payload Too Large'), False, [],
+      AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
+    FCallbacks.SendResponse(AConn, LResp, 0);
     Exit;
   end;
 

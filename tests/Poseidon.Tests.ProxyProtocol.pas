@@ -340,8 +340,8 @@ var
   LIncomp, LInvalid: Boolean;
   LLine: string;
 begin
-  // >108 bytes without CRLF
-  LLine := 'PROXY TCP4 ' + StringOfChar('1', 60) + ' 2.2.2.2 80 80';
+  // >108 bytes without CRLF (11 + 100 + 14 = 125 bytes)
+  LLine := 'PROXY TCP4 ' + StringOfChar('1', 100) + ' 2.2.2.2 80 80';
   LBuf  := TEncoding.ASCII.GetBytes(LLine);  // > 108 bytes, no CRLF
   TryParseProxyProtocolV1(@LBuf[0], Length(LBuf),
     LAddr, LPort, LConsumed, LIncomp, LInvalid);

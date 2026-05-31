@@ -275,7 +275,7 @@ begin
     if LHdrCount >= MAX_HEADER_COUNT then Break;
 
     LLineEnd := -1;
-    for I := LLineStart to LHdrEnd - 1 do
+    for I := LLineStart to LHdrEnd do
       if (ABuf[I] = CR) and (ABuf[I+1] = LF) then
       begin
         LLineEnd := I;
