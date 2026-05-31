@@ -50,14 +50,18 @@ begin
     LW4   := TBenchAdapterW4.Create;
     LAuto := TBenchAdapterAuto.Create;
     LGzip := TBenchAdapterGzip.Create;
-    LSSL  := TBenchAdapterSSL.Create;
+    try
+      LSSL := TBenchAdapterSSL.Create;
+    except
+      LSSL := nil;  // certificado ou OpenSSL não disponível — SSL skipped
+    end;
     WriteLn('  Workers=4   → porta 19990');
     WriteLn('  Workers=auto → porta 19991');
     WriteLn('  Gzip         → porta 19992');
-    if LSSL.IsAvailable then
+    if (LSSL <> nil) and LSSL.IsAvailable then
       WriteLn('  SSL          → porta 19993')
     else
-      WriteLn('  SSL          → N/A (OpenSSL não encontrado)');
+      WriteLn('  SSL          → N/A (certificado não encontrado — gere com openssl)');
     WriteLn;
 
     // Criar runner e carregar cenários

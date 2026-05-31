@@ -233,6 +233,21 @@ end;
 
 // ─── Executor de cenário ──────────────────────────────────────────────────────
 
+// Helper: captura o índice do worker por valor num frame separado.
+// 'var LIdx := I' dentro de um loop não garante lifting por-iteração em todas
+// as versões do Delphi — uma função auxiliar resolve isso.
+function SpawnTask(
+  AIdx:            Integer;
+  AResults:        TArray<TArray<Double>>;
+  const AWorkerFn: TFunc<TArray<Double>>): ITask;
+begin
+  Result := TTask.Run(
+    procedure
+    begin
+      AResults[AIdx] := AWorkerFn();
+    end);
+end;
+
 function RunScenario(
   const AName:      string;
   AWorkerCount:     Integer;
@@ -254,14 +269,7 @@ begin
 
   LWall := TStopwatch.StartNew;
   for I := 0 to AWorkerCount - 1 do
-  begin
-    var LIdx := I;
-    LTasks[I] := TTask.Run(
-      procedure
-      begin
-        LResults[LIdx] := AWorkerFn();
-      end);
-  end;
+    LTasks[I] := SpawnTask(I, LResults, AWorkerFn);
   TTask.WaitForAll(LTasks, 120000);
   LWall.Stop;
 
