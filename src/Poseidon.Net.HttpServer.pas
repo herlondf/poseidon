@@ -21,44 +21,19 @@ uses
   System.DateUtils,
   System.ZLib,
   System.Generics.Collections,
+  Poseidon.Net.Types,
   Poseidon.Net.Connection,
+  Poseidon.Net.Dispatcher,
   Poseidon.Net.WebSocket,
   Poseidon.Net.HTTP2,
   Poseidon.Net.Metrics,
   Poseidon.Net.ProxyProtocol;
 
 type
-  TPoseidonNativeRequest = record
-    Method:      string;
-    Path:        string;
-    QueryString: string;
-    RawBody:     TBytes;
-    RemoteAddr:  string;
-    KeepAlive:   Boolean;
-    Headers:     TArray<TPair<string,string>>;
-  end;
-
-  TOnNativeRequest = reference to procedure(
-    const AReq:          TPoseidonNativeRequest;
-    out   AStatus:       Integer;
-    out   AContentType:  string;
-    out   ABody:         TBytes;
-    out   AExtraHeaders: TArray<TPair<string,string>>);
-
-  TLogLevel = (llDebug, llInfo, llWarning, llError);
-  TOnPoseidonLog = reference to procedure(ALevel: TLogLevel; const AMessage: string);
-
-  TPoseidonRequestLogEvent = record
-    Method:     string;
-    Path:       string;
-    Status:     Integer;
-    DurationMs: Int64;
-    RemoteAddr: string;
-    RxBytes:    Int64;
-    TxBytes:    Int64;
-  end;
-  TOnPoseidonRequestLog = reference to procedure(
-    const AEvent: TPoseidonRequestLogEvent);
+  // R-5: TPoseidonNativeServer implements IDispatchCallbacks (non-ref-counted).
+  // Types TPoseidonNativeRequest, TOnNativeRequest, TLogLevel, TOnPoseidonLog,
+  // TPoseidonRequestLogEvent, TOnPoseidonRequestLog live in Poseidon.Net.Types
+  // and are accessible via the transitive uses chain.
 
   TPoseidonNativeServer = class
   private
@@ -128,7 +103,9 @@ type
     procedure _ProcessRecvSSL(AConn: Pointer; const ABuf: PByte; ALen: Cardinal;
       out AAborted: Boolean);
     procedure _ProcessRecvPlain(AConn: Pointer; const ABuf: PByte; ALen: Cardinal);
-    procedure _DispatchAccumBuf(AConn: Pointer);
+    FDispatcher: TProtocolDispatcher;  // R-5: protocol dispatch strategy
+
+    procedure _DispatchAccumBuf(AConn: Pointer);  // thin shim — builds TDispatchConfig + calls FDispatcher
     function  _TryParseRequest(AConn: Pointer;
       out AReq: TPoseidonNativeRequest; out ABadRequest: Boolean): Boolean;
     function  _BuildResponse(AStatus: Integer; const AContentType: string;
@@ -140,9 +117,6 @@ type
     procedure _IdleSweepLoop;
     function  _AdmitAndRegister(AConn: Pointer): Boolean;
     procedure _UnregisterIP(const ARemoteAddr: string);
-    procedure _TryGzipResponse(const AReq: TPoseidonNativeRequest;
-      const AContentType: string; var ABody: TBytes;
-      var AExtra: TArray<TPair<string,string>>);
     procedure _UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     procedure _UpgradeToH2C(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     function  _DispatchWSFrames(AConn: Pointer): Boolean;
@@ -419,63 +393,128 @@ begin
 end;
 
 // ===========================================================================
-// Shared: _TryGzipResponse — opt-in gzip Content-Encoding negotiation
+// R-5: TServerDispatchAdapter — IDispatchCallbacks bridge from server to dispatcher
 // ===========================================================================
 
-procedure TPoseidonNativeServer._TryGzipResponse(const AReq: TPoseidonNativeRequest;
-  const AContentType: string; var ABody: TBytes;
-  var AExtra: TArray<TPair<string,string>>);
-const
-  GZIP_MIN_SIZE = 1024;
-var
-  I:        Integer;
-  LAccept:  string;
-  LCTLower: string;
-  LSrc:     TBytesStream;
-  LDest:    TBytesStream;
-  LZip:     TZCompressionStream;
-begin
-  if not FCompressionEnabled then Exit;
-  if Length(ABody) < GZIP_MIN_SIZE then Exit;
-
-  LCTLower := LowerCase(AContentType);
-  if LCTLower.StartsWith('image/') or LCTLower.StartsWith('video/') or
-     LCTLower.StartsWith('audio/') or (LCTLower = 'application/zip') or
-     (LCTLower = 'application/gzip') or (LCTLower = 'application/octet-stream') then
-    Exit;
-
-  LAccept := '';
-  for I := 0 to High(AReq.Headers) do
-    if SameText(AReq.Headers[I].Key, 'Accept-Encoding') then
-    begin
-      LAccept := AReq.Headers[I].Value;
-      Break;
-    end;
-  if Pos('gzip', LowerCase(LAccept)) <= 0 then Exit;
-
-  LSrc := TBytesStream.Create(ABody);
-  try
-    LDest := TBytesStream.Create;
-    try
-      // WindowBits=31 → gzip wrapper (vs 15=raw deflate or 47=auto-detect)
-      LZip := TZCompressionStream.Create(LDest, zcDefault, 31);
-      try
-        LZip.CopyFrom(LSrc, 0);
-      finally
-        LZip.Free;
-      end;
-      SetLength(ABody, LDest.Size);
-      if LDest.Size > 0 then
-        Move(LDest.Bytes[0], ABody[0], LDest.Size);
-    finally
-      LDest.Free;
-    end;
-  finally
-    LSrc.Free;
+type
+  TServerDispatchAdapter = class(TInterfacedObject, IDispatchCallbacks)
+  private
+    FServer: TPoseidonNativeServer;
+  public
+    constructor Create(AServer: TPoseidonNativeServer);
+    procedure PostRecv(AConn: Pointer);
+    procedure CloseConn(AConn: Pointer);
+    procedure SendResponse(AConn: Pointer; const AData: TBytes; AActualLen: Integer);
+    procedure UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
+    procedure UpgradeToH2C(AConn: Pointer; const AReq: TPoseidonNativeRequest);
+    function  DispatchWSFrames(AConn: Pointer): Boolean;
+    function  CheckRateLimit(const ARemoteAddr: string): Boolean;
+    procedure InvokeRequest(const AReq: TPoseidonNativeRequest;
+      out AStatus: Integer; out AContentType: string;
+      out ABody: TBytes; out AExtra: TArray<TPair<string,string>>);
+    function  GetMetricsBody(const APath, ARemoteAddr: string;
+      out ABody: TBytes): Boolean;
+    procedure LogRequest(const AEvent: TPoseidonRequestLogEvent);
+    procedure AdjustInflight(ADelta: Integer);
+    procedure RecordRequest(AStatus: Integer; ADurationMs, ARxBytes, ATxBytes: Int64);
   end;
 
-  SetLength(AExtra, Length(AExtra) + 1);
-  AExtra[High(AExtra)] := TPair<string,string>.Create('Content-Encoding', 'gzip');
+constructor TServerDispatchAdapter.Create(AServer: TPoseidonNativeServer);
+begin
+  inherited Create;
+  FServer := AServer;
+end;
+
+procedure TServerDispatchAdapter.PostRecv(AConn: Pointer);
+begin
+  FServer._PostRecv(AConn);
+end;
+
+procedure TServerDispatchAdapter.CloseConn(AConn: Pointer);
+begin
+  FServer._CloseConn(AConn);
+end;
+
+procedure TServerDispatchAdapter.SendResponse(AConn: Pointer;
+  const AData: TBytes; AActualLen: Integer);
+begin
+  FServer._EncryptAndSend(AConn, AData, AActualLen);
+end;
+
+procedure TServerDispatchAdapter.UpgradeToWS(AConn: Pointer;
+  const AReq: TPoseidonNativeRequest);
+begin
+  FServer._UpgradeToWS(AConn, AReq);
+end;
+
+procedure TServerDispatchAdapter.UpgradeToH2C(AConn: Pointer;
+  const AReq: TPoseidonNativeRequest);
+begin
+  FServer._UpgradeToH2C(AConn, AReq);
+end;
+
+function TServerDispatchAdapter.DispatchWSFrames(AConn: Pointer): Boolean;
+begin
+  Result := FServer._DispatchWSFrames(AConn);
+end;
+
+function TServerDispatchAdapter.CheckRateLimit(const ARemoteAddr: string): Boolean;
+begin
+  Result := FServer._CheckRateLimit(ARemoteAddr);
+end;
+
+procedure TServerDispatchAdapter.InvokeRequest(const AReq: TPoseidonNativeRequest;
+  out AStatus: Integer; out AContentType: string;
+  out ABody: TBytes; out AExtra: TArray<TPair<string,string>>);
+begin
+  AStatus      := 500;
+  AContentType := 'application/json';
+  ABody        := DefaultErrorBody;
+  SetLength(AExtra, 0);
+  try
+    FServer.FOnRequest(AReq, AStatus, AContentType, ABody, AExtra);
+  except
+    on E: Exception do
+    begin
+      AStatus      := 500;
+      AContentType := 'application/problem+json';
+      ABody        := TEncoding.UTF8.GetBytes(
+        '{"type":"about:blank","title":"Internal Server Error",' +
+        '"status":500,"detail":"' + E.Message + '"}');
+      SetLength(AExtra, 0);
+    end;
+  end;
+end;
+
+function TServerDispatchAdapter.GetMetricsBody(const APath, ARemoteAddr: string;
+  out ABody: TBytes): Boolean;
+begin
+  Result := False;
+  if not Assigned(FServer.FMetrics) then Exit;
+  ABody  := TEncoding.UTF8.GetBytes(FServer.FMetrics.Render);
+  Result := True;
+end;
+
+procedure TServerDispatchAdapter.LogRequest(const AEvent: TPoseidonRequestLogEvent);
+begin
+  if Assigned(FServer.FOnRequestLog) then
+    FServer.FOnRequestLog(AEvent);
+end;
+
+procedure TServerDispatchAdapter.AdjustInflight(ADelta: Integer);
+begin
+  if ADelta > 0 then
+    TInterlocked.Increment(FServer.FInFlightCount)
+  else
+    TInterlocked.Decrement(FServer.FInFlightCount);
+  if Assigned(FServer.FMetrics) then FServer.FMetrics.AdjustInflight(ADelta);
+end;
+
+procedure TServerDispatchAdapter.RecordRequest(AStatus: Integer;
+  ADurationMs, ARxBytes, ATxBytes: Int64);
+begin
+  if Assigned(FServer.FMetrics) then
+    FServer.FMetrics.RecordRequest(AStatus, ADurationMs, ARxBytes, ATxBytes);
 end;
 
 // ===========================================================================
@@ -696,250 +735,25 @@ begin
 end;
 
 procedure TPoseidonNativeServer._DispatchAccumBuf(AConn: Pointer);
+// R-5: thin shim — builds TDispatchConfig snapshot and delegates to FDispatcher.
 var
-  LConn:          TNativeConn absolute AConn;
-  LReq:           TPoseidonNativeRequest;
-  LStatus:        Integer;
-  LCT:            string;
-  LBody:          TBytes;
-  LExtra:         TArray<TPair<string,string>>;
-  LResp:          TBytes;
-  LRespActualLen: Integer;  // P-4: actual bytes in pool-allocated LResp
-  LBad:           Boolean;
-  LUpgrade:       string;
-  LWsKey:         string;
-  I:              Integer;
-  LStartTick:     Int64;
-  LRxBytes:       Int64;
-  LTxBytes:       Int64;
-  LDurationMs:    Int64;
-  LLogEvt:       TPoseidonRequestLogEvent;
-  LPPAddr:       string;
-  LPPPort:       Word;
-  LPPConsumed:   Integer;
-  LPPIncomplete: Boolean;
-  LPPInvalid:    Boolean;
-  LPPNoSig:      Boolean;
+  LCfg: TDispatchConfig;
 begin
-  // Proxy Protocol header — consume once per new connection before HTTP parsing
-  if (FProxyProtocol <> ppDisabled) and not LConn.PPParsed then
-  begin
-    if LConn.AccumLen = 0 then
-    begin
-      _PostRecv(AConn);
-      Exit;
-    end;
-    LPPAddr       := '';
-    LPPPort       := 0;
-    LPPConsumed   := 0;
-    LPPIncomplete := False;
-    LPPInvalid    := False;
-    LPPNoSig      := False;
-    if TryParseProxyProtocolAuto(FProxyProtocol,
-         @LConn.AccumBuf[0], LConn.AccumLen,
-         LPPAddr, LPPPort, LPPConsumed,
-         LPPIncomplete, LPPInvalid, LPPNoSig) then
-    begin
-      // Consume header bytes from AccumBuf
-      if LPPConsumed > 0 then
-      begin
-        Dec(LConn.AccumLen, LPPConsumed);
-        if LConn.AccumLen > 0 then
-          Move(LConn.AccumBuf[LPPConsumed], LConn.AccumBuf[0], LConn.AccumLen);
-      end;
-      if LPPAddr <> '' then
-        LConn.RemoteAddr := LPPAddr + ':' + IntToStr(LPPPort);
-      LConn.PPParsed := True;
-      // Fall through to normal HTTP processing
-    end
-    else if LPPIncomplete then
-    begin
-      _PostRecv(AConn);
-      Exit;
-    end
-    else if LPPInvalid then
-    begin
-      _CloseConn(AConn);
-      Exit;
-    end
-    else
-    begin
-      // ppAuto + no signature → treat as regular connection
-      LConn.PPParsed := True;
-    end;
-  end;
-
-  if LConn.AccumLen > FMaxRequestSize then
-  begin
-    _CloseConn(AConn);
-    Exit;
-  end;
-
-  // HTTP/2: route all accumulated data to TH2Conn processor
-  if LConn.H2Conn <> nil then
-  begin
-    if LConn.AccumLen > 0 then
-    begin
-      LConn.H2Conn.ProcessData(@LConn.AccumBuf[0], LConn.AccumLen);
-      LConn.AccumLen := 0;
-    end;
-    if not LConn.H2Conn.GoAwaySent then
-      _PostRecv(AConn);
-    Exit;
-  end;
-
-  if LConn.WSMode = CM_WEBSOCKET then
-  begin
-    if _DispatchWSFrames(AConn) then
-      _PostRecv(AConn);
-    Exit;
-  end;
-
-  if not _TryParseRequest(AConn, LReq, LBad) then
-  begin
-    if LBad then
-    begin
-      LResp := _BuildResponse(400, 'text/plain',
-        TEncoding.ASCII.GetBytes('Bad Request'), False, []);
-      _EncryptAndSend(AConn, LResp);
-    end
-    else
-      _PostRecv(AConn);
-    Exit;
-  end;
-
-  // S-1: method allowlist — reject 405 if method not in FAllowedMethods
-  if not IsMethodAllowed(LReq.Method, FAllowedMethods) then
-  begin
-    LResp := _BuildResponse(405, 'text/plain',
-      TEncoding.ASCII.GetBytes('Method Not Allowed'), False, []);
-    _EncryptAndSend(AConn, LResp);
-    Exit;
-  end;
-
-  // S-2: path traversal — reject 400 on ../, %2e%2e, backslash, NUL
-  if not IsPathSafe(LReq.Path) then
-  begin
-    LResp := _BuildResponse(400, 'text/plain',
-      TEncoding.ASCII.GetBytes('Bad Request'), False, []);
-    _EncryptAndSend(AConn, LResp);
-    Exit;
-  end;
-
-  LUpgrade := '';
-  LWsKey   := '';
-  for I := 0 to High(LReq.Headers) do
-  begin
-    if SameText(LReq.Headers[I].Key, 'Upgrade')           then LUpgrade := LReq.Headers[I].Value;
-    if SameText(LReq.Headers[I].Key, 'Sec-WebSocket-Key') then LWsKey   := LReq.Headers[I].Value;
-  end;
-  if SameText(LUpgrade, 'websocket') and (LWsKey <> '') then
-  begin
-    _UpgradeToWS(AConn, LReq);
-    Exit;
-  end;
-
-  // A-5: h2c cleartext upgrade (RFC 7540 §3.2)
-  // Only on plain (non-TLS) connections; requires Upgrade: h2c + HTTP2-Settings header.
-  if SameText(LUpgrade, 'h2c') and FH2Enabled and (LConn.SSLHandle = nil) then
-  begin
-    _UpgradeToH2C(AConn, LReq);
-    Exit;
-  end;
-
-  LConn.KeepAlive := LReq.KeepAlive;
-
-  // Rate limiting — check before backpressure and handler dispatch
-  if not _CheckRateLimit(LConn.RemoteAddr) then
-  begin
-    LResp := _BuildResponse(FRateLimitResponse, 'text/plain',
-      TEncoding.ASCII.GetBytes('Too Many Requests'), LReq.KeepAlive,
-      [TPair<string,string>.Create('Retry-After', '1')]);
-    _EncryptAndSend(AConn, LResp);
-    if LReq.KeepAlive then _PostRecv(AConn);
-    Exit;
-  end;
-
-  // Prometheus metrics endpoint — serve before handler and inflight tracking
-  if Assigned(FMetrics) and (LReq.Method = 'GET') and
-     (LReq.Path = FMetricsPath) then
-  begin
-    // Optional CIDR restriction
-    if (FMetricsAllowedCIDR <> '') and
-       not IsIPInCIDR(LConn.RemoteAddr, FMetricsAllowedCIDR) then
-    begin
-      LResp := _BuildResponse(403, 'text/plain',
-        TEncoding.ASCII.GetBytes('Forbidden'), LReq.KeepAlive, []);
-      _EncryptAndSend(AConn, LResp);
-      if LReq.KeepAlive then _PostRecv(AConn);
-      Exit;
-    end;
-    LBody  := TEncoding.UTF8.GetBytes(FMetrics.Render);
-    LResp  := _BuildResponse(200,
-      'text/plain; version=0.0.4', LBody, LReq.KeepAlive, []);
-    _EncryptAndSend(AConn, LResp);
-    if LReq.KeepAlive then _PostRecv(AConn);
-    Exit;
-  end;
-
-  // R-5: backpressure — shed load with 503 when in-flight count exceeds MaxQueueDepth
-  if (FMaxQueueDepth > 0) and
-     (TInterlocked.Read(FInFlightCount) >= FMaxQueueDepth) then
-  begin
-    LResp := _BuildResponse(503, 'text/plain',
-      TEncoding.ASCII.GetBytes('Service Unavailable'), LReq.KeepAlive, []);
-    _EncryptAndSend(AConn, LResp);
-    if LReq.KeepAlive then _PostRecv(AConn);
-    Exit;
-  end;
-
-  LRxBytes   := Length(LReq.RawBody);
-  LStartTick := Int64(TThread.GetTickCount64);
-  TInterlocked.Increment(FInFlightCount);
-  if Assigned(FMetrics) then FMetrics.AdjustInflight(1);
-  try
-    LStatus := 500;
-    LCT     := 'application/json';
-    LBody   := DefaultErrorBody;  // pre-encoded; overwritten by handler
-    SetLength(LExtra, 0);
-    try
-      FOnRequest(LReq, LStatus, LCT, LBody, LExtra);
-    except
-      on E: Exception do
-      begin
-        LStatus := 500;
-        LCT     := 'application/problem+json';
-        LBody   := TEncoding.UTF8.GetBytes(
-          '{"type":"about:blank","title":"Internal Server Error",' +
-          '"status":500,"detail":"' + E.Message + '"}');
-        SetLength(LExtra, 0);
-      end;
-    end;
-  finally
-    if Assigned(FMetrics) then FMetrics.AdjustInflight(-1);
-    TInterlocked.Decrement(FInFlightCount);
-  end;
-
-  _TryGzipResponse(LReq, LCT, LBody, LExtra);
-  // P-4: use pool-backed response buffer on the hot path to avoid heap malloc.
-  LResp       := BuildHTTPResponsePooled(LStatus, LCT, LBody, LReq.KeepAlive,
-    LExtra, FSecureHeadersEnabled, FServerBanner, LRespActualLen);
-  LTxBytes    := LRespActualLen;
-  LDurationMs := Int64(TThread.GetTickCount64) - LStartTick;
-  if Assigned(FMetrics) then
-    FMetrics.RecordRequest(LStatus, LDurationMs, LRxBytes, LTxBytes);
-  if Assigned(FOnRequestLog) then
-  begin
-    LLogEvt.Method     := LReq.Method;
-    LLogEvt.Path       := LReq.Path;
-    LLogEvt.Status     := LStatus;
-    LLogEvt.DurationMs := LDurationMs;
-    LLogEvt.RemoteAddr := LConn.RemoteAddr;
-    LLogEvt.RxBytes    := LRxBytes;
-    LLogEvt.TxBytes    := LTxBytes;
-    FOnRequestLog(LLogEvt);
-  end;
-  _EncryptAndSend(AConn, LResp, LRespActualLen);
+  LCfg.ProxyProtocol        := FProxyProtocol;
+  LCfg.MaxRequestSize       := FMaxRequestSize;
+  LCfg.MaxHeaderSize        := FMaxHeaderSize;
+  LCfg.AllowedMethods       := FAllowedMethods;
+  LCfg.H2Enabled            := FH2Enabled;
+  LCfg.SecureHeadersEnabled := FSecureHeadersEnabled;
+  LCfg.ServerBanner         := FServerBanner;
+  LCfg.MaxQueueDepth        := FMaxQueueDepth;
+  LCfg.InFlightCount        := @FInFlightCount;
+  LCfg.RateLimitResponse    := FRateLimitResponse;
+  LCfg.CompressionEnabled   := FCompressionEnabled;
+  LCfg.MetricsEnabled       := FMetricsEnabled;
+  LCfg.MetricsPath          := FMetricsPath;
+  LCfg.MetricsAllowedCIDR   := FMetricsAllowedCIDR;
+  FDispatcher.Dispatch(AConn, LCfg);
 end;
 
 procedure TPoseidonNativeServer._ProcessRecv(AConn: Pointer;
@@ -1128,6 +942,8 @@ begin
   FPerIPCount              := TDictionary<string, Integer>.Create;
   FWSHandlers              := TDictionary<string, TWSMessageCallback>.Create;
   FWSLock                  := TCriticalSection.Create;
+  // R-5: create the protocol dispatcher with a server-backed adapter
+  FDispatcher              := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self));
 end;
 
 destructor TPoseidonNativeServer.Destroy;
@@ -1154,6 +970,7 @@ begin
   FreeAndNil(FWSHandlers);
   FreeAndNil(FWSLock);
   FreeAndNil(FDrainEvent);
+  FreeAndNil(FDispatcher);  // R-5: releases adapter interface ref
   inherited Destroy;
 end;
 
