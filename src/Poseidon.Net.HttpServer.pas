@@ -22,7 +22,9 @@ uses
   System.ZLib,
   System.Generics.Collections,
   Poseidon.Net.WebSocket,
-  Poseidon.Net.HTTP2;
+  Poseidon.Net.HTTP2,
+  Poseidon.Net.Metrics,
+  Poseidon.Net.ProxyProtocol;
 
 type
   TPoseidonNativeRequest = record
@@ -44,6 +46,18 @@ type
 
   TLogLevel = (llDebug, llInfo, llWarning, llError);
   TOnPoseidonLog = reference to procedure(ALevel: TLogLevel; const AMessage: string);
+
+  TPoseidonRequestLogEvent = record
+    Method:     string;
+    Path:       string;
+    Status:     Integer;
+    DurationMs: Int64;
+    RemoteAddr: string;
+    RxBytes:    Int64;
+    TxBytes:    Int64;
+  end;
+  TOnPoseidonRequestLog = reference to procedure(
+    const AEvent: TPoseidonRequestLogEvent);
 
   TPoseidonNativeServer = class
   private
@@ -69,6 +83,32 @@ type
     FH2Enabled:       Boolean;         // HTTP/2 via ALPN; requires SSL. Default False.
     FWorkerCount:     Integer;         // 0 = auto (ProcessorCount * 2, min 4)
     FOnLog:           TOnPoseidonLog;
+    FOnRequestLog:    TOnPoseidonRequestLog;  // access log callback; nil = silent
+    FAllowedMethods:  TArray<string>;  // S-1: empty = accept all (default)
+    FMinTLSVersion:   Integer;         // S-6: 0 = library default; $0303 = TLS 1.2
+    FMaxRequestSize:  Integer;         // R-4: max accumulated request bytes (default 8MB)
+    FMaxHeaderSize:   Integer;         // R-4: max header section bytes (default 64KB)
+    FDrainEvent:      TEvent;          // R-1: signaled on each connection close
+    FDrainTimeoutMs:  Integer;         // R-1: max ms to wait for drain (default 30000)
+    FMaxQueueDepth:   Integer;         // R-5: max concurrent in-flight; 0=unlimited
+    FMaxWSFrameSize:  Int64;           // R-3: max WS frame payload bytes; 0=unlimited
+    FH2MaxConcurrentStreams: Cardinal; // P-1: SETTINGS_MAX_CONCURRENT_STREAMS
+    FH2InitialWindowSize:    Cardinal; // P-1: SETTINGS_INITIAL_WINDOW_SIZE
+    FSecureHeadersEnabled:   Boolean;  // A-1: inject X-Content-Type-Options etc.
+    FServerBanner:    string;          // A-2: Server: header value; '' = omit
+    FTCPFastOpen:     Boolean;         // feat: TCP_FASTOPEN — opt-in; graceful no-op on unsupported OS
+    FMetrics:         TPoseidonMetrics; // Prometheus metrics; nil when disabled
+    FMetricsEnabled:  Boolean;
+    FMetricsPath:     string;
+    FMetricsAllowedCIDR: string;
+    FProxyProtocol:     TProxyProtocolMode; // PP v1/v2/auto; default ppDisabled
+    FRateLimitPerIP:    Integer;   // max req/s per IP; 0 = unlimited
+    FRateLimitGlobal:   Integer;   // max req/s global; 0 = unlimited
+    FRateLimitResponse: Integer;   // HTTP status on limit (default 429)
+    FRateLock:          TCriticalSection;
+    FRateBuckets:       TDictionary<string, Int64>; // IP → packed (count|window)
+    FRateGlobalCount:   Int64;     // global req count in current window
+    FRateGlobalWindow:  Int64;     // current global window (tick64 div 1000)
 {$IFDEF MSWINDOWS}
     FIocp:          THandle;
 {$ELSE}
@@ -79,7 +119,8 @@ type
     procedure _Accept;
     procedure _OnNewSocket(ASocket: NativeUInt; const ARemoteAddr: string);
     procedure _PostRecv(AConn: Pointer);
-    procedure _PostSend(AConn: Pointer; const AResponse: TBytes);
+    procedure _PostSend(AConn: Pointer; const AResponse: TBytes;
+      AActualLen: Integer = 0);
     procedure _CloseConn(AConn: Pointer);
     procedure _WorkerLoop;
     procedure _ProcessRecv(AConn: Pointer; const ABuf: PByte; ALen: Cardinal);
@@ -89,12 +130,11 @@ type
     procedure _DispatchAccumBuf(AConn: Pointer);
     function  _TryParseRequest(AConn: Pointer;
       out AReq: TPoseidonNativeRequest; out ABadRequest: Boolean): Boolean;
-    function  _DecodeChunked(ABuf: PByte; ABufLen: Integer;
-      out ABody: TBytes; out AConsumed: Integer; out AMalformed: Boolean): Boolean;
     function  _BuildResponse(AStatus: Integer; const AContentType: string;
       const ABody: TBytes; AKeepAlive: Boolean;
       const AExtra: TArray<TPair<string,string>>): TBytes;
-    procedure _EncryptAndSend(AConn: Pointer; const AAppData: TBytes);
+    procedure _EncryptAndSend(AConn: Pointer; const AAppData: TBytes;
+      AActualLen: Integer = 0);
     procedure _SSLFlushWriteBio(AConn: Pointer);
     procedure _IdleSweepLoop;
     function  _AdmitAndRegister(AConn: Pointer): Boolean;
@@ -103,6 +143,7 @@ type
       const AContentType: string; var ABody: TBytes;
       var AExtra: TArray<TPair<string,string>>);
     procedure _UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
+    procedure _UpgradeToH2C(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     function  _DispatchWSFrames(AConn: Pointer): Boolean;
     // HTTP/2 helpers — called from _ProcessRecv and used as TH2Conn callbacks
     procedure _H2Send(AConn: Pointer; const AData: TBytes);
@@ -111,6 +152,8 @@ type
       var AStatus: Integer; var AContentType: string; var ABody: TBytes;
       var AExtra: TArray<TPair<string,string>>);
     procedure _Log(ALevel: TLogLevel; const AMessage: string);
+    // Returns True when the request should proceed; False = rate-limited.
+    function  _CheckRateLimit(const ARemoteAddr: string): Boolean;
 {$IFNDEF MSWINDOWS}
     procedure _DoRecv(AConn: Pointer);
     procedure _FlushSend(AConn: Pointer);
@@ -120,6 +163,9 @@ type
     destructor  Destroy; override;
     procedure ConfigureSSL(const ACertFile, AKeyFile: string);
     procedure AddSSLCert(const AHostName, ACertFile, AKeyFile: string);
+    // S-5: enable mTLS — require client certificates signed by ACAFile (PEM CA bundle).
+    // Must be called after ConfigureSSL and before Listen().
+    procedure ConfigureMTLS(const ACAFile: string);
     procedure Listen(const AHost: string; APort: Integer;
       AOnRequest: TOnNativeRequest; AOnListen: TProc = nil);
     procedure Stop;
@@ -151,6 +197,74 @@ type
     // Optional log callback. When assigned, all internal errors are routed here.
     // When nil (default), errors are written to ErrOutput.
     property OnLog: TOnPoseidonLog read FOnLog write FOnLog;
+    // Optional access-log callback. Fired after every HTTP/1.1 request is
+    // dispatched. Receives method, path, status, duration (ms), remote addr,
+    // and byte counts. nil (default) = no access logging.
+    property OnRequestLog: TOnPoseidonRequestLog
+      read FOnRequestLog write FOnRequestLog;
+    // S-1: Allowed HTTP methods. When non-empty, any request with a method not in
+    // this list is rejected with 405. Empty (default) accepts all methods.
+    // Example: Server.AllowedMethods := ['GET', 'POST', 'HEAD'];
+    property AllowedMethods: TArray<string> read FAllowedMethods write FAllowedMethods;
+    // S-6: Minimum TLS protocol version. Applied at ConfigureSSL time.
+    // Use Poseidon.Net.SSL constants: TLS1_2_VERSION ($0303), TLS1_3_VERSION ($0304).
+    // Default TLS1_2_VERSION ($0303). Set to 0 to use the OpenSSL library default.
+    property MinTLSVersion: Integer read FMinTLSVersion write FMinTLSVersion;
+    // R-4: Maximum accumulated request body+headers size. Default 8MB (8388608).
+    property MaxRequestSize: Integer read FMaxRequestSize write FMaxRequestSize;
+    // R-4: Maximum header section size. Default 65536 (64 KB).
+    property MaxHeaderSize:  Integer read FMaxHeaderSize  write FMaxHeaderSize;
+    // R-1: Maximum milliseconds to wait for in-flight requests to complete during
+    // Stop(). Default 30000 (30 s). Stop() blocks for at most this long.
+    property DrainTimeoutMs: Integer read FDrainTimeoutMs write FDrainTimeoutMs;
+    // R-5: Maximum concurrent in-flight requests. 0 = unlimited (default).
+    // When the limit is reached, new requests receive 503.
+    property MaxQueueDepth:  Integer read FMaxQueueDepth  write FMaxQueueDepth;
+    // R-3: Maximum WebSocket frame payload size in bytes. 0 = unlimited (default).
+    // Frames exceeding this limit close the connection with code 1009.
+    property MaxWSFrameSize: Int64   read FMaxWSFrameSize  write FMaxWSFrameSize;
+    // P-1: HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS. Default 100.
+    property H2MaxConcurrentStreams: Cardinal
+      read FH2MaxConcurrentStreams write FH2MaxConcurrentStreams;
+    // P-1: HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE. Default 65535.
+    property H2InitialWindowSize: Cardinal
+      read FH2InitialWindowSize write FH2InitialWindowSize;
+    // A-1: When True, responses include X-Content-Type-Options, X-Frame-Options,
+    // and Referrer-Policy headers. Default False (opt-in).
+    property SecureHeadersEnabled: Boolean
+      read FSecureHeadersEnabled write FSecureHeadersEnabled;
+    // A-2: Value of the Server: response header. Default 'Poseidon/1.0'.
+    // Set to '' to suppress the Server: header entirely.
+    property ServerBanner: string read FServerBanner write FServerBanner;
+    // TCP_FASTOPEN (RFC 7413): allows clients to send data with the SYN packet on
+    // reconnections, saving one RTT. Default False (opt-in).
+    // Requires Windows 10 1607+ or Linux kernel 3.7+ with tcp_fastopen enabled.
+    // Silently ignored when the OS does not support it.
+    property TCPFastOpen: Boolean read FTCPFastOpen write FTCPFastOpen;
+    // Prometheus metrics endpoint. When MetricsEnabled = True, GET MetricsPath
+    // returns metrics in Prometheus exposition format 0.0.4.
+    // MetricsEnabled must be set before Listen(). Default False.
+    property MetricsEnabled:     Boolean read FMetricsEnabled  write FMetricsEnabled;
+    // Path for the metrics endpoint. Default '/metrics'.
+    property MetricsPath:        string  read FMetricsPath     write FMetricsPath;
+    // Optional CIDR to restrict scraping (e.g. '10.0.0.0/8'). '' = no restriction.
+    property MetricsAllowedCIDR: string  read FMetricsAllowedCIDR write FMetricsAllowedCIDR;
+    // Read-only access to the metrics object (for custom instrumentation).
+    property Metrics: TPoseidonMetrics read FMetrics;
+    // Rate limiting (fixed-window counter, 1-second window).
+    // RateLimitPerIP: maximum requests per second from a single IP. 0 = unlimited.
+    // RateLimitGlobal: maximum requests per second across all clients. 0 = unlimited.
+    // RateLimitResponse: HTTP status returned when the limit is exceeded. Default 429.
+    property RateLimitPerIP:    Integer read FRateLimitPerIP    write FRateLimitPerIP;
+    property RateLimitGlobal:   Integer read FRateLimitGlobal   write FRateLimitGlobal;
+    property RateLimitResponse: Integer read FRateLimitResponse write FRateLimitResponse;
+    // Proxy Protocol: ppDisabled (default) disables PP processing.
+    // ppV1/ppV2: enforce a specific version. ppAuto: detect by signature.
+    // Enable only when the server receives connections exclusively from a
+    // trusted load-balancer; accepting PP from untrusted sources allows
+    // IP spoofing. Must be set before Listen().
+    property ProxyProtocol: TProxyProtocolMode
+      read FProxyProtocol write FProxyProtocol;
     procedure RegisterWSHandler(const APath: string; AHandler: TWSMessageCallback);
   end;
 
@@ -161,7 +275,10 @@ uses
   Winapi.Windows,
   Winapi.Winsock2,
   Poseidon.Net.SSL,
-  Poseidon.Net.Pool.Buffer;
+  Poseidon.Net.Pool.Buffer,
+  Poseidon.Net.Security,
+  Poseidon.Net.ResponseBuilder,
+  Poseidon.Net.HTTP1.Parser;
 {$ELSE}
 uses
   Posix.SysSocket,
@@ -171,7 +288,10 @@ uses
   Posix.Unistd,
   Posix.Errno,
   Poseidon.Net.SSL,
-  Poseidon.Net.Pool.Buffer;
+  Poseidon.Net.Pool.Buffer,
+  Poseidon.Net.Security,
+  Poseidon.Net.ResponseBuilder,
+  Poseidon.Net.HTTP1.Parser;
 {$ENDIF}
 
 // ===========================================================================
@@ -218,9 +338,11 @@ type
     WSPath:        string;
     WSConn:        IPoseidonWSConn;
     H2Conn:        TH2Conn;     // non-nil when connection uses HTTP/2 (via ALPN)
+    PPParsed:      Boolean;     // True once Proxy Protocol header has been consumed
 {$IFNDEF MSWINDOWS}
-    PendingSend:   TBytes;
-    SentBytes:     Integer;
+    PendingSend:        TBytes;
+    PendingSendActual:  Integer;  // P-4: bytes to send; 0 = use Length(PendingSend)
+    SentBytes:          Integer;
 {$ENDIF}
     constructor Create(
 {$IFDEF MSWINDOWS}ASocket: TSocket{$ELSE}ASocket: Integer{$ENDIF};
@@ -231,6 +353,10 @@ type
 destructor TNativeConn.Destroy;
 begin
   if AccumBuf <> nil then TBufferPool.Release(AccumBuf);
+{$IFNDEF MSWINDOWS}
+  // P-4: return any in-flight pool buffer if connection closed mid-send
+  if PendingSend <> nil then TBufferPool.Release(PendingSend);
+{$ENDIF}
   FreeAndNil(H2Conn);
   inherited Destroy;
 end;
@@ -249,10 +375,11 @@ begin
   SSLReadBio   := nil;
   SSLWriteBio  := nil;
   SSLHandshook := False;
-  WSMode       := CM_HTTP;
-  WSPath       := '';
-  WSConn       := nil;
-  H2Conn       := nil;
+  WSMode    := CM_HTTP;
+  WSPath    := '';
+  WSConn    := nil;
+  H2Conn    := nil;
+  PPParsed  := False;
 end;
 
 // ===========================================================================
@@ -261,308 +388,23 @@ end;
 
 function TPoseidonNativeServer._TryParseRequest(AConn: Pointer;
   out AReq: TPoseidonNativeRequest; out ABadRequest: Boolean): Boolean;
-// Zero-Split parser: scans AccumBuf byte-by-byte using indices, materializing
-// strings only for the final Method/Path/Headers values. Eliminates the big
-// LData GetString + 2 Split TArray allocations per request.
-const
-  MAX_HEADER_SECTION = 65536;   // 64 KB hard cap on request-line + headers
-  MAX_HEADER_COUNT   = 100;
-  SP                 = $20;
-  HT                 = $09;
-  CR                 = $0D;
-  LF                 = $0A;
-
-  function BufToStr(const ABuf: TBytes; AStart, ALen: Integer): string;
-  begin
-    if ALen <= 0 then Result := ''
-    else Result := TEncoding.ASCII.GetString(ABuf, AStart, ALen);
-  end;
-
+// Delegates to Poseidon.Net.HTTP1.Parser.ParseHTTP1Request (R-2).
 var
-  LConn:         TNativeConn absolute AConn;
-  I:             Integer;
-  LHdrEnd:       Integer;
-  LScanEnd:      Integer;
-  LLineStart:    Integer;
-  LLineEnd:      Integer;
-  LSpace1:       Integer;
-  LSpace2:       Integer;
-  LColonPos:     Integer;
-  LQPos:         Integer;
-  LValStart:     Integer;
-  LName, LValue: string;
-  LCL:           Int64;
-  LBodyStart,
-  LConsumed:     Integer;
-  LHdrCount:     Integer;
-  LIsHttp11:     Boolean;
-  LIsChunked:    Boolean;
-  LChunkBody:    TBytes;
-  LChunkBytes:   Integer;
-  LChunkBad:     Boolean;
+  LConn:    TNativeConn absolute AConn;
+  LConsumed: Integer;
 begin
-  Result      := False;
-  ABadRequest := False;
-
-  // Scan for CRLFCRLF (end of headers)
-  LHdrEnd  := -1;
-  LScanEnd := LConn.AccumLen - 4;
-  if LScanEnd > MAX_HEADER_SECTION then LScanEnd := MAX_HEADER_SECTION;
-  for I := 0 to LScanEnd do
-    if (LConn.AccumBuf[I]   = CR) and (LConn.AccumBuf[I+1] = LF) and
-       (LConn.AccumBuf[I+2] = CR) and (LConn.AccumBuf[I+3] = LF) then
-    begin
-      LHdrEnd := I;
-      Break;
-    end;
-
-  if LHdrEnd < 0 then
+  Result := ParseHTTP1Request(
+    LConn.AccumBuf, LConn.AccumLen, FMaxHeaderSize, FMaxRequestSize,
+    AReq.Method, AReq.Path, AReq.QueryString,
+    AReq.Headers, AReq.RawBody, AReq.KeepAlive,
+    LConsumed, ABadRequest);
+  if Result then
   begin
-    if LConn.AccumLen > MAX_HEADER_SECTION then ABadRequest := True;
-    Exit;
-  end;
-
-  // --- Parse request line: METHOD SP PATH[?QUERY] [SP HTTP/x.y] CRLF ---
-  // Find end of request line
-  LLineEnd := -1;
-  for I := 0 to LHdrEnd - 1 do
-    if (LConn.AccumBuf[I] = CR) and (LConn.AccumBuf[I+1] = LF) then
-    begin
-      LLineEnd := I;
-      Break;
-    end;
-  if LLineEnd <= 0 then begin ABadRequest := True; Exit; end;
-
-  // First space separates method from path
-  LSpace1 := -1;
-  for I := 0 to LLineEnd - 1 do
-    if LConn.AccumBuf[I] = SP then begin LSpace1 := I; Break; end;
-  if LSpace1 <= 0 then begin ABadRequest := True; Exit; end;
-
-  // Second space separates path from version (optional in HTTP/0.9)
-  LSpace2 := -1;
-  for I := LSpace1 + 1 to LLineEnd - 1 do
-    if LConn.AccumBuf[I] = SP then begin LSpace2 := I; Break; end;
-  if LSpace2 < 0 then LSpace2 := LLineEnd;
-
-  AReq.Method := BufToStr(LConn.AccumBuf, 0, LSpace1);
-
-  // Find '?' inside path to split path/query
-  LQPos := -1;
-  for I := LSpace1 + 1 to LSpace2 - 1 do
-    if LConn.AccumBuf[I] = Byte('?') then begin LQPos := I; Break; end;
-  if LQPos > 0 then
-  begin
-    AReq.Path        := BufToStr(LConn.AccumBuf, LSpace1 + 1, LQPos - LSpace1 - 1);
-    AReq.QueryString := BufToStr(LConn.AccumBuf, LQPos + 1, LSpace2 - LQPos - 1);
-  end
-  else
-  begin
-    AReq.Path        := BufToStr(LConn.AccumBuf, LSpace1 + 1, LSpace2 - LSpace1 - 1);
-    AReq.QueryString := '';
-  end;
-
-  // Detect HTTP/1.1 by raw bytes (no string allocation)
-  LIsHttp11 := False;
-  if (LLineEnd - LSpace2 - 1) = 8 then
-    LIsHttp11 :=
-      (LConn.AccumBuf[LSpace2 + 1] = Byte('H')) and
-      (LConn.AccumBuf[LSpace2 + 2] = Byte('T')) and
-      (LConn.AccumBuf[LSpace2 + 3] = Byte('T')) and
-      (LConn.AccumBuf[LSpace2 + 4] = Byte('P')) and
-      (LConn.AccumBuf[LSpace2 + 5] = Byte('/')) and
-      (LConn.AccumBuf[LSpace2 + 6] = Byte('1')) and
-      (LConn.AccumBuf[LSpace2 + 7] = Byte('.')) and
-      (LConn.AccumBuf[LSpace2 + 8] = Byte('1'));
-  AReq.KeepAlive := LIsHttp11;
-
-  // --- Parse headers ---
-  LCL        := 0;
-  LIsChunked := False;
-  LHdrCount  := 0;
-  SetLength(AReq.Headers, MAX_HEADER_COUNT);
-
-  LLineStart := LLineEnd + 2;
-  while LLineStart < LHdrEnd do
-  begin
-    if LHdrCount >= MAX_HEADER_COUNT then Break;
-
-    LLineEnd := -1;
-    for I := LLineStart to LHdrEnd - 1 do
-      if (LConn.AccumBuf[I] = CR) and (LConn.AccumBuf[I+1] = LF) then
-      begin
-        LLineEnd := I;
-        Break;
-      end;
-    if LLineEnd < 0 then Break;
-    if LLineEnd = LLineStart then  // empty line — skip
-    begin
-      LLineStart := LLineEnd + 2;
-      Continue;
-    end;
-
-    LColonPos := -1;
-    for I := LLineStart to LLineEnd - 1 do
-      if LConn.AccumBuf[I] = Byte(':') then begin LColonPos := I; Break; end;
-    if LColonPos < 0 then
-    begin
-      LLineStart := LLineEnd + 2;
-      Continue;
-    end;
-
-    // Skip OWS after colon
-    LValStart := LColonPos + 1;
-    while (LValStart < LLineEnd) and
-          ((LConn.AccumBuf[LValStart] = SP) or (LConn.AccumBuf[LValStart] = HT)) do
-      Inc(LValStart);
-
-    LName  := BufToStr(LConn.AccumBuf, LLineStart, LColonPos - LLineStart);
-    LValue := BufToStr(LConn.AccumBuf, LValStart,  LLineEnd - LValStart);
-
-    AReq.Headers[LHdrCount] := TPair<string,string>.Create(LName, LValue);
-    Inc(LHdrCount);
-
-    if SameText(LName, 'Connection') then
-    begin
-      if Pos('keep-alive', LowerCase(LValue)) > 0 then AReq.KeepAlive := True;
-      if Pos('close',      LowerCase(LValue)) > 0 then AReq.KeepAlive := False;
-    end
-    else if SameText(LName, 'Content-Length') then
-      LCL := StrToInt64Def(LValue, 0)
-    else if SameText(LName, 'Transfer-Encoding') then
-      LIsChunked := Pos('chunked', LowerCase(LValue)) > 0;
-
-    LLineStart := LLineEnd + 2;
-  end;
-  SetLength(AReq.Headers, LHdrCount);
-
-  LBodyStart := LHdrEnd + 4;
-
-  if LIsChunked then
-  begin
-    if not _DecodeChunked(@LConn.AccumBuf[LBodyStart],
-         LConn.AccumLen - LBodyStart,
-         LChunkBody, LChunkBytes, LChunkBad) then
-    begin
-      ABadRequest := LChunkBad;
-      Exit;
-    end;
-    AReq.RawBody := LChunkBody;
-    LConsumed    := LBodyStart + LChunkBytes;
-  end
-  else
-  begin
-    if LCL > 0 then
-    begin
-      if LConn.AccumLen - LBodyStart < LCL then Exit;
-      SetLength(AReq.RawBody, LCL);
-      Move(LConn.AccumBuf[LBodyStart], AReq.RawBody[0], LCL);
-    end
-    else
-      SetLength(AReq.RawBody, 0);
-    LConsumed := LBodyStart + LCL;
-  end;
-
-  AReq.RemoteAddr := LConn.RemoteAddr;
-
-  if LConn.AccumLen > LConsumed then
-    Move(LConn.AccumBuf[LConsumed], LConn.AccumBuf[0],
-      LConn.AccumLen - LConsumed);
-  LConn.AccumLen := LConn.AccumLen - LConsumed;
-
-  Result := True;
-end;
-
-// ===========================================================================
-// Shared: _DecodeChunked
-// Result=True  → all chunks decoded; AConsumed = bytes consumed from ABuf
-// Result=False, AMalformed=False → incomplete, need more data
-// Result=False, AMalformed=True  → malformed chunk encoding → close conn
-// ===========================================================================
-
-function TPoseidonNativeServer._DecodeChunked(ABuf: PByte; ABufLen: Integer;
-  out ABody: TBytes; out AConsumed: Integer; out AMalformed: Boolean): Boolean;
-var
-  LPos:       Integer;
-  LCRLFP:     Integer;
-  LSize:      AnsiString;
-  LSemi:      Integer;
-  LChunk:     Int64;
-  LOldLen:    Integer;
-  LDataStart: Integer;
-  LBytes:     PByte;
-  I, LLen:    Integer;
-begin
-  Result     := False;
-  AMalformed := False;
-  AConsumed  := 0;
-  SetLength(ABody, 0);
-  LPos   := 0;
-  LBytes := ABuf;
-
-  while True do
-  begin
-    // Find CRLF after chunk-size line
-    LCRLFP := -1;
-    I := LPos;
-    while I < ABufLen - 1 do
-    begin
-      if (LBytes[I] = $0D) and (LBytes[I + 1] = $0A) then
-      begin
-        LCRLFP := I;
-        Break;
-      end;
-      Inc(I);
-    end;
-    if LCRLFP < 0 then Exit;
-
-    LLen := LCRLFP - LPos;
-    if LLen < 1 then begin AMalformed := True; Exit; end;
-    if LLen > 16 then begin AMalformed := True; Exit; end;  // hex size cap
-
-    SetLength(LSize, LLen);
-    Move(LBytes[LPos], LSize[1], LLen);
-
-    LSemi := 0;
-    for I := 1 to LLen do
-      if LSize[I] = ';' then begin LSemi := I; Break; end;
-    if LSemi > 0 then SetLength(LSize, LSemi - 1);
-
-    if not TryStrToInt64('$' + string(LSize), LChunk) or (LChunk < 0) then
-    begin
-      AMalformed := True;
-      Exit;
-    end;
-
-    if LChunk = 0 then
-    begin
-      LPos := LCRLFP + 2;
-      I := LPos;
-      while I < ABufLen - 1 do
-      begin
-        if (LBytes[I] = $0D) and (LBytes[I + 1] = $0A) then
-        begin
-          Inc(I, 2);
-          LPos := I;
-          Break;
-        end;
-        Inc(I);
-      end;
-      AConsumed := LPos;
-      Result    := True;
-      Exit;
-    end;
-
-    if LChunk > MAX_REQUEST_SIZE then begin AMalformed := True; Exit; end;
-
-    LDataStart := LCRLFP + 2;
-    if Int64(LDataStart) + LChunk + 2 > Int64(ABufLen) then Exit;
-
-    LOldLen := Length(ABody);
-    SetLength(ABody, LOldLen + Integer(LChunk));
-    Move(LBytes[LDataStart], ABody[LOldLen], LChunk);
-
-    LPos := LDataStart + Integer(LChunk) + 2;
+    AReq.RemoteAddr := LConn.RemoteAddr;
+    if LConn.AccumLen > LConsumed then
+      Move(LConn.AccumBuf[LConsumed], LConn.AccumBuf[0],
+        LConn.AccumLen - LConsumed);
+    LConn.AccumLen := LConn.AccumLen - LConsumed;
   end;
 end;
 
@@ -571,26 +413,43 @@ end;
 // ===========================================================================
 
 procedure TPoseidonNativeServer._EncryptAndSend(AConn: Pointer;
-  const AAppData: TBytes);
+  const AAppData: TBytes; AActualLen: Integer = 0);
 var
   LConn:    TNativeConn absolute AConn;
   LPending: Integer;
   LEnc:     TBytes;
   LN:       Integer;
+  LSendLen: Integer;
+  LTmp:     TBytes;
 begin
+  // P-4: AActualLen > 0 means AAppData is a pool buffer; use only first AActualLen bytes.
+  LSendLen := AActualLen;
+  if LSendLen = 0 then LSendLen := Length(AAppData);
+
   if LConn.SSLHandle = nil then
   begin
-    _PostSend(AConn, AAppData);
+    _PostSend(AConn, AAppData, AActualLen);
     Exit;
   end;
 
-  if Length(AAppData) > 0 then
+  if LSendLen > 0 then
   begin
-    if TPoseidonSSL.SSL_Write(LConn.SSLHandle, @AAppData[0],
-         Length(AAppData)) <= 0 then
+    if TPoseidonSSL.SSL_Write(LConn.SSLHandle, @AAppData[0], LSendLen) <= 0 then
     begin
+      // P-4: release pool buffer before closing connection
+      if AActualLen > 0 then
+      begin
+        LTmp := AAppData;
+        TBufferPool.Release(LTmp);
+      end;
       _CloseConn(AConn);
       Exit;
+    end;
+    // P-4: pool buffer fully consumed by SSL_Write — release it before BIO_Read
+    if AActualLen > 0 then
+    begin
+      LTmp := AAppData;
+      TBufferPool.Release(LTmp);
     end;
   end;
 
@@ -729,12 +588,25 @@ begin
   TPoseidonSSL.CTX_LoadCert(FSSLCtx, ACertFile);
   TPoseidonSSL.CTX_LoadKey(FSSLCtx, AKeyFile);
   TPoseidonSSL.CTX_VerifyKey(FSSLCtx);
+  // S-6: enforce minimum TLS version (default TLS 1.2; set MinTLSVersion := 0 to disable)
+  TPoseidonSSL.CTX_SetMinVersion(FSSLCtx, FMinTLSVersion);
+  // A-4: enable session cache to reduce handshake cost on reconnections
+  TPoseidonSSL.CTX_EnableSessionCache(FSSLCtx);
   // Register SNI callback so hostnames registered via AddSSLCert can switch CTX.
   TPoseidonSSL.CTX_SetSNICallback(FSSLCtx, @PoseidonSNIServernameCallback, Self);
   // Register ALPN callback to negotiate "h2" when HTTP2Enabled is True.
   if FH2Enabled then
     TPoseidonSSL.CTX_SetALPN(FSSLCtx, Self);
   FSSLEnabled := True;
+end;
+
+procedure TPoseidonNativeServer.ConfigureMTLS(const ACAFile: string);
+begin
+  if FActive then
+    raise Exception.Create('ConfigureMTLS must be called before Listen()');
+  if FSSLCtx = nil then
+    raise Exception.Create('Call ConfigureSSL before ConfigureMTLS');
+  TPoseidonSSL.CTX_ConfigureMTLS(FSSLCtx, ACAFile);
 end;
 
 procedure TPoseidonNativeServer.AddSSLCert(const AHostName, ACertFile, AKeyFile: string);
@@ -766,192 +638,15 @@ begin
 end;
 
 // ===========================================================================
-// Shared: _BuildResponse — ONE TBytes = headers + body
+// Shared: _BuildResponse — delegates to Poseidon.Net.ResponseBuilder (R-3)
 // ===========================================================================
-
-// Pre-encoded HTTP response fragments — initialized in `initialization`.
-// _BuildResponse Move()s these directly into the output TBytes, avoiding
-// UTF-16 string concat + TEncoding.ASCII.GetBytes per response (W3).
-var
-  G_STATUS_200, G_STATUS_201, G_STATUS_204,
-  G_STATUS_301, G_STATUS_302, G_STATUS_303, G_STATUS_304,
-  G_STATUS_400, G_STATUS_401, G_STATUS_403, G_STATUS_404, G_STATUS_405,
-  G_STATUS_409, G_STATUS_413, G_STATUS_422, G_STATUS_429,
-  G_STATUS_500, G_STATUS_503: TBytes;
-  G_CT_PREFIX:   TBytes;   // 'Content-Type: '
-  G_CL_PREFIX:   TBytes;   // 'Content-Length: '
-  G_CONN_KA:     TBytes;   // 'Connection: keep-alive'#13#10
-  G_CONN_CLOSE:  TBytes;   // 'Connection: close'#13#10
-  G_CRLF:        TBytes;   // #13#10
-
-  // Pre-encoded common Content-Type values — Move()'d into Result when the
-  // response uses one of these (~95% of REST APIs hit application/json).
-  G_CT_JSON, G_CT_TEXT, G_CT_HTML, G_CT_PROBLEM, G_CT_FORM, G_CT_OCTET: TBytes;
-
-  // Pre-encoded default error body — eliminates per-request UTF-8 encoding
-  // in _ProcessRecv even on successful paths (the value is replaced by the
-  // user handler but the allocation was still happening every time).
-  G_DEFAULT_ERROR_BODY: TBytes;
-
-function DigitCount(AValue: Integer): Integer; inline;
-begin
-  if AValue < 10 then Result := 1
-  else if AValue < 100 then Result := 2
-  else if AValue < 1000 then Result := 3
-  else if AValue < 10000 then Result := 4
-  else if AValue < 100000 then Result := 5
-  else if AValue < 1000000 then Result := 6
-  else if AValue < 10000000 then Result := 7
-  else if AValue < 100000000 then Result := 8
-  else if AValue < 1000000000 then Result := 9
-  else Result := 10;
-end;
-
-procedure WriteIntToBuffer(var ABuf: TBytes; APos: Integer; AValue: Integer);
-// Writes AValue as ASCII digits into ABuf starting at APos. Caller must
-// have allocated enough space (see DigitCount). No bounds check.
-var
-  LScratch: array[0..11] of Byte;
-  LLen, I, LV: Integer;
-begin
-  if AValue = 0 then
-  begin
-    ABuf[APos] := $30;  // '0'
-    Exit;
-  end;
-  LLen := 0;
-  LV := AValue;
-  while LV > 0 do
-  begin
-    LScratch[LLen] := Byte($30 + (LV mod 10));
-    Inc(LLen);
-    LV := LV div 10;
-  end;
-  for I := 0 to LLen - 1 do
-    ABuf[APos + I] := LScratch[LLen - 1 - I];
-end;
-
-function GetContentTypeValueBytes(const AContentType: string;
-  out AAlloc: Boolean): TBytes;
-// Returns the pre-encoded bytes for the given content-type, or builds on the fly.
-// AAlloc = True when the returned TBytes was freshly allocated (i.e., not a cached G_CT_*).
-begin
-  AAlloc := False;
-  if      AContentType = 'application/json'         then Result := G_CT_JSON
-  else if AContentType = 'text/plain'               then Result := G_CT_TEXT
-  else if AContentType = 'text/html'                then Result := G_CT_HTML
-  else if AContentType = 'application/problem+json' then Result := G_CT_PROBLEM
-  else if AContentType = 'application/x-www-form-urlencoded' then Result := G_CT_FORM
-  else if AContentType = 'application/octet-stream' then Result := G_CT_OCTET
-  else
-  begin
-    Result := TEncoding.ASCII.GetBytes(AContentType);
-    AAlloc := True;
-  end;
-end;
-
-function GetStatusLineBytes(AStatus: Integer): TBytes;
-begin
-  case AStatus of
-    200: Result := G_STATUS_200;
-    201: Result := G_STATUS_201;
-    204: Result := G_STATUS_204;
-    301: Result := G_STATUS_301;
-    302: Result := G_STATUS_302;
-    303: Result := G_STATUS_303;
-    304: Result := G_STATUS_304;
-    400: Result := G_STATUS_400;
-    401: Result := G_STATUS_401;
-    403: Result := G_STATUS_403;
-    404: Result := G_STATUS_404;
-    405: Result := G_STATUS_405;
-    409: Result := G_STATUS_409;
-    413: Result := G_STATUS_413;
-    422: Result := G_STATUS_422;
-    429: Result := G_STATUS_429;
-    500: Result := G_STATUS_500;
-    503: Result := G_STATUS_503;
-  else
-    // Slow path for uncommon codes — build inline.
-    Result := TEncoding.ASCII.GetBytes(
-      'HTTP/1.1 ' + IntToStr(AStatus) + ' Unknown'#13#10);
-  end;
-end;
 
 function TPoseidonNativeServer._BuildResponse(AStatus: Integer;
   const AContentType: string; const ABody: TBytes; AKeepAlive: Boolean;
   const AExtra: TArray<TPair<string,string>>): TBytes;
-// Hot path: pre-cached fragments are Move()'d into Result. Common
-// Content-Type values are pre-encoded (W3+); variable values write directly
-// into Result via TEncoding.ASCII.GetBytes (no intermediate TBytes alloc).
-var
-  LStatusBytes: TBytes;
-  LConnBytes:   TBytes;
-  LCTValue:     TBytes;
-  LCTAlloced:   Boolean;
-  LExtraStr:    string;
-  LBodyLen, LCLLen, LExtraLen: Integer;
-  LTotal, LPos: Integer;
-  I:            Integer;
 begin
-  LStatusBytes := GetStatusLineBytes(AStatus);
-  if AKeepAlive then LConnBytes := G_CONN_KA
-  else               LConnBytes := G_CONN_CLOSE;
-
-  LCTValue := GetContentTypeValueBytes(AContentType, LCTAlloced);
-  LBodyLen := Length(ABody);
-  LCLLen   := DigitCount(LBodyLen);
-
-  if Length(AExtra) > 0 then
-  begin
-    LExtraStr := '';
-    for I := 0 to High(AExtra) do
-      LExtraStr := LExtraStr + AExtra[I].Key + ': ' + AExtra[I].Value + #13#10;
-  end;
-  LExtraLen := Length(LExtraStr);
-
-  LTotal := Length(LStatusBytes)
-          + Length(G_CT_PREFIX) + Length(LCTValue) + 2  // '\r\n'
-          + Length(G_CL_PREFIX) + LCLLen + 2
-          + Length(LConnBytes)
-          + LExtraLen
-          + Length(G_CRLF)
-          + Length(ABody);
-  SetLength(Result, LTotal);
-  LPos := 0;
-
-  Move(LStatusBytes[0], Result[LPos], Length(LStatusBytes));
-  Inc(LPos, Length(LStatusBytes));
-
-  Move(G_CT_PREFIX[0], Result[LPos], Length(G_CT_PREFIX));
-  Inc(LPos, Length(G_CT_PREFIX));
-  if Length(LCTValue) > 0 then
-  begin
-    Move(LCTValue[0], Result[LPos], Length(LCTValue));
-    Inc(LPos, Length(LCTValue));
-  end;
-  Result[LPos] := $0D; Result[LPos + 1] := $0A; Inc(LPos, 2);
-
-  Move(G_CL_PREFIX[0], Result[LPos], Length(G_CL_PREFIX));
-  Inc(LPos, Length(G_CL_PREFIX));
-  WriteIntToBuffer(Result, LPos, LBodyLen);
-  Inc(LPos, LCLLen);
-  Result[LPos] := $0D; Result[LPos + 1] := $0A; Inc(LPos, 2);
-
-  Move(LConnBytes[0], Result[LPos], Length(LConnBytes));
-  Inc(LPos, Length(LConnBytes));
-
-  if LExtraLen > 0 then
-  begin
-    TEncoding.ASCII.GetBytes(LExtraStr, 1, LExtraLen, Result, LPos);
-    Inc(LPos, LExtraLen);
-  end;
-
-  Move(G_CRLF[0], Result[LPos], Length(G_CRLF));
-  Inc(LPos, Length(G_CRLF));
-
-  if Length(ABody) > 0 then
-    Move(ABody[0], Result[LPos], Length(ABody));
+  Result := BuildHTTPResponse(AStatus, AContentType, ABody, AKeepAlive,
+    AExtra, FSecureHeadersEnabled, FServerBanner);
 end;
 
 // ===========================================================================
@@ -971,6 +666,7 @@ var
   LDecN:   Integer;
   LErr:    Integer;
   LHsRet:  Integer;
+  LNew:    TBytes;
 begin
   AAborted := False;
 
@@ -992,7 +688,8 @@ begin
       // ALPN: if client negotiated "h2", create TH2Conn for this connection.
       if FH2Enabled and (TPoseidonSSL.SSL_GetSelectedProtocol(LConn.SSLHandle) = 'h2') then
       begin
-        LConn.H2Conn := TH2Conn.Create(AConn, _H2Send, _H2Close, _H2OnRequest);
+        LConn.H2Conn := TH2Conn.Create(AConn, _H2Send, _H2Close, _H2OnRequest,
+          FH2MaxConcurrentStreams, FH2InitialWindowSize);
         LConn.H2Conn.SendInitialSettings;
         LConn.KeepAlive := True;  // HTTP/2 connections are always persistent
       end;
@@ -1027,8 +724,14 @@ begin
     if LDecN > 0 then
     begin
       if LConn.AccumLen + LDecN > Length(LConn.AccumBuf) then
-        SetLength(LConn.AccumBuf,
+      begin
+        // P-2: grow via pool tier instead of raw SetLength
+        LNew := TBufferPool.Acquire(
           Max(LConn.AccumLen + LDecN, Length(LConn.AccumBuf) * 2));
+        Move(LConn.AccumBuf[0], LNew[0], LConn.AccumLen);
+        TBufferPool.Release(LConn.AccumBuf);
+        LConn.AccumBuf := LNew;
+      end;
       Move(LDecBuf[0], LConn.AccumBuf[LConn.AccumLen], LDecN);
       Inc(LConn.AccumLen, LDecN);
     end
@@ -1047,29 +750,96 @@ procedure TPoseidonNativeServer._ProcessRecvPlain(AConn: Pointer;
   const ABuf: PByte; ALen: Cardinal);
 var
   LConn: TNativeConn absolute AConn;
+  LNew:  TBytes;
 begin
   if LConn.AccumLen + Integer(ALen) > Length(LConn.AccumBuf) then
-    SetLength(LConn.AccumBuf,
+  begin
+    // P-2: grow via pool tier instead of raw SetLength
+    LNew := TBufferPool.Acquire(
       Max(LConn.AccumLen + Integer(ALen), Length(LConn.AccumBuf) * 2));
+    Move(LConn.AccumBuf[0], LNew[0], LConn.AccumLen);
+    TBufferPool.Release(LConn.AccumBuf);
+    LConn.AccumBuf := LNew;
+  end;
   Move(ABuf^, LConn.AccumBuf[LConn.AccumLen], ALen);
   Inc(LConn.AccumLen, ALen);
 end;
 
 procedure TPoseidonNativeServer._DispatchAccumBuf(AConn: Pointer);
 var
-  LConn:    TNativeConn absolute AConn;
-  LReq:     TPoseidonNativeRequest;
-  LStatus:  Integer;
-  LCT:      string;
-  LBody:    TBytes;
-  LExtra:   TArray<TPair<string,string>>;
-  LResp:    TBytes;
-  LBad:     Boolean;
-  LUpgrade: string;
-  LWsKey:   string;
-  I:        Integer;
+  LConn:          TNativeConn absolute AConn;
+  LReq:           TPoseidonNativeRequest;
+  LStatus:        Integer;
+  LCT:            string;
+  LBody:          TBytes;
+  LExtra:         TArray<TPair<string,string>>;
+  LResp:          TBytes;
+  LRespActualLen: Integer;  // P-4: actual bytes in pool-allocated LResp
+  LBad:           Boolean;
+  LUpgrade:       string;
+  LWsKey:         string;
+  I:              Integer;
+  LStartTick:     Int64;
+  LRxBytes:       Int64;
+  LTxBytes:       Int64;
+  LDurationMs:    Int64;
+  LLogEvt:       TPoseidonRequestLogEvent;
+  LPPAddr:       string;
+  LPPPort:       Word;
+  LPPConsumed:   Integer;
+  LPPIncomplete: Boolean;
+  LPPInvalid:    Boolean;
+  LPPNoSig:      Boolean;
 begin
-  if LConn.AccumLen > MAX_REQUEST_SIZE then
+  // Proxy Protocol header — consume once per new connection before HTTP parsing
+  if (FProxyProtocol <> ppDisabled) and not LConn.PPParsed then
+  begin
+    if LConn.AccumLen = 0 then
+    begin
+      _PostRecv(AConn);
+      Exit;
+    end;
+    LPPAddr       := '';
+    LPPPort       := 0;
+    LPPConsumed   := 0;
+    LPPIncomplete := False;
+    LPPInvalid    := False;
+    LPPNoSig      := False;
+    if TryParseProxyProtocolAuto(FProxyProtocol,
+         @LConn.AccumBuf[0], LConn.AccumLen,
+         LPPAddr, LPPPort, LPPConsumed,
+         LPPIncomplete, LPPInvalid, LPPNoSig) then
+    begin
+      // Consume header bytes from AccumBuf
+      if LPPConsumed > 0 then
+      begin
+        Dec(LConn.AccumLen, LPPConsumed);
+        if LConn.AccumLen > 0 then
+          Move(LConn.AccumBuf[LPPConsumed], LConn.AccumBuf[0], LConn.AccumLen);
+      end;
+      if LPPAddr <> '' then
+        LConn.RemoteAddr := LPPAddr + ':' + IntToStr(LPPPort);
+      LConn.PPParsed := True;
+      // Fall through to normal HTTP processing
+    end
+    else if LPPIncomplete then
+    begin
+      _PostRecv(AConn);
+      Exit;
+    end
+    else if LPPInvalid then
+    begin
+      _CloseConn(AConn);
+      Exit;
+    end
+    else
+    begin
+      // ppAuto + no signature → treat as regular connection
+      LConn.PPParsed := True;
+    end;
+  end;
+
+  if LConn.AccumLen > FMaxRequestSize then
   begin
     _CloseConn(AConn);
     Exit;
@@ -1108,6 +878,24 @@ begin
     Exit;
   end;
 
+  // S-1: method allowlist — reject 405 if method not in FAllowedMethods
+  if not IsMethodAllowed(LReq.Method, FAllowedMethods) then
+  begin
+    LResp := _BuildResponse(405, 'text/plain',
+      TEncoding.ASCII.GetBytes('Method Not Allowed'), False, []);
+    _EncryptAndSend(AConn, LResp);
+    Exit;
+  end;
+
+  // S-2: path traversal — reject 400 on ../, %2e%2e, backslash, NUL
+  if not IsPathSafe(LReq.Path) then
+  begin
+    LResp := _BuildResponse(400, 'text/plain',
+      TEncoding.ASCII.GetBytes('Bad Request'), False, []);
+    _EncryptAndSend(AConn, LResp);
+    Exit;
+  end;
+
   LUpgrade := '';
   LWsKey   := '';
   for I := 0 to High(LReq.Headers) do
@@ -1121,12 +909,68 @@ begin
     Exit;
   end;
 
+  // A-5: h2c cleartext upgrade (RFC 7540 §3.2)
+  // Only on plain (non-TLS) connections; requires Upgrade: h2c + HTTP2-Settings header.
+  if SameText(LUpgrade, 'h2c') and FH2Enabled and (LConn.SSLHandle = nil) then
+  begin
+    _UpgradeToH2C(AConn, LReq);
+    Exit;
+  end;
+
   LConn.KeepAlive := LReq.KeepAlive;
+
+  // Rate limiting — check before backpressure and handler dispatch
+  if not _CheckRateLimit(LConn.RemoteAddr) then
+  begin
+    LResp := _BuildResponse(FRateLimitResponse, 'text/plain',
+      TEncoding.ASCII.GetBytes('Too Many Requests'), LReq.KeepAlive,
+      [TPair<string,string>.Create('Retry-After', '1')]);
+    _EncryptAndSend(AConn, LResp);
+    if LReq.KeepAlive then _PostRecv(AConn);
+    Exit;
+  end;
+
+  // Prometheus metrics endpoint — serve before handler and inflight tracking
+  if Assigned(FMetrics) and (LReq.Method = 'GET') and
+     (LReq.Path = FMetricsPath) then
+  begin
+    // Optional CIDR restriction
+    if (FMetricsAllowedCIDR <> '') and
+       not IsIPInCIDR(LConn.RemoteAddr, FMetricsAllowedCIDR) then
+    begin
+      LResp := _BuildResponse(403, 'text/plain',
+        TEncoding.ASCII.GetBytes('Forbidden'), LReq.KeepAlive, []);
+      _EncryptAndSend(AConn, LResp);
+      if LReq.KeepAlive then _PostRecv(AConn);
+      Exit;
+    end;
+    LBody  := TEncoding.UTF8.GetBytes(FMetrics.Render);
+    LResp  := _BuildResponse(200,
+      'text/plain; version=0.0.4', LBody, LReq.KeepAlive, []);
+    _EncryptAndSend(AConn, LResp);
+    if LReq.KeepAlive then _PostRecv(AConn);
+    Exit;
+  end;
+
+  // R-5: backpressure — shed load with 503 when in-flight count exceeds MaxQueueDepth
+  if (FMaxQueueDepth > 0) and
+     (TInterlocked.Read(FInFlightCount) >= FMaxQueueDepth) then
+  begin
+    LResp := _BuildResponse(503, 'text/plain',
+      TEncoding.ASCII.GetBytes('Service Unavailable'), LReq.KeepAlive, []);
+    _EncryptAndSend(AConn, LResp);
+    if LReq.KeepAlive then _PostRecv(AConn);
+    Exit;
+  end;
+
+  LRxBytes   := Length(LReq.RawBody);
+  LStartTick := Int64(TThread.GetTickCount64);
   TInterlocked.Increment(FInFlightCount);
+  if Assigned(FMetrics) then FMetrics.AdjustInflight(1);
   try
     LStatus := 500;
     LCT     := 'application/json';
-    LBody   := G_DEFAULT_ERROR_BODY;  // pre-encoded; overwritten by handler
+    LBody   := DefaultErrorBody;  // pre-encoded; overwritten by handler
     SetLength(LExtra, 0);
     try
       FOnRequest(LReq, LStatus, LCT, LBody, LExtra);
@@ -1142,12 +986,30 @@ begin
       end;
     end;
   finally
+    if Assigned(FMetrics) then FMetrics.AdjustInflight(-1);
     TInterlocked.Decrement(FInFlightCount);
   end;
 
   _TryGzipResponse(LReq, LCT, LBody, LExtra);
-  LResp := _BuildResponse(LStatus, LCT, LBody, LReq.KeepAlive, LExtra);
-  _EncryptAndSend(AConn, LResp);
+  // P-4: use pool-backed response buffer on the hot path to avoid heap malloc.
+  LResp       := BuildHTTPResponsePooled(LStatus, LCT, LBody, LReq.KeepAlive,
+    LExtra, FSecureHeadersEnabled, FServerBanner, LRespActualLen);
+  LTxBytes    := LRespActualLen;
+  LDurationMs := Int64(TThread.GetTickCount64) - LStartTick;
+  if Assigned(FMetrics) then
+    FMetrics.RecordRequest(LStatus, LDurationMs, LRxBytes, LTxBytes);
+  if Assigned(FOnRequestLog) then
+  begin
+    LLogEvt.Method     := LReq.Method;
+    LLogEvt.Path       := LReq.Path;
+    LLogEvt.Status     := LStatus;
+    LLogEvt.DurationMs := LDurationMs;
+    LLogEvt.RemoteAddr := LConn.RemoteAddr;
+    LLogEvt.RxBytes    := LRxBytes;
+    LLogEvt.TxBytes    := LTxBytes;
+    FOnRequestLog(LLogEvt);
+  end;
+  _EncryptAndSend(AConn, LResp, LRespActualLen);
 end;
 
 procedure TPoseidonNativeServer._ProcessRecv(AConn: Pointer;
@@ -1233,18 +1095,109 @@ begin
 end;
 
 // ===========================================================================
+// Shared: rate limiting — fixed-window counter, 1-second window
+// ===========================================================================
+
+function TPoseidonNativeServer._CheckRateLimit(const ARemoteAddr: string): Boolean;
+var
+  LNow:    Int64;
+  LIP:     string;
+  LPacked: Int64;
+  LWindow: Int64;
+  LCount:  Integer;
+begin
+  Result := True;  // proceed by default
+  if (FRateLimitPerIP <= 0) and (FRateLimitGlobal <= 0) then Exit;
+
+  LNow := Int64(TThread.GetTickCount64) div 1000;  // current 1-second window
+  LIP  := ExtractIP(ARemoteAddr);
+
+  FRateLock.Enter;
+  try
+    // --- Global rate check ---
+    if FRateLimitGlobal > 0 then
+    begin
+      if LNow <> FRateGlobalWindow then
+      begin
+        FRateGlobalWindow := LNow;
+        FRateGlobalCount  := 0;
+      end;
+      Inc(FRateGlobalCount);
+      if FRateGlobalCount > FRateLimitGlobal then
+      begin
+        Result := False;
+        Exit;
+      end;
+    end;
+
+    // --- Per-IP rate check ---
+    if FRateLimitPerIP > 0 then
+    begin
+      // Pack window (high 32 bits) + count (low 32 bits) into one Int64
+      if FRateBuckets.TryGetValue(LIP, LPacked) then
+      begin
+        LWindow := LPacked shr 32;
+        LCount  := Integer(LPacked and $FFFFFFFF);
+        if LNow <> LWindow then
+        begin
+          LWindow := LNow;
+          LCount  := 0;
+        end;
+      end
+      else
+      begin
+        LWindow := LNow;
+        LCount  := 0;
+      end;
+      Inc(LCount);
+      FRateBuckets.AddOrSetValue(LIP, (LWindow shl 32) or Int64(LCount));
+      if LCount > FRateLimitPerIP then
+      begin
+        Result := False;
+        Exit;
+      end;
+    end;
+  finally
+    FRateLock.Leave;
+  end;
+end;
+
+// ===========================================================================
 // Shared: lifecycle (constructor/destructor) — must precede any Listen path
 // ===========================================================================
 
 constructor TPoseidonNativeServer.Create;
 begin
   inherited Create;
-  FIdleTimeoutMs       := 10000;   // 10s default; set 0 to disable
-  FMaxConnections      := 0;       // unlimited by default
-  FMaxConnectionsPerIP := 0;       // unlimited by default
-  FPerIPCount          := TDictionary<string, Integer>.Create;
-  FWSHandlers          := TDictionary<string, TWSMessageCallback>.Create;
-  FWSLock              := TCriticalSection.Create;
+  FIdleTimeoutMs           := 10000;
+  FMaxConnections          := 0;
+  FMaxConnectionsPerIP     := 0;
+  FMinTLSVersion           := TLS1_2_VERSION;
+  FMaxRequestSize          := MAX_REQUEST_SIZE;    // R-4: 8MB
+  FMaxHeaderSize           := 65536;               // R-4: 64KB
+  FDrainTimeoutMs          := 30000;               // R-1: 30s
+  FDrainEvent              := TEvent.Create(nil, True, False, '');
+  FMaxQueueDepth           := 0;                   // R-5: unlimited
+  FMaxWSFrameSize          := 16 * 1024 * 1024;    // R-3: 16MB
+  FH2MaxConcurrentStreams  := 100;                 // P-1
+  FH2InitialWindowSize     := 65535;               // P-1
+  FSecureHeadersEnabled    := False;               // A-1: opt-in
+  FServerBanner            := 'Poseidon/1.0';      // A-2
+  FTCPFastOpen             := False;               // TCP_FASTOPEN: opt-in
+  FMetricsEnabled          := False;
+  FMetricsPath             := '/metrics';
+  FMetricsAllowedCIDR      := '';
+  FProxyProtocol           := ppDisabled;
+  FRateLimitPerIP          := 0;
+  FRateLimitGlobal         := 0;
+  FRateLimitResponse       := 429;
+  FRateLock                := TCriticalSection.Create;
+  FRateBuckets             := TDictionary<string, Int64>.Create;
+  FRateGlobalCount         := 0;
+  FRateGlobalWindow        := 0;
+  FPerIPCount              := TDictionary<string, Integer>.Create;
+  FWSHandlers              := TDictionary<string, TWSMessageCallback>.Create;
+  FWSLock                  := TCriticalSection.Create;
 end;
 
 destructor TPoseidonNativeServer.Destroy;
@@ -1264,9 +1217,13 @@ begin
     TPoseidonSSL.CTX_Free(FSSLCtx);
     FSSLCtx := nil;
   end;
+  FreeAndNil(FMetrics);
+  FreeAndNil(FRateLock);
+  FreeAndNil(FRateBuckets);
   FreeAndNil(FPerIPCount);
   FreeAndNil(FWSHandlers);
   FreeAndNil(FWSLock);
+  FreeAndNil(FDrainEvent);
   inherited Destroy;
 end;
 
@@ -1318,6 +1275,59 @@ begin
   _PostRecv(AConn);
 end;
 
+// ===========================================================================
+// A-5: h2c cleartext upgrade (RFC 7540 §3.2)
+// ===========================================================================
+
+procedure TPoseidonNativeServer._UpgradeToH2C(AConn: Pointer;
+  const AReq: TPoseidonNativeRequest);
+// Sends "101 Switching Protocols" and transitions the connection to HTTP/2.
+// The initial request (stream 1) is dispatched via the new TH2Conn.
+var
+  LConn:     TNativeConn absolute AConn;
+  LResp:     TBytes;
+  LH2Req:    TH2RequestData;   // reused only for Host / ContentType extraction
+  I:         Integer;
+begin
+  // Build 101 Switching Protocols response
+  LResp := TEncoding.ASCII.GetBytes(
+    'HTTP/1.1 101 Switching Protocols'#13#10 +
+    'Connection: Upgrade'#13#10 +
+    'Upgrade: h2c'#13#10#13#10);
+
+  // Transition connection to HTTP/2 cleartext
+  LConn.H2Conn := TH2Conn.Create(AConn, _H2Send, _H2Close, _H2OnRequest,
+    FH2MaxConcurrentStreams, FH2InitialWindowSize);
+  LConn.KeepAlive := True;  // HTTP/2 connections are always persistent
+  LConn.AccumLen  := 0;
+
+  // Send 101 then server SETTINGS (RFC 7540 §3.2 — SETTINGS must be first frame)
+  _EncryptAndSend(AConn, LResp);
+  LConn.H2Conn.SendInitialSettings;
+
+  // Dispatch the initial request (stream 1) through the new TH2Conn
+  // RFC 7540 §3.2: The initial request on stream 1 is semantically equivalent
+  // to the upgrade request; treat it as a completed stream 1 dispatch.
+  LH2Req.Host        := '';
+  LH2Req.ContentType := '';
+  for I := 0 to High(AReq.Headers) do
+  begin
+    if SameText(AReq.Headers[I].Key, ':authority') or
+       SameText(AReq.Headers[I].Key, 'host') then
+      LH2Req.Host := AReq.Headers[I].Value;
+    if SameText(AReq.Headers[I].Key, 'content-type') then
+      LH2Req.ContentType := AReq.Headers[I].Value;
+  end;
+
+  // Dispatch the initial upgrade request as h2c stream 1 via TH2Conn
+  LConn.H2Conn.DispatchH2CInitialRequest(
+    AReq.Method, AReq.Path, AReq.QueryString,
+    LConn.RemoteAddr, LH2Req.Host, LH2Req.ContentType,
+    AReq.Headers, AReq.RawBody);
+
+  _PostRecv(AConn);
+end;
+
 function TPoseidonNativeServer._DispatchWSFrames(AConn: Pointer): Boolean;
 var
   LConn:       TNativeConn absolute AConn;
@@ -1335,6 +1345,15 @@ begin
                                     LFrame, LConsumed) do
   begin
     Inc(LTotal, LConsumed);
+    // R-3: reject frames that exceed MaxWSFrameSize (RFC 6455 — protect server memory)
+    if (FMaxWSFrameSize > 0) and (Int64(Length(LFrame.Payload)) > FMaxWSFrameSize) then
+    begin
+      LOut := TWebSocketUtils.CloseFrame(1009);  // 1009 = Message Too Big
+      _EncryptAndSend(AConn, LOut);
+      _CloseConn(AConn);
+      Result := False;
+      Exit;
+    end;
     case LFrame.Opcode of
       OPCODE_PING:
       begin
@@ -1418,7 +1437,7 @@ begin
 
   LStatus := 500;
   LCT     := 'application/json';
-  LBody   := G_DEFAULT_ERROR_BODY;
+  LBody   := DefaultErrorBody;
   SetLength(LExtra, 0);
   TInterlocked.Increment(FInFlightCount);
   try
@@ -1553,11 +1572,12 @@ type
 
   PSendCtx = ^TSendCtx;
   TSendCtx = record
-    Ovl:     TOverlapped;           // MUST be first
-    Action:  TIocpAction;
-    Conn:    Pointer;
-    WsaBuf:  TWsaBuf;
-    SendBuf: TBytes;
+    Ovl:       TOverlapped;         // MUST be first
+    Action:    TIocpAction;
+    Conn:      Pointer;
+    WsaBuf:    TWsaBuf;
+    SendBuf:   TBytes;
+    ActualLen: Integer;             // P-4: bytes to send; 0 = use Length(SendBuf)
   end;
 
   PIocpHdr = ^TIocpHdr;
@@ -1603,6 +1623,12 @@ begin
   setsockopt(FListenSocket, SOL_SOCKET, SO_REUSEADDR,
     PAnsiChar(@LOne), SizeOf(LOne));
 
+  // TCP_FASTOPEN (RFC 7413) — opt-in; Windows 10 1607+, value = 1 to enable
+  if FTCPFastOpen then
+    setsockopt(FListenSocket, IPPROTO_TCP, 15 {TCP_FASTOPEN},
+      PAnsiChar(@LOne), SizeOf(LOne));
+  // Failure is silently ignored: older Windows versions return WSAENOPROTOOPT
+
   FillChar(LAddr, SizeOf(LAddr), 0);
   LAddr.sin_family := AF_INET;
   LAddr.sin_port   := htons(APort);
@@ -1635,6 +1661,9 @@ begin
   FAcceptThread.FreeOnTerminate := False;
   FAcceptThread.Start;
 
+  if FMetricsEnabled then
+    FMetrics := TPoseidonMetrics.Create;
+
   // AOnListen fires here — server is functional (workers + accept running).
   // Sweep is intentionally started after: if AOnListen blocks (e.g. Readln),
   // sweep still starts when Listen() resumes instead of never starting.
@@ -1647,13 +1676,9 @@ begin
 end;
 
 procedure TPoseidonNativeServer.Stop;
-const
-  DRAIN_MS = 30000;
-  POLL_MS  = 50;
 var
-  LElapsed, I: Integer;
-  LConn:       TNativeConn;
-  LConns:      TArray<Pointer>;
+  I:     Integer;
+  LConn: TNativeConn;
 begin
   if not FActive then Exit;
   FActive := False;
@@ -1681,13 +1706,10 @@ begin
     FConnLock.Leave;
   end;
 
-  LElapsed := 0;
-  while ((TInterlocked.Read(FInFlightCount) > 0) or (FConnList.Count > 0))
-    and (LElapsed < DRAIN_MS) do
-  begin
-    Sleep(POLL_MS);
-    Inc(LElapsed, POLL_MS);
-  end;
+  // R-1: event-driven drain — no polling; FDrainEvent fires from each _CloseConn
+  FDrainEvent.ResetEvent;
+  if (TInterlocked.Read(FInFlightCount) > 0) or (FConnList.Count > 0) then
+    FDrainEvent.WaitFor(FDrainTimeoutMs);
 
   // Final cleanup under lock — any stragglers (worker stuck in syscall).
   FConnLock.Enter;
@@ -1787,6 +1809,7 @@ begin
     closesocket(TSocket(ASocket));
     Exit;
   end;
+  if Assigned(FMetrics) then FMetrics.AdjustConnections(1);
   _PostRecv(LConn);
 end;
 
@@ -1816,14 +1839,20 @@ begin
   end;
 end;
 
-procedure TPoseidonNativeServer._PostSend(AConn: Pointer; const AResponse: TBytes);
+procedure TPoseidonNativeServer._PostSend(AConn: Pointer; const AResponse: TBytes;
+  AActualLen: Integer = 0);
 var
-  LConn:  TNativeConn absolute AConn;
-  LCtx:   PSendCtx;
-  LBytes: DWORD;
-  LRes:   Integer;
+  LConn:    TNativeConn absolute AConn;
+  LCtx:     PSendCtx;
+  LBytes:   DWORD;
+  LRes:     Integer;
+  LSendLen: Integer;
 begin
-  if Length(AResponse) = 0 then
+  // P-4: AActualLen > 0 when AResponse is a pool buffer larger than the response.
+  LSendLen := AActualLen;
+  if LSendLen = 0 then LSendLen := Length(AResponse);
+
+  if LSendLen = 0 then
   begin
     if LConn.KeepAlive then _PostRecv(AConn)
     else _CloseConn(AConn);
@@ -1835,7 +1864,8 @@ begin
   LCtx^.Action     := iaSend;
   LCtx^.Conn       := AConn;
   LCtx^.SendBuf    := AResponse;
-  LCtx^.WsaBuf.len := Length(AResponse);
+  LCtx^.ActualLen  := AActualLen;
+  LCtx^.WsaBuf.len := ULONG(LSendLen);
   LCtx^.WsaBuf.buf := @LCtx^.SendBuf[0];
   LBytes := 0;
 
@@ -1844,6 +1874,8 @@ begin
 
   if (LRes = SOCKET_ERROR) and (WSAGetLastError <> WSA_IO_PENDING) then
   begin
+    // P-4: return pool buffer before disposing context
+    TBufferPool.Release(LCtx^.SendBuf);
     Dispose(LCtx);
     _CloseConn(AConn);
   end;
@@ -1866,6 +1898,7 @@ begin
     FConnLock.Leave;
   end;
   if LIdx < 0 then Exit;  // already closed by Stop()
+  if Assigned(FMetrics) then FMetrics.AdjustConnections(-1);
   if LConn.WSMode = CM_WEBSOCKET then
   begin
     if LConn.WSConn <> nil then
@@ -1880,8 +1913,12 @@ begin
     LConn.SSLReadBio  := nil;
     LConn.SSLWriteBio := nil;
   end;
+  // R-6: TCP half-close — FIN before RST so the client receives the last bytes
+  shutdown(LConn.Socket, SD_SEND);
   closesocket(LConn.Socket);
   LConn.Free;
+  // R-1: wake the drain event so Stop() can proceed without polling
+  if Assigned(FDrainEvent) then FDrainEvent.SetEvent;
 end;
 
 procedure TPoseidonNativeServer._WorkerLoop;
@@ -1910,7 +1947,12 @@ begin
       begin
         case LHdr^.Action of
           iaRecv: FreeMem(PRecvCtx(LOvl));
-          iaSend: Dispose(PSendCtx(LOvl));
+          iaSend:
+          begin
+            // P-4: return pool buffer (no-op for non-pool buffers)
+            TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
+            Dispose(PSendCtx(LOvl));
+          end;
         end;
         _CloseConn(LConn);
         Continue;
@@ -1924,6 +1966,8 @@ begin
         end;
         iaSend:
         begin
+          // P-4: return pool buffer (no-op for non-pool buffers)
+          TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
           Dispose(PSendCtx(LOvl));
           // During TLS handshake we keep the connection alive regardless of
           // HTTP KeepAlive — re-arm recv for the next handshake message.
@@ -2064,6 +2108,13 @@ begin
   _LinuxSetsockopt(Integer(FListenSocket), SOL_SOCKET, SO_REUSEPORT,
     @LOne, SizeOf(LOne));  // kernel load-balances accepts entre worker threads
 
+  // TCP_FASTOPEN (RFC 7413) — opt-in; Linux 3.7+; value = SYN queue length
+  // Requires /proc/sys/net/ipv4/tcp_fastopen to have bit 2 set (server mode).
+  // Failure (ENOPROTOOPT on older kernels) is silently ignored.
+  if FTCPFastOpen then
+    _LinuxSetsockopt(Integer(FListenSocket), IPPROTO_TCP, 23 {TCP_FASTOPEN},
+      @LOne, SizeOf(LOne));
+
   FillChar(LAddr, SizeOf(LAddr), 0);
   LAddr.sin_family := AF_INET;
   LAddr.sin_port   := htons(APort);
@@ -2095,6 +2146,9 @@ begin
   FAcceptThread.FreeOnTerminate := False;
   FAcceptThread.Start;
 
+  if FMetricsEnabled then
+    FMetrics := TPoseidonMetrics.Create;
+
   // AOnListen fires here — server is functional (workers + accept running).
   // Sweep is intentionally started after: if AOnListen blocks (e.g. Readln),
   // sweep still starts when Listen() resumes instead of never starting.
@@ -2111,14 +2165,10 @@ end;
 // ---------------------------------------------------------------------------
 
 procedure TPoseidonNativeServer.Stop;
-const
-  DRAIN_MS = 30000;
-  POLL_MS  = 50;
 var
-  LElapsed, I: Integer;
-  LConn:       TNativeConn;
-  LConns:      TArray<Pointer>;
-  LDummy:      Byte;
+  I:      Integer;
+  LConn:  TNativeConn;
+  LDummy: Byte;
 begin
   if not FActive then Exit;
   FActive := False;
@@ -2145,13 +2195,10 @@ begin
     FConnLock.Leave;
   end;
 
-  LElapsed := 0;
-  while ((TInterlocked.Read(FInFlightCount) > 0) or (FConnList.Count > 0))
-    and (LElapsed < DRAIN_MS) do
-  begin
-    Sleep(POLL_MS);
-    Inc(LElapsed, POLL_MS);
-  end;
+  // R-1: event-driven drain — no polling; FDrainEvent fires from each _CloseConn
+  FDrainEvent.ResetEvent;
+  if (TInterlocked.Read(FInFlightCount) > 0) or (FConnList.Count > 0) then
+    FDrainEvent.WaitFor(FDrainTimeoutMs);
 
   // Final cleanup under lock — any stragglers.
   FConnLock.Enter;
@@ -2268,6 +2315,7 @@ begin
     _LinuxClose(Integer(ASocket));
     Exit;
   end;
+  if Assigned(FMetrics) then FMetrics.AdjustConnections(1);
 
   FillChar(LEv, SizeOf(LEv), 0);
   LEv.events   := EPOLLIN or EPOLLONESHOT;
@@ -2294,18 +2342,25 @@ end;
 // _PostSend — store response bytes, kick off non-blocking send loop
 // ---------------------------------------------------------------------------
 
-procedure TPoseidonNativeServer._PostSend(AConn: Pointer; const AResponse: TBytes);
+procedure TPoseidonNativeServer._PostSend(AConn: Pointer; const AResponse: TBytes;
+  AActualLen: Integer = 0);
 var
-  LConn: TNativeConn absolute AConn;
+  LConn:    TNativeConn absolute AConn;
+  LSendLen: Integer;
 begin
-  if Length(AResponse) = 0 then
+  // P-4: AActualLen > 0 when AResponse is a pool buffer larger than the response.
+  LSendLen := AActualLen;
+  if LSendLen = 0 then LSendLen := Length(AResponse);
+
+  if LSendLen = 0 then
   begin
     if LConn.KeepAlive then _PostRecv(AConn)
     else _CloseConn(AConn);
     Exit;
   end;
-  LConn.PendingSend := AResponse;
-  LConn.SentBytes   := 0;
+  LConn.PendingSend       := AResponse;
+  LConn.PendingSendActual := AActualLen;  // 0 = use full Length(PendingSend)
+  LConn.SentBytes         := 0;
   _FlushSend(AConn);
 end;
 
@@ -2315,14 +2370,19 @@ end;
 
 procedure TPoseidonNativeServer._FlushSend(AConn: Pointer);
 var
-  LConn:   TNativeConn absolute AConn;
-  LRemain: Integer;
-  LN:      NativeInt;
-  LEv:     epoll_event;
+  LConn:      TNativeConn absolute AConn;
+  LRemain:    Integer;
+  LN:         NativeInt;
+  LEv:        epoll_event;
+  LTotalSend: Integer;
 begin
-  while LConn.SentBytes < Length(LConn.PendingSend) do
+  // P-4: use PendingSendActual when set (pool buffer with only first N bytes valid)
+  LTotalSend := LConn.PendingSendActual;
+  if LTotalSend = 0 then LTotalSend := Length(LConn.PendingSend);
+
+  while LConn.SentBytes < LTotalSend do
   begin
-    LRemain := Length(LConn.PendingSend) - LConn.SentBytes;
+    LRemain := LTotalSend - LConn.SentBytes;
     LN := _LinuxSend(LConn.Socket,
       @LConn.PendingSend[LConn.SentBytes], LRemain, MSG_NOSIGNAL);
     if LN > 0 then
@@ -2343,8 +2403,9 @@ begin
     end;
   end;
 
-  // All bytes sent.
-  LConn.PendingSend := nil;
+  // All bytes sent — P-4: return pool buffer (no-op for non-pool buffers)
+  TBufferPool.Release(LConn.PendingSend);
+  LConn.PendingSendActual := 0;
   // During TLS handshake we keep the connection alive regardless of HTTP KeepAlive.
   if (LConn.SSLHandle <> nil) and not LConn.SSLHandshook then
     _PostRecv(AConn)
@@ -2401,6 +2462,7 @@ begin
     FConnLock.Leave;
   end;
   if LIdx < 0 then Exit;  // already closed by Stop()
+  if Assigned(FMetrics) then FMetrics.AdjustConnections(-1);
   if LConn.WSMode = CM_WEBSOCKET then
   begin
     if LConn.WSConn <> nil then
@@ -2416,8 +2478,12 @@ begin
     LConn.SSLWriteBio := nil;
   end;
   epoll_ctl(FEpollFd, EPOLL_CTL_DEL, LConn.Socket, nil);
+  // R-6: TCP half-close — FIN before RST so the client receives the last bytes
+  shutdown(LConn.Socket, SHUT_WR);
   _LinuxClose(LConn.Socket);
   LConn.Free;
+  // R-1: wake the drain event so Stop() can proceed without polling
+  if Assigned(FDrainEvent) then FDrainEvent.SetEvent;
 end;
 
 // ---------------------------------------------------------------------------
@@ -2473,42 +2539,5 @@ begin
 end;
 
 {$ENDIF MSWINDOWS}
-
-initialization
-  // W3: pre-encode common HTTP response fragments once.
-  G_STATUS_200 := TEncoding.ASCII.GetBytes('HTTP/1.1 200 OK'#13#10);
-  G_STATUS_201 := TEncoding.ASCII.GetBytes('HTTP/1.1 201 Created'#13#10);
-  G_STATUS_204 := TEncoding.ASCII.GetBytes('HTTP/1.1 204 No Content'#13#10);
-  G_STATUS_301 := TEncoding.ASCII.GetBytes('HTTP/1.1 301 Moved Permanently'#13#10);
-  G_STATUS_302 := TEncoding.ASCII.GetBytes('HTTP/1.1 302 Found'#13#10);
-  G_STATUS_303 := TEncoding.ASCII.GetBytes('HTTP/1.1 303 See Other'#13#10);
-  G_STATUS_304 := TEncoding.ASCII.GetBytes('HTTP/1.1 304 Not Modified'#13#10);
-  G_STATUS_400 := TEncoding.ASCII.GetBytes('HTTP/1.1 400 Bad Request'#13#10);
-  G_STATUS_401 := TEncoding.ASCII.GetBytes('HTTP/1.1 401 Unauthorized'#13#10);
-  G_STATUS_403 := TEncoding.ASCII.GetBytes('HTTP/1.1 403 Forbidden'#13#10);
-  G_STATUS_404 := TEncoding.ASCII.GetBytes('HTTP/1.1 404 Not Found'#13#10);
-  G_STATUS_405 := TEncoding.ASCII.GetBytes('HTTP/1.1 405 Method Not Allowed'#13#10);
-  G_STATUS_409 := TEncoding.ASCII.GetBytes('HTTP/1.1 409 Conflict'#13#10);
-  G_STATUS_413 := TEncoding.ASCII.GetBytes('HTTP/1.1 413 Payload Too Large'#13#10);
-  G_STATUS_422 := TEncoding.ASCII.GetBytes('HTTP/1.1 422 Unprocessable Entity'#13#10);
-  G_STATUS_429 := TEncoding.ASCII.GetBytes('HTTP/1.1 429 Too Many Requests'#13#10);
-  G_STATUS_500 := TEncoding.ASCII.GetBytes('HTTP/1.1 500 Internal Server Error'#13#10);
-  G_STATUS_503 := TEncoding.ASCII.GetBytes('HTTP/1.1 503 Service Unavailable'#13#10);
-  G_CT_PREFIX  := TEncoding.ASCII.GetBytes('Content-Type: ');
-  G_CL_PREFIX  := TEncoding.ASCII.GetBytes('Content-Length: ');
-  G_CONN_KA    := TEncoding.ASCII.GetBytes('Connection: keep-alive'#13#10);
-  G_CONN_CLOSE := TEncoding.ASCII.GetBytes('Connection: close'#13#10);
-  G_CRLF       := TEncoding.ASCII.GetBytes(#13#10);
-
-  // W3+: pre-encode common content-type values
-  G_CT_JSON    := TEncoding.ASCII.GetBytes('application/json');
-  G_CT_TEXT    := TEncoding.ASCII.GetBytes('text/plain');
-  G_CT_HTML    := TEncoding.ASCII.GetBytes('text/html');
-  G_CT_PROBLEM := TEncoding.ASCII.GetBytes('application/problem+json');
-  G_CT_FORM    := TEncoding.ASCII.GetBytes('application/x-www-form-urlencoded');
-  G_CT_OCTET   := TEncoding.ASCII.GetBytes('application/octet-stream');
-
-  G_DEFAULT_ERROR_BODY := TEncoding.UTF8.GetBytes(
-    '{"error":"Internal Server Error"}');
 
 end.

@@ -29,6 +29,22 @@ const
   SSL_TLSEXT_ERR_ALERT_FATAL         = 2;
   SSL_TLSEXT_ERR_NOACK               = 3;
 
+  // S-5: mTLS — client certificate verification modes
+  SSL_VERIFY_NONE                  = $00;
+  SSL_VERIFY_PEER                  = $01;
+  SSL_VERIFY_FAIL_IF_NO_PEER_CERT  = $02;
+
+  // S-6: minimum TLS protocol version (OpenSSL 1.1.0+)
+  SSL_CTRL_SET_MIN_PROTO_VERSION   = 123;
+  TLS1_2_VERSION                   = $0303;
+  TLS1_3_VERSION                   = $0304;
+
+  // A-4: TLS session cache (macros over SSL_CTX_ctrl)
+  SSL_CTRL_SET_SESS_CACHE_SIZE     = 42;
+  SSL_CTRL_SET_SESS_CACHE_MODE     = 44;
+  SSL_SESS_CACHE_OFF               = $0000;
+  SSL_SESS_CACHE_SERVER            = $0002;
+
 type
   EPoseidonSSL = class(Exception);
 
@@ -57,6 +73,8 @@ type
   TFn_err_str         = function(e: NativeUInt; buf: PAnsiChar): PAnsiChar; cdecl;
   TFn_ctx_alpn_cb     = procedure(ctx: Pointer; cb: Pointer; arg: Pointer); cdecl;
   TFn_ssl_get0_alpn   = procedure(ssl: Pointer; dataptr: Pointer; lenptr: Pointer); cdecl;
+  TFn_ctx_set_verify  = procedure(ctx: Pointer; mode: Integer; cb: Pointer); cdecl;
+  TFn_ctx_load_verify = function(ctx: Pointer; cafile, capath: PAnsiChar): Integer; cdecl;
 
   TPoseidonLibHandle = NativeUInt;
 
@@ -93,8 +111,10 @@ type
     class var f_SSL_set_SSL_CTX:              TFn_ssl_setctx;
     class var f_ERR_get_error:                TFn_err_get;
     class var f_ERR_error_string:             TFn_err_str;
-    class var f_SSL_CTX_set_alpn_select_cb:   TFn_ctx_alpn_cb;
-    class var f_SSL_get0_alpn_selected:       TFn_ssl_get0_alpn;
+    class var f_SSL_CTX_set_alpn_select_cb:       TFn_ctx_alpn_cb;
+    class var f_SSL_get0_alpn_selected:           TFn_ssl_get0_alpn;
+    class var f_SSL_CTX_set_verify:               TFn_ctx_set_verify;
+    class var f_SSL_CTX_load_verify_locations:    TFn_ctx_load_verify;
 
     class function  TryLoadLib(const AName: string): TPoseidonLibHandle;
     class function  RequireProc(ALib: TPoseidonLibHandle; const AName: string): Pointer;
@@ -133,6 +153,19 @@ type
     // ALPN — HTTP/2 protocol negotiation (OpenSSL 1.0.2+)
     class procedure CTX_SetALPN(ACtx: Pointer; AArg: Pointer); static;
     class function  SSL_GetSelectedProtocol(ASSL: Pointer): string; static;
+
+    // S-5: mTLS — require client certificate signed by ACAFile (PEM CA bundle).
+    // Call after CTX_New. Raises EPoseidonSSL when ACAFile cannot be loaded.
+    class procedure CTX_ConfigureMTLS(ACtx: Pointer; const ACAFile: string);
+
+    // S-6: reject TLS handshakes below AMinVersion.
+    // Use constants TLS1_2_VERSION ($0303) or TLS1_3_VERSION ($0304).
+    // No-op when AMinVersion = 0 (library default — OpenSSL 3.x: TLS 1.2).
+    class procedure CTX_SetMinVersion(ACtx: Pointer; AMinVersion: Integer);
+
+    // A-4: enable server-side TLS session cache to reduce handshake cost on
+    // reconnections. ACacheSize is the max number of cached sessions (default 1024).
+    class procedure CTX_EnableSessionCache(ACtx: Pointer; ACacheSize: Integer = 1024);
   end;
 
 implementation
@@ -261,6 +294,15 @@ begin
 {$ELSE}
   @f_SSL_CTX_set_alpn_select_cb := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_set_alpn_select_cb')));
   @f_SSL_get0_alpn_selected     := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_get0_alpn_selected')));
+{$ENDIF}
+
+  // S-5/S-6 — present in all OpenSSL versions; loaded as optional for safety
+{$IFDEF MSWINDOWS}
+  @f_SSL_CTX_set_verify            := GetProcAddress(FLibSSL, 'SSL_CTX_set_verify');
+  @f_SSL_CTX_load_verify_locations := GetProcAddress(FLibSSL, 'SSL_CTX_load_verify_locations');
+{$ELSE}
+  @f_SSL_CTX_set_verify            := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_set_verify')));
+  @f_SSL_CTX_load_verify_locations := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_load_verify_locations')));
 {$ENDIF}
 
   FLoaded := True;
@@ -465,6 +507,46 @@ begin
     Move(LData^, LBuf[1], LLen);
     Result := string(LBuf);
   end;
+end;
+
+// ---------------------------------------------------------------------------
+// S-5: mTLS — require client certificate
+// ---------------------------------------------------------------------------
+
+class procedure TPoseidonSSL.CTX_ConfigureMTLS(ACtx: Pointer; const ACAFile: string);
+begin
+  EnsureLoaded;
+  if not Assigned(f_SSL_CTX_set_verify) then
+    raise EPoseidonSSL.Create('mTLS: SSL_CTX_set_verify not available in this OpenSSL build');
+  if not Assigned(f_SSL_CTX_load_verify_locations) then
+    raise EPoseidonSSL.Create('mTLS: SSL_CTX_load_verify_locations not available in this OpenSSL build');
+  if f_SSL_CTX_load_verify_locations(ACtx, PAnsiChar(AnsiString(ACAFile)), nil) <> 1 then
+    raise EPoseidonSSL.Create('SSL_CTX_load_verify_locations failed: ' + LastError);
+  f_SSL_CTX_set_verify(ACtx,
+    SSL_VERIFY_PEER or SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nil);
+end;
+
+// ---------------------------------------------------------------------------
+// S-6: minimum TLS version
+// SSL_CTX_set_min_proto_version is a macro: SSL_CTX_ctrl(ctx, 123, version, NULL)
+// ---------------------------------------------------------------------------
+
+class procedure TPoseidonSSL.CTX_SetMinVersion(ACtx: Pointer; AMinVersion: Integer);
+begin
+  if AMinVersion = 0 then Exit;  // 0 = let OpenSSL use its own default
+  f_SSL_CTX_ctrl(ACtx, SSL_CTRL_SET_MIN_PROTO_VERSION, AMinVersion, nil);
+end;
+
+// ---------------------------------------------------------------------------
+// A-4: TLS session resumption — reduces handshake RTT on reconnections
+// SSL_CTX_set_session_cache_mode and SSL_CTX_sess_set_cache_size are macros
+// over SSL_CTX_ctrl, so f_SSL_CTX_ctrl (already loaded) handles both.
+// ---------------------------------------------------------------------------
+
+class procedure TPoseidonSSL.CTX_EnableSessionCache(ACtx: Pointer; ACacheSize: Integer);
+begin
+  f_SSL_CTX_ctrl(ACtx, SSL_CTRL_SET_SESS_CACHE_MODE, SSL_SESS_CACHE_SERVER, nil);
+  f_SSL_CTX_ctrl(ACtx, SSL_CTRL_SET_SESS_CACHE_SIZE,  ACacheSize,            nil);
 end;
 
 end.

@@ -36,6 +36,12 @@ type
   end;
 
   TWebSocketUtils = class
+  strict private
+    // P-3: Zero-copy frame builder kernel.
+    // Extends APayload by LHdrLen bytes at the front (shifts data right),
+    // then writes the RFC 6455 frame header in place — no second allocation.
+    class procedure _PrependHeader(AOpcode: Byte; AFin: Boolean;
+      var APayload: TBytes); static;
   public
     // Compute Sec-WebSocket-Accept = base64(SHA1(ClientKey + WS_GUID))
     class function HandshakeAccept(const AClientKey: string): string; static;
@@ -302,6 +308,53 @@ begin
   Result    := True;
 end;
 
+class procedure TWebSocketUtils._PrependHeader(AOpcode: Byte; AFin: Boolean;
+  var APayload: TBytes);
+var
+  LLen:    Int64;
+  LHdrLen: Integer;
+  LB0:     Byte;
+begin
+  LLen := Length(APayload);
+
+  if LLen < 126 then
+    LHdrLen := 2
+  else if LLen <= $FFFF then
+    LHdrLen := 4
+  else
+    LHdrLen := 10;
+
+  // Extend the existing buffer and shift payload right — no second allocation.
+  SetLength(APayload, LHdrLen + LLen);
+  if LLen > 0 then
+    Move(APayload[0], APayload[LHdrLen], LLen);
+
+  LB0 := AOpcode and $0F;
+  if AFin then LB0 := LB0 or $80;
+  APayload[0] := LB0;
+
+  if LLen < 126 then
+    APayload[1] := Byte(LLen)
+  else if LLen <= $FFFF then
+  begin
+    APayload[1] := 126;
+    APayload[2] := Byte((LLen shr 8) and $FF);
+    APayload[3] := Byte( LLen        and $FF);
+  end
+  else
+  begin
+    APayload[1] := 127;
+    APayload[2] := Byte((LLen shr 56) and $FF);
+    APayload[3] := Byte((LLen shr 48) and $FF);
+    APayload[4] := Byte((LLen shr 40) and $FF);
+    APayload[5] := Byte((LLen shr 32) and $FF);
+    APayload[6] := Byte((LLen shr 24) and $FF);
+    APayload[7] := Byte((LLen shr 16) and $FF);
+    APayload[8] := Byte((LLen shr  8) and $FF);
+    APayload[9] := Byte( LLen         and $FF);
+  end;
+end;
+
 class function TWebSocketUtils.BuildFrame(AOpcode: Byte; AFin: Boolean;
   const APayload: TBytes): TBytes;
 var
@@ -356,7 +409,9 @@ end;
 
 class function TWebSocketUtils.TextFrame(const AText: string): TBytes;
 begin
-  Result := BuildFrame(OPCODE_TEXT, True, TEncoding.UTF8.GetBytes(AText));
+  // P-3: zero-copy — encode UTF-8 into Result, then prepend header in place.
+  Result := TEncoding.UTF8.GetBytes(AText);
+  _PrependHeader(OPCODE_TEXT, True, Result);
 end;
 
 class function TWebSocketUtils.BinaryFrame(const AData: TBytes): TBytes;
@@ -365,13 +420,12 @@ begin
 end;
 
 class function TWebSocketUtils.CloseFrame(ACode: Word): TBytes;
-var
-  LBody: TBytes;
 begin
-  SetLength(LBody, 2);
-  LBody[0] := Byte(ACode shr 8);
-  LBody[1] := Byte(ACode and $FF);
-  Result   := BuildFrame(OPCODE_CLOSE, True, LBody);
+  // P-3: zero-copy — build 2-byte status body directly in Result, prepend header in place.
+  SetLength(Result, 2);
+  Result[0] := Byte(ACode shr 8);
+  Result[1] := Byte(ACode and $FF);
+  _PrependHeader(OPCODE_CLOSE, True, Result);
 end;
 
 class function TWebSocketUtils.PongFrame(const APingPayload: TBytes): TBytes;
