@@ -4,7 +4,7 @@ unit Poseidon.Net.HTTP2;
 // One TH2Conn instance per connection, driven by TPoseidonNativeServer._ProcessRecv.
 //
 // Design decisions:
-//   - No server push (ENABLE_PUSH = 0)
+//   - Server push (RFC 7540 §8.2): ENABLE_PUSH=1; push resources returned by FOnRequest
 //   - HPACK encode: literal without indexing (simple, correct)
 //   - HPACK decode: full RFC 7541 (indexed, incremental-index, no-index, never-index, table-update)
 //   - Huffman decode: tree built once at unit initialization
@@ -19,7 +19,8 @@ uses
   System.Classes,
   System.SyncObjs,
   System.Generics.Collections,
-  Poseidon.Net.HTTP2.HPACK;
+  Poseidon.Net.HTTP2.HPACK,
+  Poseidon.Net.Types;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -35,7 +36,8 @@ type
 
   TH2RequestCallback = procedure(const AReq: TH2RequestData;
     var AStatus: Integer; var AContentType: string; var ABody: TBytes;
-    var AExtra: TArray<TPair<string, string>>) of object;
+    var AExtra: TArray<TPair<string, string>>;
+    var APushResources: TArray<TPoseidonPushResource>) of object;
 
   TH2SendProc  = procedure(AConn: Pointer; const AData: TBytes) of object;
   TH2CloseProc = procedure(AConn: Pointer) of object;
@@ -99,6 +101,10 @@ type
     FActiveStreams: Integer;
     FDeferClose:   Boolean;
 
+    // Server push (RFC 7540 §8.2)
+    FNextPushStreamID: Cardinal;  // server-initiated streams are even (2, 4, 6, …)
+    FClientEnablePush: Boolean;   // True until client sends ENABLE_PUSH=0
+
     // P-1: server-side SETTINGS values (sent to client)
     FMaxConcurrentStreams: Cardinal;
     FInitialWindowSize:    Cardinal;
@@ -135,6 +141,12 @@ type
       APayload: PByte; APayLen: Integer);
 
     procedure _GoAway(ALastStreamID: Cardinal; AErr: Cardinal);
+
+    // Server push: send PUSH_PROMISE on AAssocStream, then HEADERS+DATA on the
+    // promised (even) stream.  AAssocStream is the client stream that triggered push.
+    procedure _SendPushPromiseAndResponse(AAssocStreamID: Cardinal;
+      const APush: TPoseidonPushResource;
+      const AScheme, AAuthority: string);
 
     // A-3: flow control helpers
     procedure _SendWindowUpdate(AStreamID: Cardinal; AIncrement: Integer);
@@ -273,6 +285,10 @@ begin
   // R-2
   FActiveStreams := 0;
   FDeferClose    := False;
+
+  // Server push (RFC 7540 §8.2)
+  FNextPushStreamID := 2;      // first server-initiated stream is even
+  FClientEnablePush := True;   // default: push accepted until client says otherwise
 
   // P-1
   FMaxConcurrentStreams := AMaxConcurrentStreams;
@@ -461,7 +477,7 @@ begin
   SetLength(LPayload, 30);
   LPos := 0;
   PutSetting(H2_SETTINGS_HEADER_TABLE_SIZE,      4096);
-  PutSetting(H2_SETTINGS_ENABLE_PUSH,            0);
+  PutSetting(H2_SETTINGS_ENABLE_PUSH,            1);
   PutSetting(H2_SETTINGS_MAX_CONCURRENT_STREAMS, FMaxConcurrentStreams);
   PutSetting(H2_SETTINGS_INITIAL_WINDOW_SIZE,    FInitialWindowSize);
   PutSetting(H2_SETTINGS_MAX_FRAME_SIZE,         16384);
@@ -622,6 +638,8 @@ begin
     case LID of
       H2_SETTINGS_HEADER_TABLE_SIZE:
         FHpack.MaxDynTableSize := LVal;
+      H2_SETTINGS_ENABLE_PUSH:
+        FClientEnablePush := (LVal <> 0);
       H2_SETTINGS_MAX_FRAME_SIZE:
         begin
           if (LVal < 16384) or (LVal > 16777215) then
@@ -1000,13 +1018,14 @@ end;
 
 procedure TH2Conn._DispatchStream(AStream: TH2Stream);
 var
-  LReq:         TH2RequestData;
-  LStatus:      Integer;
-  LContentType: string;
-  LBody:        TBytes;
-  LExtra:       TArray<TPair<string, string>>;
-  I:            Integer;
-  LQ:           Integer;
+  LReq:          TH2RequestData;
+  LStatus:       Integer;
+  LContentType:  string;
+  LBody:         TBytes;
+  LExtra:        TArray<TPair<string, string>>;
+  LPushResources: TArray<TPoseidonPushResource>;
+  I:             Integer;
+  LQ:            Integer;
 begin
   LReq.StreamID  := AStream.StreamID;
   LReq.Method    := AStream.Method;
@@ -1050,18 +1069,26 @@ begin
   LContentType := 'text/plain';
   SetLength(LBody, 0);
   SetLength(LExtra, 0);
+  SetLength(LPushResources, 0);
 
   // R-2: track active streams
   TInterlocked.Increment(FActiveStreams);
   try
     try
       if Assigned(FOnRequest) then
-        FOnRequest(LReq, LStatus, LContentType, LBody, LExtra);
+        FOnRequest(LReq, LStatus, LContentType, LBody, LExtra, LPushResources);
     except
       LStatus      := 500;
       LContentType := 'text/plain';
       SetLength(LBody, 0);
+      SetLength(LPushResources, 0);
     end;
+
+    // Send server push resources before the actual response (RFC 7540 §8.2)
+    if FClientEnablePush then
+      for I := 0 to Length(LPushResources) - 1 do
+        _SendPushPromiseAndResponse(AStream.StreamID, LPushResources[I],
+          AStream.Scheme, AStream.Authority);
 
     SendResponse(AStream.StreamID, LStatus, LContentType, LBody, LExtra);
   finally
@@ -1159,6 +1186,75 @@ begin
 end;
 
 // ===========================================================================
+// Server push — RFC 7540 §8.2
+// ===========================================================================
+
+procedure TH2Conn._SendPushPromiseAndResponse(AAssocStreamID: Cardinal;
+  const APush: TPoseidonPushResource;
+  const AScheme, AAuthority: string);
+// Sends a PUSH_PROMISE frame on AAssocStreamID, then synthesises a complete
+// HEADERS + DATA response on the server-initiated (even) promised stream.
+var
+  LPromisedID:  Cardinal;
+  LReqHdr:      TBytes;
+  LHdrPayload:  TBytes;
+  LPPPayload:   TBytes;
+  LBodyLen:     Integer;
+  LPushStream:  TH2Stream;
+begin
+  if FGoAwaySent then Exit;
+
+  // Allocate the next server-initiated even stream ID
+  LPromisedID       := FNextPushStreamID;
+  Inc(FNextPushStreamID, 2);
+
+  // Encode the promised request headers (:method GET, :path, :scheme, :authority)
+  LReqHdr := FHpack.EncodeRequestHeaders('GET', APush.Path,
+    AScheme, AAuthority);
+
+  // PUSH_PROMISE payload = 4-byte promised-stream-id (MSB=0) + HPACK block
+  SetLength(LPPPayload, 4 + Length(LReqHdr));
+  LPPPayload[0] := (LPromisedID shr 24) and $7F;
+  LPPPayload[1] := (LPromisedID shr 16) and $FF;
+  LPPPayload[2] := (LPromisedID shr  8) and $FF;
+  LPPPayload[3] :=  LPromisedID         and $FF;
+  if Length(LReqHdr) > 0 then
+    Move(LReqHdr[0], LPPPayload[4], Length(LReqHdr));
+
+  // Send PUSH_PROMISE on the associated (client-initiated) stream
+  _SendFrame(H2_FRAME_PUSH_PROMISE, H2_FLAG_END_HEADERS,
+    AAssocStreamID, @LPPPayload[0], Length(LPPPayload));
+
+  // Create the synthetic server-initiated stream
+  LPushStream            := TH2Stream.Create;
+  LPushStream.StreamID   := LPromisedID;
+  LPushStream.State      := hssHalfClosedRemote;
+  LPushStream.SendWindow := FPeerInitWinSize;
+  LPushStream.RecvWindow := Integer(FInitialWindowSize);
+  FStreams.Add(LPromisedID, LPushStream);
+
+  // Build and send the promised response (HEADERS + DATA)
+  LBodyLen    := Length(APush.Body);
+  LHdrPayload := FHpack.EncodeResponseHeaders(200, APush.ContentType,
+    LBodyLen, APush.Extra);
+
+  if LBodyLen = 0 then
+    _SendFrame(H2_FRAME_HEADERS, H2_FLAG_END_HEADERS or H2_FLAG_END_STREAM,
+      LPromisedID, @LHdrPayload[0], Length(LHdrPayload))
+  else
+  begin
+    _SendFrame(H2_FRAME_HEADERS, H2_FLAG_END_HEADERS,
+      LPromisedID, @LHdrPayload[0], Length(LHdrPayload));
+    _SendFrame(H2_FRAME_DATA, H2_FLAG_END_STREAM,
+      LPromisedID, @APush.Body[0], LBodyLen);
+  end;
+
+  // Immediately close the synthetic stream — push responses are half-closed
+  FStreams.Remove(LPromisedID);
+  LPushStream.Free;
+end;
+
+// ===========================================================================
 // A-5: DispatchH2CInitialRequest — synthetic stream 1 for h2c upgrade
 // ===========================================================================
 
@@ -1169,12 +1265,14 @@ procedure TH2Conn.DispatchH2CInitialRequest(const AMethod, APath, AQueryString,
 // Creates a synthetic stream 1 (the initial h2c request) and routes it
 // through the normal _H2OnRequest callback + SendResponse pipeline.
 var
-  LStream: TH2Stream;
-  LReq:    TH2RequestData;
-  LStatus: Integer;
-  LCT:     string;
-  LBody:   TBytes;
-  LExtra:  TArray<TPair<string, string>>;
+  LStream:        TH2Stream;
+  LReq:           TH2RequestData;
+  LStatus:        Integer;
+  LCT:            string;
+  LBody:          TBytes;
+  LExtra:         TArray<TPair<string, string>>;
+  LPushResources: TArray<TPoseidonPushResource>;
+  I:              Integer;
 begin
   if FGoAwaySent then Exit;
 
@@ -1203,17 +1301,22 @@ begin
   LCT     := 'application/json';
   SetLength(LBody, 0);
   SetLength(LExtra, 0);
+  SetLength(LPushResources, 0);
 
   TInterlocked.Increment(FActiveStreams);
   try
     try
       if Assigned(FOnRequest) then
-        FOnRequest(LReq, LStatus, LCT, LBody, LExtra);
+        FOnRequest(LReq, LStatus, LCT, LBody, LExtra, LPushResources);
     except
       LStatus := 500;
       LCT     := 'application/json';
       SetLength(LBody, 0);
+      SetLength(LPushResources, 0);
     end;
+    if FClientEnablePush then
+      for I := 0 to Length(LPushResources) - 1 do
+        _SendPushPromiseAndResponse(1, LPushResources[I], 'http', AHost);
     SendResponse(1, LStatus, LCT, LBody, LExtra);
   finally
     // A-3: keep stream alive if pending body; otherwise clean up

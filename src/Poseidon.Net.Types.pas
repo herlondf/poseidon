@@ -32,6 +32,21 @@ type
     out   ABody:         TBytes;
     out   AExtraHeaders: TArray<TPair<string,string>>);
 
+  // HTTP/2 server push resource — used with TPoseidonNativeServer.OnH2Push.
+  // The server sends a PUSH_PROMISE + synthetic GET response for each resource.
+  TPoseidonPushResource = record
+    Path:        string;    // e.g. '/styles.css'
+    ContentType: string;
+    Body:        TBytes;
+    Extra:       TArray<TPair<string, string>>;
+  end;
+
+  // Called before the HTTP/2 response is sent.  Populate APushResources with
+  // any resources to proactively push to the client.
+  TOnH2Push = reference to procedure(
+    const AReq:           TPoseidonNativeRequest;
+    var   APushResources: TArray<TPoseidonPushResource>);
+
   // --------------------------------------------------------------------------
   // Logging types
   // --------------------------------------------------------------------------

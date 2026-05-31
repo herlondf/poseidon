@@ -80,6 +80,11 @@ type
       const AContentType: string; ABodyLen: Integer;
       const AExtra: TArray<TPair<string, string>>): TBytes;
 
+    // Encode pseudo-headers for an HTTP/2 PUSH_PROMISE request block.
+    // Uses static table indexed entries where possible, literals otherwise.
+    function EncodeRequestHeaders(const AMethod, APath, AScheme,
+      AAuthority: string): TBytes;
+
     property MaxDynTableSize: Integer read FDynTableMaxSize write SetMaxDynTableSize;
   end;
 
@@ -881,6 +886,82 @@ begin
   // Extra headers
   for I := 0 to Length(AExtra) - 1 do
     EmitLiteralHeader(AExtra[I].Key, AExtra[I].Value);
+
+  SetLength(LBuf, LPos);
+  Result := LBuf;
+end;
+
+// ===========================================================================
+// EncodeRequestHeaders — HPACK block for PUSH_PROMISE frames
+// ===========================================================================
+
+function TH2HpackCodec.EncodeRequestHeaders(const AMethod, APath, AScheme,
+  AAuthority: string): TBytes;
+// Encodes :method, :path, :scheme, :authority using static-table indices where
+// possible and literal-without-indexing otherwise.
+// Static table entries used:
+//   2  = :method: GET    3  = :method: POST
+//   4  = :path: /        6  = :scheme: http    7  = :scheme: https
+//   1  = :authority (name only)
+var
+  LBuf: TBytes;
+  LPos: Integer;
+begin
+  SetLength(LBuf, 128);
+  LPos := 0;
+
+  // :method
+  if AMethod = 'GET' then
+  begin
+    LBuf[LPos] := $82;  // indexed: index 2 = :method: GET
+    Inc(LPos);
+  end
+  else if AMethod = 'POST' then
+  begin
+    LBuf[LPos] := $83;  // indexed: index 3 = :method: POST
+    Inc(LPos);
+  end
+  else
+  begin
+    // Literal without indexing, new name
+    _HpackEncodeInt(LBuf, LPos, 0, 4, $00);
+    _HpackEncodeStr(LBuf, LPos, ':method');
+    _HpackEncodeStr(LBuf, LPos, AMethod);
+  end;
+
+  // :path
+  if APath = '/' then
+  begin
+    LBuf[LPos] := $84;  // indexed: index 4 = :path: /
+    Inc(LPos);
+  end
+  else
+  begin
+    // Literal without indexing, name from static table index 4 (:path)
+    _HpackEncodeInt(LBuf, LPos, 4, 4, $00);
+    _HpackEncodeStr(LBuf, LPos, APath);
+  end;
+
+  // :scheme
+  if AScheme = 'http' then
+  begin
+    LBuf[LPos] := $86;  // indexed: index 6 = :scheme: http
+    Inc(LPos);
+  end
+  else
+  begin
+    // Literal without indexing, name from static table index 6 (:scheme) + value
+    // (covers 'https' and other schemes)
+    _HpackEncodeInt(LBuf, LPos, 6, 4, $00);
+    _HpackEncodeStr(LBuf, LPos, AScheme);
+  end;
+
+  // :authority — literal without indexing, name from static table index 1
+  if AAuthority <> '' then
+  begin
+    _HpackEncodeInt(LBuf, LPos, 1, 4, $00);
+    _HpackEncodeStr(LBuf, LPos, AAuthority);
+  end;
 
   SetLength(LBuf, LPos);
   Result := LBuf;

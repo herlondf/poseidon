@@ -86,6 +86,7 @@ type
     FRateBuckets:       TDictionary<string, Int64>; // IP → packed (count|window)
     FRateGlobalCount:   Int64;     // global req count in current window
     FRateGlobalWindow:  Int64;     // current global window (tick64 div 1000)
+    FOnH2Push:          TOnH2Push; // HTTP/2 server push callback; nil = no push
     // R-1: platform IO backend — holds IOCP/epoll fd, listen socket, workers.
     FIOBackend:       IIOBackend;
     // R-5: protocol dispatcher
@@ -125,7 +126,8 @@ type
     procedure _H2Close(AConn: Pointer);
     procedure _H2OnRequest(const AReq: TH2RequestData;
       var AStatus: Integer; var AContentType: string; var ABody: TBytes;
-      var AExtra: TArray<TPair<string,string>>);
+      var AExtra: TArray<TPair<string,string>>;
+      var APushResources: TArray<TPoseidonPushResource>);
     procedure _Log(ALevel: TLogLevel; const AMessage: string);
     // Returns True when the request should proceed; False = rate-limited.
     function  _CheckRateLimit(const ARemoteAddr: string): Boolean;
@@ -250,11 +252,15 @@ type
     property ProxyProtocol: TProxyProtocolMode
       read FProxyProtocol write FProxyProtocol;
     procedure RegisterWSHandler(const APath: string; AHandler: TWSMessageCallback);
+    // HTTP/2 server push callback (RFC 7540 §8.2). When assigned, called before
+    // each HTTP/2 response. Populate APushResources to proactively push assets.
+    // Only used when HTTP2Enabled = True. nil (default) = no push.
+    property OnH2Push: TOnH2Push read FOnH2Push write FOnH2Push;
   end;
 
 implementation
 
-// R-1: platform-specific IO backend (IOCP on Windows, epoll on Linux).
+// R-1: platform-specific IO backend (IOCP on Windows, epoll/io_uring on Linux).
 // This is the only {$IFDEF} remaining in HttpServer — used solely to select the backend.
 {$IFDEF MSWINDOWS}
 uses
@@ -266,6 +272,7 @@ uses
   Poseidon.Net.HTTP1.Parser;
 {$ELSE}
 uses
+  Poseidon.Net.IO.IOUring,
   Poseidon.Net.IO.Epoll,
   Poseidon.Net.SSL,
   Poseidon.Net.Pool.Buffer,
@@ -1019,11 +1026,17 @@ begin
   FWSLock                  := TCriticalSection.Create;
   // R-5: create the protocol dispatcher with a server-backed adapter
   FDispatcher              := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self));
-  // R-1: create platform IO backend — ONLY {$IFDEF} remaining in HttpServer
+  // R-1: create platform IO backend — ONLY {$IFDEF} remaining in HttpServer.
+  // On Linux: try io_uring (kernel 5.1+) first; fall back to epoll silently.
 {$IFDEF MSWINDOWS}
   FIOBackend               := TIOCPBackend.Create;
 {$ELSE}
-  FIOBackend               := TEpollBackend.Create;
+  try
+    FIOBackend             := TIOUringBackend.Create;
+  except
+    on ENotSupportedException do
+      FIOBackend           := TEpollBackend.Create;
+  end;
 {$ENDIF}
 end;
 
@@ -1062,18 +1075,22 @@ end;
 procedure TPoseidonNativeServer._UpgradeToWS(AConn: Pointer;
   const AReq: TPoseidonNativeRequest);
 var
-  LConn:  TNativeConn absolute AConn;
-  LKey:   string;
-  LResp:  TBytes;
-  I:      Integer;
+  LConn:    TNativeConn absolute AConn;
+  LKey:     string;
+  LResp:    TBytes;
+  I:        Integer;
+  LDeflate: Boolean;
 begin
-  LKey := '';
+  LKey     := '';
+  LDeflate := False;
   for I := 0 to High(AReq.Headers) do
+  begin
     if SameText(AReq.Headers[I].Key, 'Sec-WebSocket-Key') then
-    begin
       LKey := AReq.Headers[I].Value;
-      Break;
-    end;
+    if SameText(AReq.Headers[I].Key, 'Sec-WebSocket-Extensions') and
+       (Pos('permessage-deflate', LowerCase(AReq.Headers[I].Value)) > 0) then
+      LDeflate := True;
+  end;
   if LKey = '' then
   begin
     LResp := _BuildResponse(400, 'text/plain',
@@ -1082,9 +1099,10 @@ begin
     Exit;
   end;
 
-  LResp := TWebSocketUtils.BuildHandshakeResponse(LKey);
+  LResp           := TWebSocketUtils.BuildHandshakeResponse(LKey, LDeflate);
   LConn.WSMode    := CM_WEBSOCKET;
   LConn.WSPath    := AReq.Path;
+  LConn.WSDeflate := LDeflate;
   LConn.KeepAlive := True;  // WebSocket connections are always persistent
   LConn.AccumLen  := 0;
 
@@ -1097,7 +1115,8 @@ begin
     procedure
     begin
       _CloseConn(AConn);
-    end
+    end,
+    LDeflate
   );
 
   _EncryptAndSend(AConn, LResp);
@@ -1174,6 +1193,9 @@ begin
                                     LFrame, LConsumed) do
   begin
     Inc(LTotal, LConsumed);
+    // permessage-deflate: decompress payload when RSV1 is set
+    if LConn.WSDeflate and LFrame.RSV1 and (Length(LFrame.Payload) > 0) then
+      LFrame.Payload := TWSDeflateUtils.Decompress(LFrame.Payload);
     // R-3: reject frames that exceed MaxWSFrameSize (RFC 6455 — protect server memory)
     if (FMaxWSFrameSize > 0) and (Int64(Length(LFrame.Payload)) > FMaxWSFrameSize) then
     begin
@@ -1239,7 +1261,8 @@ end;
 
 procedure TPoseidonNativeServer._H2OnRequest(const AReq: TH2RequestData;
   var AStatus: Integer; var AContentType: string; var ABody: TBytes;
-  var AExtra: TArray<TPair<string,string>>);
+  var AExtra: TArray<TPair<string,string>>;
+  var APushResources: TArray<TPoseidonPushResource>);
 var
   LNativeReq: TPoseidonNativeRequest;
   LQPos:      Integer;
@@ -1291,6 +1314,10 @@ begin
   AContentType := LCT;
   ABody        := LBody;
   AExtra       := LExtra;
+
+  // HTTP/2 server push: let the application declare push resources
+  if Assigned(FOnH2Push) then
+    FOnH2Push(LNativeReq, APushResources);
 end;
 
 procedure TPoseidonNativeServer._Log(ALevel: TLogLevel; const AMessage: string);

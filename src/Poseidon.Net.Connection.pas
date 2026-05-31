@@ -51,6 +51,7 @@ type
     WSMode:        Byte;
     WSPath:        string;
     WSConn:        IPoseidonWSConn;
+    WSDeflate:     Boolean;    // True when permessage-deflate was negotiated
     H2Conn:        TH2Conn;    // non-nil when connection uses HTTP/2 (via ALPN)
     PPParsed:      Boolean;    // True once Proxy Protocol header has been consumed
 {$IFNDEF MSWINDOWS}
@@ -104,6 +105,7 @@ begin
   WSMode       := CM_HTTP;
   WSPath       := '';
   WSConn       := nil;
+  WSDeflate    := False;
   H2Conn       := nil;
   PPParsed     := False;
 end;
