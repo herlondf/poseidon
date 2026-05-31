@@ -193,6 +193,7 @@ uses
   System.Generics.Collections,
   System.Net.HttpClient,
   System.Net.URLClient,
+  Winapi.Windows,
   Winapi.Winsock2,
   Poseidon.Net.Types,
   Poseidon.Net.WebSocket,

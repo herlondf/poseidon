@@ -115,7 +115,7 @@ type
 
     // Route accumulated bytes in AConn to the appropriate protocol handler.
     // Mirrors the former TPoseidonNativeServer._DispatchAccumBuf.
-    procedure Dispatch(AConn: Pointer; const AConfig: TDispatchConfig);
+    procedure Dispatch(AConn: Pointer; const AConfig: TDispatchConfig); reintroduce;
   end;
 
 implementation
@@ -250,7 +250,6 @@ var
   LExtra:         TArray<TPair<string,string>>;
   LResp:          TBytes;
   LRespActualLen: Integer;
-  LBad:           Boolean;
   LUpgrade:       string;
   LWsKey:         string;
   I:              Integer;

@@ -126,6 +126,7 @@ implementation
 
 uses
   System.SysUtils,
+  System.Generics.Collections,
   Poseidon.Net.HTTP2.HPACK;
 
 // ===========================================================================
@@ -156,11 +157,15 @@ function Decode(ACodec: TH2HpackCodec; const ABlock: TBytes;
   out AMethod, APath, AScheme, AAuthority: string;
   out AHeaders: TArray<TPair<string, string>>;
   out AGoAwayCalled: Boolean): Boolean;
+var
+  LGA: Boolean;  // local capture; out params cannot be captured in anonymous procs
 begin
+  LGA := False;
   AGoAwayCalled := False;
   Result := ACodec.DecodeHeaders(@ABlock[0], Length(ABlock),
     AMethod, APath, AScheme, AAuthority, AHeaders,
-    procedure begin AGoAwayCalled := True; end);
+    procedure begin LGA := True; end);
+  AGoAwayCalled := LGA;
 end;
 
 function FindHeader(const AHeaders: TArray<TPair<string, string>>;
@@ -305,7 +310,7 @@ begin
       $03, $61,$62,$63                            // len=3, "abc"
     ]);
     Assert.IsTrue(Decode(LCodec, LBlock, LMethod, LPath, LScheme, LAuth, LHeaders, LGA));
-    Assert.AreEqual(1, Length(LHeaders));
+    Assert.AreEqual<Integer>(1, Length(LHeaders));
     Assert.AreEqual('x-secret', LHeaders[0].Key);
     Assert.AreEqual('abc', LHeaders[0].Value);
   finally
@@ -389,7 +394,7 @@ begin
       LMethod, LPath, LScheme, LAuth, LHeaders,
       procedure begin LGA := True; end));
     Assert.AreEqual('', LMethod);
-    Assert.AreEqual(0, Length(LHeaders));
+    Assert.AreEqual<Integer>(0, Length(LHeaders));
     Assert.IsFalse(LGA);
   finally
     LCodec.Free;
@@ -435,7 +440,7 @@ begin
       $03, $62,$61,$72            // len=3 "bar"
     ]);
     Assert.IsTrue(Decode(LCodec, LBlock, LMethod, LPath, LScheme, LAuth, LHeaders, LGA));
-    Assert.AreEqual(1, Length(LHeaders));
+    Assert.AreEqual<Integer>(1, Length(LHeaders));
     Assert.AreEqual('x-foo', LHeaders[0].Key);
     Assert.AreEqual('bar',   LHeaders[0].Value);
   finally
@@ -506,7 +511,7 @@ begin
     // Here just verify a non-Huffman path still works in the same codec instance.
     LBlock := Bytes([$00, $04, $78,$2D,$69,$64, $02, $34,$32]); // x-id: 42 (plain)
     Assert.IsTrue(Decode(LCodec, LBlock, LMethod, LPath, LScheme, LAuth, LHeaders, LGA));
-    Assert.AreEqual(1, Length(LHeaders));
+    Assert.AreEqual<Integer>(1, Length(LHeaders));
     Assert.AreEqual('x-id', LHeaders[0].Key);
     Assert.AreEqual('42',   LHeaders[0].Value);
   finally
@@ -571,7 +576,7 @@ begin
   Assert.AreEqual('http',            LScheme,    ':scheme');
   Assert.AreEqual('/',               LPath,      ':path');
   Assert.AreEqual('www.example.com', LAuth,      ':authority');
-  Assert.AreEqual(0,                 Length(LHeaders), 'no extra headers in C.3.1');
+  Assert.AreEqual<Integer>(0,        Length(LHeaders), 'no extra headers in C.3.1');
 end;
 
 procedure THPackRFC7541VectorTests.C32_SecondRequest_UsesDynTableIdx62;
@@ -594,7 +599,7 @@ begin
   Assert.AreEqual('http',            LScheme);
   Assert.AreEqual('/',               LPath);
   Assert.AreEqual('www.example.com', LAuth,  ':authority from dynamic table idx=62');
-  Assert.AreEqual(1,                 Length(LHeaders), 'one extra header (cache-control)');
+  Assert.AreEqual<Integer>(1,        Length(LHeaders), 'one extra header (cache-control)');
   Assert.AreEqual('cache-control',   LHeaders[0].Key);
   Assert.AreEqual('no-cache',        LHeaders[0].Value);
 end;
@@ -621,7 +626,7 @@ begin
   Assert.AreEqual('https',           LScheme);
   Assert.AreEqual('/index.html',     LPath);
   Assert.AreEqual('www.example.com', LAuth);
-  Assert.AreEqual(1,                 Length(LHeaders));
+  Assert.AreEqual<Integer>(1,        Length(LHeaders));
   Assert.AreEqual('custom-key',      LHeaders[0].Key);
   Assert.AreEqual('custom-value',    LHeaders[0].Value);
 end;
@@ -700,7 +705,7 @@ begin
   LCodec := TH2HpackCodec.Create;
   try
     LOut := LCodec.EncodeResponseHeaders(200, 'text/plain', -1, nil);
-    LBytes := TEncoding.Latin1.GetString(LOut);
+    LBytes := TEncoding.ANSI.GetString(LOut);
     Assert.IsTrue(Pos('text/plain', LBytes) > 0,
       'content-type value must appear in encoded output');
   finally
@@ -717,7 +722,7 @@ begin
   LCodec := TH2HpackCodec.Create;
   try
     LOut := LCodec.EncodeResponseHeaders(200, '', 42, nil);
-    LStr := TEncoding.Latin1.GetString(LOut);
+    LStr := TEncoding.ANSI.GetString(LOut);
     Assert.IsTrue(Pos('42', LStr) > 0,
       'content-length value must appear in encoded output');
   finally
@@ -754,7 +759,7 @@ begin
     SetLength(LExtra, 1);
     LExtra[0] := TPair<string, string>.Create('x-request-id', 'abc123');
     LOut := LCodec.EncodeResponseHeaders(200, '', -1, LExtra);
-    LStr := TEncoding.Latin1.GetString(LOut);
+    LStr := TEncoding.ANSI.GetString(LOut);
     Assert.IsTrue(Pos('x-request-id', LStr) > 0, 'extra header name must appear in output');
     Assert.IsTrue(Pos('abc123',       LStr) > 0, 'extra header value must appear in output');
   finally
@@ -823,7 +828,7 @@ begin
   LCodec := TH2HpackCodec.Create;
   try
     LOut := LCodec.EncodeRequestHeaders('PATCH', '/', 'http', '');
-    LStr := TEncoding.Latin1.GetString(LOut);
+    LStr := TEncoding.ANSI.GetString(LOut);
     Assert.IsTrue(Pos('PATCH', LStr) > 0, 'custom method value must be in output');
   finally
     LCodec.Free;
@@ -858,7 +863,7 @@ begin
   LCodec := TH2HpackCodec.Create;
   try
     LOut := LCodec.EncodeRequestHeaders('GET', '/api/users', 'http', '');
-    LStr := TEncoding.Latin1.GetString(LOut);
+    LStr := TEncoding.ANSI.GetString(LOut);
     Assert.IsTrue(Pos('/api/users', LStr) > 0, 'custom path must appear in output');
   finally
     LCodec.Free;
@@ -893,7 +898,7 @@ begin
   LCodec := TH2HpackCodec.Create;
   try
     LOut := LCodec.EncodeRequestHeaders('GET', '/', 'https', '');
-    LStr := TEncoding.Latin1.GetString(LOut);
+    LStr := TEncoding.ANSI.GetString(LOut);
     Assert.IsTrue(Pos('https', LStr) > 0, ':scheme "https" must appear in output');
   finally
     LCodec.Free;

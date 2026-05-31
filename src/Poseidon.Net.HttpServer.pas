@@ -107,8 +107,6 @@ type
     procedure _ProcessRecvPlain(AConn: Pointer; const ABuf: PByte; ALen: Cardinal);
 
     procedure _DispatchAccumBuf(AConn: Pointer);  // thin shim — builds TDispatchConfig + calls FDispatcher
-    function  _TryParseRequest(AConn: Pointer;
-      out AReq: TPoseidonNativeRequest; out ABadRequest: Boolean): Boolean;
     function  _BuildResponse(AStatus: Integer; const AContentType: string;
       const ABody: TBytes; AKeepAlive: Boolean;
       const AExtra: TArray<TPair<string,string>>): TBytes;
@@ -295,32 +293,6 @@ const
   // and wasted stack memory with no throughput gain. IOCP saturates well below
   // that. Explicit FWorkerCount > 0 bypasses this cap.
   WORKER_COUNT_MAX = 16;
-
-// ===========================================================================
-// Shared: _TryParseRequest
-// ===========================================================================
-
-function TPoseidonNativeServer._TryParseRequest(AConn: Pointer;
-  out AReq: TPoseidonNativeRequest; out ABadRequest: Boolean): Boolean;
-// Delegates to Poseidon.Net.HTTP1.Parser.ParseHTTP1Request (R-2).
-var
-  LConn:    TNativeConn absolute AConn;
-  LConsumed: Integer;
-begin
-  Result := ParseHTTP1Request(
-    LConn.AccumBuf, LConn.AccumLen, FMaxHeaderSize, FMaxRequestSize,
-    AReq.Method, AReq.Path, AReq.QueryString,
-    AReq.Headers, AReq.RawBody, AReq.KeepAlive,
-    LConsumed, ABadRequest);
-  if Result then
-  begin
-    AReq.RemoteAddr := LConn.RemoteAddr;
-    if LConn.AccumLen > LConsumed then
-      Move(LConn.AccumBuf[LConsumed], LConn.AccumBuf[0],
-        LConn.AccumLen - LConsumed);
-    LConn.AccumLen := LConn.AccumLen - LConsumed;
-  end;
-end;
 
 // ===========================================================================
 // Shared: SSL helpers — encrypt-and-send + handshake write-BIO flush
