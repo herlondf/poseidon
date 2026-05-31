@@ -9,3 +9,4 @@ Runnable patterns. Each recipe maps to a sample in [`samples/`](../../../samples
 | [WebSocket echo](websocket-echo.md) | `samples/03-websocket/` |
 | [HTTP/2 server](http2-server.md) | `samples/04-http2/` |
 | [Horse provider](horse-provider.md) | `samples/05-horse-provider/` |
+| [Security hardening](security-hardening.md) | `samples/06-security/` |

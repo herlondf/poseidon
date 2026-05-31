@@ -9,3 +9,4 @@ Padrões executáveis. Cada receita corresponde a um sample em [`samples/`](../.
 | [Echo WebSocket](websocket-echo.md) | `samples/03-websocket/` |
 | [Servidor HTTP/2](servidor-http2.md) | `samples/04-http2/` |
 | [Provider Horse](horse-provider.md) | `samples/05-horse-provider/` |
+| [Hardening de segurança](hardening-seguranca.md) | `samples/06-security/` |

@@ -1,6 +1,10 @@
 # 04 — Operação e Runtime
 
-- [Worker threads](worker-threads.md)
-- [Pool de buffers](pool-de-buffers.md)
-- [Compressão](compressao.md)
+- [Worker threads e encerramento gracioso](worker-threads.md)
+- [Pool de buffers](buffer-pool.md)
+- [Compressão](compression.md)
 - [Thread safety](thread-safety.md)
+- [Limites e backpressure](limits-and-backpressure.md)
+- [Security headers e identidade do servidor](security.md)
+- [Métricas Prometheus](metrics.md)
+- [Proxy Protocol](proxy-protocol.md)
