@@ -17,4 +17,4 @@ sem double-write, sem necessidade de `TCP_NODELAY`.
 | Plataformas | Linux 64-bit, Windows 64-bit |
 | Threads worker padrão | 200 (`WorkerCount`) |
 | Entrega de resposta | única syscall por resposta |
-| Protocolos | HTTP/1.1, HTTPS, WebSocket, HTTP/2 |
+| Protocolos | HTTP/1.1, HTTPS, WebSocket, HTTP/2 (ALPN + upgrade h2c cleartext) |

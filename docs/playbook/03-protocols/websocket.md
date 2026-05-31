@@ -64,3 +64,12 @@ LText := TEncoding.UTF8.GetString(AFrame.Payload);
 - The handler is called from a worker thread; shared state must be protected.
 - `TWebSocketUtils` exposes the raw protocol helpers (`ParseFrame`, `BuildFrame`,
   `HandshakeAccept`) if you need lower-level control.
+
+## Frame encoding internals
+
+`TextFrame` and `CloseFrame` use a zero-copy strategy: the payload bytes are
+allocated once and the RFC 6455 frame header is prepended **in-place** by shifting
+the payload right inside the same allocation (`_PrependHeader`).  
+`BuildFrame` (used by `BinaryFrame` and `PongFrame`) uses a conventional
+two-region copy.  The zero-copy path avoids a second heap allocation for the
+common text/close cases.
