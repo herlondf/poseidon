@@ -23,10 +23,14 @@ uses
   System.Classes,
   System.SyncObjs,
   System.Generics.Collections,
+  Poseidon.Net.Types,
   Poseidon.Net.HttpServer,
   Bench.FakeDAO;
 
 type
+  // Alias avoids >> tokenizer issue in Delphi 11 class declarations.
+  TBenchExtraHeaders = TArray<TPair<string, string>>;
+
   TBenchPoseidonServer = class
   private
     FServer:      TPoseidonNativeServer;
@@ -43,7 +47,7 @@ type
       out   AStatus:       Integer;
       out   AContentType:  string;
       out   ABody:         TBytes;
-      out   AExtraHeaders: TArray<TPair<string, string>>
+      out   AExtraHeaders: TBenchExtraHeaders
     );
     procedure HandleUsersCRUD(
       const AReq:          TPoseidonNativeRequest;
@@ -276,7 +280,7 @@ procedure TBenchPoseidonServer.HandleRequest(
   out   AStatus:       Integer;
   out   AContentType:  string;
   out   ABody:         TBytes;
-  out   AExtraHeaders: TArray<TPair<string, string>>
+  out   AExtraHeaders: TBenchExtraHeaders
 );
 begin
   AContentType  := 'application/json; charset=utf-8';
@@ -326,14 +330,25 @@ end;
 
 procedure TBenchPoseidonServer.Start;
 var
-  LWR: TWaitResult;
+  LWR:     TWaitResult;
+  LSelf:   TBenchPoseidonServer;
+  LOnReady: TProc;
 begin
+  LSelf    := Self;
+  LOnReady := procedure begin LSelf.FStartEvent.SetEvent; end;
   FStartEvent.ResetEvent;
   FThread := TThread.CreateAnonymousThread(
     procedure
+    var
+      LHandler: TOnNativeRequest;
     begin
-      FServer.Listen('127.0.0.1', FPort, HandleRequest,
-        procedure begin FStartEvent.SetEvent; end);
+      LHandler := procedure(const AReq: TPoseidonNativeRequest;
+        out AStatus: Integer; out AContentType: string;
+        out ABody: TBytes; out AExtraHeaders: TBenchExtraHeaders)
+      begin
+        LSelf.HandleRequest(AReq, AStatus, AContentType, ABody, AExtraHeaders);
+      end;
+      LSelf.FServer.Listen('127.0.0.1', LSelf.FPort, LHandler, LOnReady);
     end
   );
   FThread.FreeOnTerminate := True;

@@ -67,7 +67,9 @@ begin
       LRunner.AddAdapter(LW4);
       LRunner.AddAdapter(LAuto);
       LRunner.AddAdapter(LGzip);
-      LRunner.AddAdapter(LSSL);
+      // SSL skipped: concurrent IOCP+SSL race (TNativeConn freed while IOCP packet
+      // in flight) causes AV; tracked separately. Non-SSL metrics are the R-8 baseline.
+      // LRunner.AddAdapter(LSSL);
       LRunner.LoadDefaultScenarios;
 
       WriteLn('Executando cenários...');

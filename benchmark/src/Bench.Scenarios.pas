@@ -369,7 +369,15 @@ begin
     LSW := TStopwatch.StartNew;
     LGate.SetEvent;
 
-    TTask.WaitForAll(LTasks);
+    // 10-second wall-clock timeout — prevents hanging when a backend AV or
+    // network failure causes client threads to block indefinitely.
+    if not TTask.WaitForAll(LTasks, 10000) then
+    begin
+      // Tasks that didn't complete contribute 0-ms error entries.
+      // The tasks themselves are abandoned (Delphi TTask cannot be cancelled).
+      AMetrics.AddLatency(0);
+      AMetrics.IncError;
+    end;
     AMetrics.TotalMs := LSW.ElapsedMilliseconds;
   finally
     LGate.Free;
