@@ -33,6 +33,14 @@ unit Poseidon.Net.Pool.Workers;
 //   FQueue   — protected by FQueueCS (TCriticalSection).
 //   FActiveWorkers / FIdleWorkers — atomic via TInterlocked.
 //   FShutdown — written once (Shutdown); workers only read it.
+//
+// Compiler note:
+//   dcc32 has a known bug: TQueue<T> where T is 'reference to procedure' resolves
+//   the element type as 'procedure of object', breaking Enqueue/Dequeue.
+//   Workaround: TWorkWrapper class holds the closure; TQueue<TWorkWrapper> compiles
+//   cleanly on both Win32 and Win64.
+//   TInterlocked.Read has only the Int64 overload on dcc32; TInterlocked.Add(X, 0)
+//   is the portable atomic-read idiom for Integer fields.
 
 interface
 
@@ -43,12 +51,20 @@ uses
   System.Generics.Collections;
 
 type
+  TElasticWorkItem = reference to procedure;
+
   TElasticWorkerPool = class
+  private type
+    // Wrapper avoids the dcc32 generic+closure type resolution bug.
+    TWorkWrapper = class
+    public
+      Work: TElasticWorkItem;
+    end;
   private
     FMinWorkers:    Integer;
     FMaxWorkers:    Integer;
     FIdleTimeoutMs: Integer;
-    FQueue:         TQueue<TProc>;
+    FQueue:         TQueue<TWorkWrapper>;
     FQueueCS:       TCriticalSection;
     FSemaphore:     TSemaphore;
     FActiveWorkers: Integer;  // atomic — total alive threads (including idle)
@@ -61,7 +77,7 @@ type
     destructor Destroy; override;
 
     // Enqueue a work item. Spawns a new worker if no idle workers and below max.
-    procedure Post(AWork: TProc);
+    procedure Post(AWork: TElasticWorkItem);
 
     // Signal shutdown, drain in-flight work, wait up to ATimeoutMs.
     // Safe to call multiple times. Subsequent calls are no-ops.
@@ -86,9 +102,9 @@ begin
   FShutdown      := False;
   FActiveWorkers := 0;
   FIdleWorkers   := 0;
-  FQueue         := TQueue<TProc>.Create;
+  FQueue         := TQueue<TWorkWrapper>.Create;
   FQueueCS       := TCriticalSection.Create;
-  // Initial count 0; Release increments, WaitFor/Acquire decrements.
+  // Initial count 0; Release increments, WaitFor decrements.
   FSemaphore     := TSemaphore.Create(nil, 0, MaxInt, '');
   // Seed minimum workers so they are available before the first request arrives.
   for I := 1 to FMinWorkers do
@@ -115,9 +131,10 @@ end;
 
 procedure TElasticWorkerPool._WorkerLoop;
 var
-  LWork:          TProc;
-  LResult:        TWaitResult;
-  LCurActive:     Integer;
+  LWrapper:        TWorkWrapper;
+  LWork:           TElasticWorkItem;
+  LResult:         TWaitResult;
+  LCurActive:      Integer;
   LAlreadyDropped: Boolean;
 begin
   TInterlocked.Increment(FActiveWorkers);
@@ -126,7 +143,8 @@ begin
     while True do
     begin
       TInterlocked.Increment(FIdleWorkers);
-      LResult := FSemaphore.WaitFor(FIdleTimeoutMs);
+      // LongWord cast: WaitFor(Timeout: LongWord) — FIdleTimeoutMs is always >= 0
+      LResult := FSemaphore.WaitFor(LongWord(FIdleTimeoutMs));
       TInterlocked.Decrement(FIdleWorkers);
 
       if FShutdown then Break;
@@ -137,8 +155,10 @@ begin
         // CAS loop: speculatively decrement FActiveWorkers only when > FMinWorkers.
         // If two workers race here, the CAS ensures only one successfully exits
         // per iteration — the other retries the check.
+        // TInterlocked.Add(X, 0) is the portable atomic-read idiom for Integer;
+        // TInterlocked.Read only has the Int64 overload on dcc32.
         repeat
-          LCurActive := TInterlocked.Read(FActiveWorkers);
+          LCurActive := TInterlocked.Add(FActiveWorkers, 0);
           if LCurActive <= FMinWorkers then Break;  // At/below minimum — stay alive
         until TInterlocked.CompareExchange(
                 FActiveWorkers, LCurActive - 1, LCurActive) = LCurActive;
@@ -154,17 +174,20 @@ begin
       end;
 
       // Got a semaphore signal — dequeue and execute one work item.
-      LWork := nil;
+      LWrapper := nil;
       FQueueCS.Enter;
       try
         if FQueue.Count > 0 then
-          LWork := FQueue.Dequeue;
+          LWrapper := FQueue.Dequeue;
       finally
         FQueueCS.Leave;
       end;
 
-      if Assigned(LWork) then
+      if Assigned(LWrapper) then
       begin
+        LWork := LWrapper.Work;
+        LWrapper.Work := nil;  // Release closure before freeing wrapper
+        LWrapper.Free;
         try
           LWork();
         except
@@ -181,16 +204,20 @@ begin
   end;
 end;
 
-procedure TElasticWorkerPool.Post(AWork: TProc);
+procedure TElasticWorkerPool.Post(AWork: TElasticWorkItem);
 var
-  LIdle:   Integer;
-  LActive: Integer;
+  LWrapper: TWorkWrapper;
+  LIdle:    Integer;
+  LActive:  Integer;
 begin
   if FShutdown then Exit;
 
+  LWrapper      := TWorkWrapper.Create;
+  LWrapper.Work := AWork;
+
   FQueueCS.Enter;
   try
-    FQueue.Enqueue(AWork);
+    FQueue.Enqueue(LWrapper);
   finally
     FQueueCS.Leave;
   end;
@@ -200,32 +227,46 @@ begin
   // Spawn a new worker when all existing workers are busy and below max.
   // TOCTOU: a mild race may briefly spawn one extra worker; it self-terminates
   // on the next idle timeout without impacting correctness.
-  LIdle   := TInterlocked.Read(FIdleWorkers);
-  LActive := TInterlocked.Read(FActiveWorkers);
+  LIdle   := TInterlocked.Add(FIdleWorkers, 0);
+  LActive := TInterlocked.Add(FActiveWorkers, 0);
   if (LIdle = 0) and (LActive < FMaxWorkers) then
     _SpawnWorker;
 end;
 
 procedure TElasticWorkerPool.Shutdown(ATimeoutMs: Integer);
 var
-  LActive: Integer;
-  LStart:  Int64;
+  LActive:  Integer;
+  LStart:   Int64;
+  LWrapper: TWorkWrapper;
 begin
   if FShutdown then Exit;
   FShutdown := True;
 
   // Wake all blocked workers so they check FShutdown and exit cleanly.
-  LActive := TInterlocked.Read(FActiveWorkers);
+  LActive := TInterlocked.Add(FActiveWorkers, 0);
   if LActive > 0 then
     FSemaphore.Release(LActive);
 
   // Wait for all workers to exit. Shutdown is a rare operation; short Sleep
   // intervals are acceptable here.
   LStart := Int64(TThread.GetTickCount64);
-  while TInterlocked.Read(FActiveWorkers) > 0 do
+  while TInterlocked.Add(FActiveWorkers, 0) > 0 do
   begin
     if Int64(TThread.GetTickCount64) - LStart >= ATimeoutMs then Break;
     Sleep(10);
+  end;
+
+  // Drain any un-executed work items left in the queue (e.g. on timeout).
+  FQueueCS.Enter;
+  try
+    while FQueue.Count > 0 do
+    begin
+      LWrapper := FQueue.Dequeue;
+      LWrapper.Work := nil;
+      LWrapper.Free;
+    end;
+  finally
+    FQueueCS.Leave;
   end;
 end;
 
