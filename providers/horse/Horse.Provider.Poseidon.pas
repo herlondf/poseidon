@@ -42,7 +42,13 @@ type
   private const
     DEFAULT_HOST         = '0.0.0.0';
     DEFAULT_PORT         = 9000;
-    DEFAULT_WORKER_COUNT = 200;
+    // 0 = auto-compute: TPoseidonNativeServer uses Min(Max(4, ProcessorCount*2), 16).
+    // Set THorse.WorkerCount explicitly for high-concurrency blocking workloads
+    // (e.g. THorse.WorkerCount := 200 for ACBr/DB-heavy NFCe emission).
+    // High explicit values (200+) create that many OS threads — the Delphi debugger
+    // processes each thread-create/destroy event, causing 20-30s stalls at startup
+    // and shutdown. Use auto (0) during development; set a high value only in prod.
+    DEFAULT_WORKER_COUNT = 0;
   private
     class var FPort:         Integer;
     class var FHost:         string;
@@ -184,7 +190,6 @@ end;
 class procedure THorseProviderPoseidonNative.Listen;
 var
   LServer: TPoseidonNativeServer;
-  LWC:     Integer;
 begin
   inherited;  // Calls THorseProviderAbstract.Listen (does nothing but satisfies abstract)
 
@@ -193,10 +198,10 @@ begin
 
   LServer := GetDefaultServer;
 
-  // Set bounded worker pool — this is the key fix for thread exhaustion
-  LWC := FWorkerCount;
-  if LWC <= 0 then LWC := DEFAULT_WORKER_COUNT;
-  LServer.WorkerCount := LWC;
+  // WorkerCount: 0 = auto (TPoseidonNativeServer computes Min(Max(4,CPUs*2),16)).
+  // Explicit value bypasses the cap — set to e.g. 200 only for production
+  // blocking workloads; high values stall the Delphi debugger (20-30s).
+  LServer.WorkerCount := FWorkerCount;
 
   // MaxConnections at TCP level — 0 means unlimited (Poseidon backpressure via worker pool)
   if FMaxConns > 0 then

@@ -66,6 +66,7 @@ type
     FMaxRequestSize:  Integer;         // R-4: max accumulated request bytes (default 8MB)
     FMaxHeaderSize:   Integer;         // R-4: max header section bytes (default 64KB)
     FDrainEvent:      TEvent;          // R-1: signaled on each connection close
+    FSweepStopEvent:  TEvent;          // signals _IdleSweepLoop to exit immediately
     FDrainTimeoutMs:  Integer;         // R-1: max ms to wait for drain (default 30000)
     FMaxQueueDepth:   Integer;         // R-5: max concurrent in-flight; 0=unlimited
     FMaxWSFrameSize:  Int64;           // R-3: max WS frame payload bytes; 0=unlimited
@@ -973,6 +974,7 @@ begin
   FMaxHeaderSize           := 65536;               // R-4: 64KB
   FDrainTimeoutMs          := 30000;               // R-1: 30s
   FDrainEvent              := TEvent.Create(nil, True, False, '');
+  FSweepStopEvent          := TEvent.Create(nil, True, False, '');
   FMaxQueueDepth           := 0;                   // R-5: unlimited
   FMaxWSFrameSize          := 16 * 1024 * 1024;    // R-3: 16MB
   FH2MaxConcurrentStreams  := 100;                 // P-1
@@ -1036,6 +1038,7 @@ begin
   FreeAndNil(FWSHandlers);
   FreeAndNil(FWSLock);
   FreeAndNil(FDrainEvent);
+  FreeAndNil(FSweepStopEvent);
   FreeAndNil(FDispatcher);  // R-5: releases adapter interface ref
   inherited Destroy;
 end;
@@ -1332,7 +1335,9 @@ var
 begin
   while FActive do
   begin
-    Sleep(SWEEP_INTERVAL_MS);
+    // FSweepStopEvent is signaled by Stop() — exits immediately instead of
+    // waiting up to SWEEP_INTERVAL_MS before seeing FActive = False.
+    FSweepStopEvent.WaitFor(SWEEP_INTERVAL_MS);
     if not FActive then Break;
     if FIdleTimeoutMs <= 0 then Continue;
 
@@ -1405,6 +1410,11 @@ var
 begin
   if not FActive then Exit;
   FActive := False;
+
+  // Wake the idle-sweep thread immediately so WaitFor returns without
+  // blocking for up to SWEEP_INTERVAL_MS (1s).
+  if Assigned(FSweepStopEvent) then
+    FSweepStopEvent.SetEvent;
 
   FIOBackend.StopAccept;
 
