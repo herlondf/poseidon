@@ -38,9 +38,9 @@ interface
 
 uses
   System.SysUtils,
+  System.Classes,
   System.SyncObjs,
-  System.Generics.Collections,
-  System.Threading;
+  System.Generics.Collections;
 
 type
   TElasticWorkerPool = class
