@@ -63,8 +63,13 @@ function IsPathSafe(const APath: string): Boolean;
 var
   LLower: string;
 begin
-  // NUL byte
+  // NUL byte — literal or percent-encoded (%00)
   if Pos(#0, APath) > 0 then
+  begin
+    Result := False;
+    Exit;
+  end;
+  if Pos('%00', LowerCase(APath)) > 0 then
   begin
     Result := False;
     Exit;

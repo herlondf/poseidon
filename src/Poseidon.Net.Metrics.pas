@@ -148,7 +148,10 @@ var
   LSum:      Double;
   LCount:    Int64;
   LBoundStr: string;
+  LFS:       TFormatSettings;
 begin
+  LFS := TFormatSettings.Invariant;
+
   // Snapshot under lock
   FHistLock.Enter;
   try
@@ -167,10 +170,11 @@ begin
   for I := 0 to BUCKET_COUNT - 1 do
   begin
     // Format bucket bound: drop trailing zeros (0.5 → "0.5", 1 → "1", 100 → "100")
+    // Use invariant locale so decimal separator is always '.' (Prometheus requires it)
     if Frac(BUCKETS[I]) = 0 then
       LBoundStr := IntToStr(Trunc(BUCKETS[I]))
     else
-      LBoundStr := FloatToStrF(BUCKETS[I], ffFixed, 15, 1);
+      LBoundStr := FloatToStrF(BUCKETS[I], ffFixed, 15, 1, LFS);
     ASB.AppendFormat(
       'poseidon_request_duration_ms_bucket{le="%s"} %d', [LBoundStr, LBuckets[I]]);
     ASB.AppendLine;
@@ -181,7 +185,7 @@ begin
   ASB.AppendLine;
   ASB.AppendFormat(
     'poseidon_request_duration_ms_sum %s',
-    [FloatToStrF(LSum, ffFixed, 15, 3)]);
+    [FloatToStrF(LSum, ffFixed, 15, 3, LFS)]);
   ASB.AppendLine;
   ASB.AppendFormat(
     'poseidon_request_duration_ms_count %d', [LCount]);

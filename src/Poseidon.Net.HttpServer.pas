@@ -1165,9 +1165,9 @@ begin
                                     LFrame, LConsumed) do
   begin
     Inc(LTotal, LConsumed);
-    // permessage-deflate: decompress payload when RSV1 is set
-    if LConn.WSDeflate and LFrame.RSV1 and (Length(LFrame.Payload) > 0) then
-      LFrame.Payload := TWSDeflateUtils.Decompress(LFrame.Payload);
+    // permessage-deflate: decompress payload when RSV1 is set (RFC 7692 §7.2.2)
+    if LConn.WSDeflate then
+      TWebSocketUtils.ApplyRXDeflate(LFrame);
     // R-3: reject frames that exceed MaxWSFrameSize (RFC 6455 — protect server memory)
     if (FMaxWSFrameSize > 0) and (Int64(Length(LFrame.Payload)) > FMaxWSFrameSize) then
     begin
