@@ -32,6 +32,7 @@ uses
   Horse.Request,
   Horse.Response,
   Horse.Exception.Interrupted,
+  Poseidon.Net.Types,
   Poseidon.Net.HttpServer,
   Poseidon.Net.WebAdapters.Native,
   Poseidon.Net.Pool.Native;

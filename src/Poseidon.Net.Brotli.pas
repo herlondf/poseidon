@@ -11,7 +11,11 @@ interface
 
 uses
   System.SysUtils,
-  System.SyncObjs;
+  System.SyncObjs
+{$IFDEF MSWINDOWS}
+  , Winapi.Windows
+{$ENDIF}
+  ;
 
 type
   EPoseidonBrotli = class(Exception);
@@ -58,9 +62,9 @@ type
 
 implementation
 
-// No platform-specific import needed: System.SysUtils exposes cross-platform
-// LoadLibrary / FreeLibrary / GetProcAddress (HMODULE = NativeUInt on all targets).
-// This avoids Pointer<->NativeUInt casts that dcclinux64 rejects (E2010).
+// Windows: LoadLibrary/FreeLibrary/GetProcAddress come from Winapi.Windows.
+// Linux:   System.SysUtils exposes them as cross-platform wrappers.
+// Both paths avoid Pointer<->NativeUInt casts that dcclinux64 rejects (E2010).
 
 const
   BROTLI_DEFAULT_LGWIN = 22;   // ~4 MB window; valid for quality 0-11
@@ -76,21 +80,21 @@ end;
 
 class destructor TPoseidonBrotli.Destroy;
 begin
-  if FLibEnc <> 0 then System.SysUtils.FreeLibrary(FLibEnc);
-  if (FLibDec <> 0) and (FLibDec <> FLibEnc) then System.SysUtils.FreeLibrary(FLibDec);
+  if FLibEnc <> 0 then FreeLibrary(FLibEnc);
+  if (FLibDec <> 0) and (FLibDec <> FLibEnc) then FreeLibrary(FLibDec);
   FLock.Free;
 end;
 
 class function TPoseidonBrotli.TryLoadLib(const AName: string): NativeUInt;
 begin
-  Result := System.SysUtils.LoadLibrary(PChar(AName));
+  Result := LoadLibrary(PChar(AName));
 end;
 
 class function TPoseidonBrotli.TryGetProc(ALib: NativeUInt;
   const AName: string): Pointer;
 begin
   if ALib = 0 then Exit(nil);
-  Result := System.SysUtils.GetProcAddress(ALib, PChar(AName));
+  Result := GetProcAddress(ALib, PChar(AName));
 end;
 
 class procedure TPoseidonBrotli.EnsureInit;
@@ -118,7 +122,7 @@ begin
       if @FEncoderCompress <> nil then
         FLibEnc := LLib
       else
-        System.SysUtils.FreeLibrary(LLib);
+        FreeLibrary(LLib);
     end;
 
     // --- Decoder ---
@@ -141,7 +145,7 @@ begin
         if @FDecoderDecompress <> nil then
           FLibDec := LLib
         else
-          System.SysUtils.FreeLibrary(LLib);
+          FreeLibrary(LLib);
       end;
     end;
 

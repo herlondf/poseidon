@@ -18,6 +18,7 @@
 interface
 
 uses
+  Poseidon.Net.Types,
   Poseidon.Net.HttpServer,
   Poseidon.Net.WebAdapters.Native;
 

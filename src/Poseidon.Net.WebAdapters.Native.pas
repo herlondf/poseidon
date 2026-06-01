@@ -15,6 +15,7 @@ uses
   System.Classes,
   System.Generics.Collections,
   Web.HTTPApp,
+  Poseidon.Net.Types,
   Poseidon.Net.HttpServer;
 
 type
