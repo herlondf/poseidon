@@ -29,7 +29,8 @@ uses
   Poseidon.Net.Metrics,
   Poseidon.Net.ProxyProtocol,
   Poseidon.Net.IO,
-  Poseidon.Net.Interfaces;
+  Poseidon.Net.Interfaces,
+  Poseidon.Net.Pool.Workers;
 
 type
   // R-5: TPoseidonNativeServer implements IDispatchCallbacks (non-ref-counted).
@@ -273,7 +274,6 @@ uses
   Poseidon.Net.IO.IOCP,
   Poseidon.Net.SSL,
   Poseidon.Net.Pool.Buffer,
-  Poseidon.Net.Pool.Workers,
   Poseidon.Net.Security,
   Poseidon.Net.ResponseBuilder,
   Poseidon.Net.HTTP1.Parser;
@@ -283,7 +283,6 @@ uses
   Poseidon.Net.IO.Epoll,
   Poseidon.Net.SSL,
   Poseidon.Net.Pool.Buffer,
-  Poseidon.Net.Pool.Workers,
   Poseidon.Net.Security,
   Poseidon.Net.ResponseBuilder,
   Poseidon.Net.HTTP1.Parser;
