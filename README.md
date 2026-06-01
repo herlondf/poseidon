@@ -113,7 +113,8 @@ See [`samples/`](samples/) for runnable examples.
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| `WorkerCount` | 200 | Worker thread count; `0` = auto (`CPU × 2`, min 4) |
+| `WorkerCount` | 200 | **Elastic pool ceiling** — max concurrent request-handler threads. Pool starts at `MinWorkerCount` and grows here under load. Startup is always fast regardless of this value. `0` = auto (200) |
+| `MinWorkerCount` | auto | Elastic pool floor — threads kept alive at all times. `0` = auto (same as IO workers: `CPU × 2` capped at 16) |
 | `CompressionEnabled` | `False` | Enable inline gzip for text responses > 1 KB |
 | `HTTP2Enabled` | `False` | Enable HTTP/2 via ALPN (requires SSL) |
 | `H2MaxConcurrentStreams` | 100 | `SETTINGS_MAX_CONCURRENT_STREAMS` sent to clients |

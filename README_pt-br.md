@@ -113,7 +113,8 @@ Veja [`samples/`](samples/) para exemplos executáveis.
 
 | Propriedade | Padrão | Descrição |
 |-------------|--------|-----------|
-| `WorkerCount` | 200 | Número de worker threads; `0` = auto (`CPU × 2`, mínimo 4) |
+| `WorkerCount` | 200 | **Teto do pool elástico** — máximo de threads simultâneas para processar requisições. O pool inicia com `MinWorkerCount` threads e cresce até aqui sob carga. A inicialização é sempre rápida independente deste valor. `0` = auto (200) |
+| `MinWorkerCount` | auto | Piso do pool elástico — threads mantidas vivas em todo momento. `0` = auto (mesmo que IO workers: `CPU × 2` com teto de 16) |
 | `CompressionEnabled` | `False` | Habilita gzip inline para respostas de texto > 1 KB |
 | `HTTP2Enabled` | `False` | Habilita HTTP/2 via ALPN (requer SSL) |
 | `H2MaxConcurrentStreams` | 100 | `SETTINGS_MAX_CONCURRENT_STREAMS` enviado aos clientes |

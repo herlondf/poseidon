@@ -9,17 +9,19 @@
 //
 // Solution:
 //   Poseidon manages all connections via IOCP/epoll (a few kernel file descriptors).
-//   A bounded worker pool (WorkerCount, default 200) handles blocking route handlers
-//   (ACBr, DB, etc.). Thread count is FIXED regardless of concurrent connections.
-//   200 workers × 8MB = 1.6GB — well within safe limits.
+//   An ELASTIC worker pool handles blocking route handlers (ACBr, DB, etc.).
+//   The pool starts with a small number of threads (same as IO workers, 4–16)
+//   and grows up to MaxWorkerCount (default 200) under load, then shrinks back.
+//   Thread count is bounded; startup is always fast regardless of MaxWorkerCount.
 //
 // Usage (project defines):
 //   Add {$DEFINE HORSE_Poseidon} in project options (Delphi Compiler > Conditional defines).
 //   Horse.pas picks this provider automatically when HORSE_Poseidon is set.
 //
 // Optional tuning (before Listen):
-//   THorse.WorkerCount := 200;   // parallel processing threads (default 200)
-//   THorse.MaxConnections := 0;  // 0 = unlimited at TCP level (Poseidon handles backpressure)
+//   THorse.WorkerCount := 200;   // max request-handler threads (default 200)
+//   THorse.MinWorkerCount := 8;  // min threads kept warm (default: auto 4–16)
+//   THorse.MaxConnections := 0;  // 0 = unlimited at TCP level
 
 interface
 
@@ -40,25 +42,26 @@ uses
 type
   THorseProviderPoseidonNative = class(THorseProviderAbstract)
   private const
-    DEFAULT_HOST         = '0.0.0.0';
-    DEFAULT_PORT         = 9000;
-    // 0 = auto-compute: TPoseidonNativeServer uses Min(Max(4, ProcessorCount*2), 16).
-    // Set THorse.WorkerCount explicitly for high-concurrency blocking workloads
-    // (e.g. THorse.WorkerCount := 200 for ACBr/DB-heavy NFCe emission).
-    // High explicit values (200+) create that many OS threads — the Delphi debugger
-    // processes each thread-create/destroy event, causing 20-30s stalls at startup
-    // and shutdown. Use auto (0) during development; set a high value only in prod.
-    DEFAULT_WORKER_COUNT = 0;
+    DEFAULT_HOST            = '0.0.0.0';
+    DEFAULT_PORT            = 9000;
+    // 0 = auto (request pool max defaults to 200; min matches IO workers 4–16).
+    // The elastic pool starts at min threads regardless of WorkerCount — startup
+    // is fast even when WorkerCount = 200. Set WorkerCount for prod blocking
+    // workloads (DB, ACBr); keep 0 or set explicitly via MinWorkerCount to
+    // control the startup thread count.
+    DEFAULT_WORKER_COUNT    = 0;
+    DEFAULT_MIN_WORKER_COUNT = 0;
   private
-    class var FPort:         Integer;
-    class var FHost:         string;
-    class var FRunning:      Boolean;
-    class var FEvent:        TEvent;
-    class var FServer:       TPoseidonNativeServer;
-    class var FWorkerCount:  Integer;
-    class var FMaxConns:     Integer;
-    class var FKeepAlive:    Boolean;
-    class var FListenQueue:  Integer;
+    class var FPort:            Integer;
+    class var FHost:            string;
+    class var FRunning:         Boolean;
+    class var FEvent:           TEvent;
+    class var FServer:          TPoseidonNativeServer;
+    class var FWorkerCount:     Integer;
+    class var FMinWorkerCount:  Integer;
+    class var FMaxConns:        Integer;
+    class var FKeepAlive:       Boolean;
+    class var FListenQueue:     Integer;
 
     class function  GetDefaultEvent: TEvent; static;
     class function  GetDefaultServer: TPoseidonNativeServer; static;
@@ -75,9 +78,13 @@ type
     class property MaxConnections:      Integer read FMaxConns    write FMaxConns;
     class property ListenQueue:         Integer read FListenQueue write FListenQueue;
     class property KeepConnectionAlive: Boolean read FKeepAlive   write FKeepAlive;
-    // Poseidon-specific: number of worker threads for request processing.
-    // Increase for high-concurrency blocking workloads (ACBr, DB calls).
-    class property WorkerCount: Integer read FWorkerCount write FWorkerCount;
+    // Poseidon-specific: max request-handler threads (elastic pool ceiling).
+    // Pool STARTS at MinWorkerCount and grows here under load — startup is
+    // always fast regardless of this value. 0 = auto (default 200).
+    class property WorkerCount:    Integer read FWorkerCount    write FWorkerCount;
+    // Minimum request-handler threads kept alive at all times (pool floor).
+    // 0 = auto (same as IO workers: max(4, ProcessorCount*2) capped at 16).
+    class property MinWorkerCount: Integer read FMinWorkerCount write FMinWorkerCount;
     class property IsRunning:   Boolean read FRunning;
 
     class procedure Listen; overload; override;
@@ -198,10 +205,11 @@ begin
 
   LServer := GetDefaultServer;
 
-  // WorkerCount: 0 = auto (TPoseidonNativeServer computes Min(Max(4,CPUs*2),16)).
-  // Explicit value bypasses the cap — set to e.g. 200 only for production
-  // blocking workloads; high values stall the Delphi debugger (20-30s).
-  LServer.WorkerCount := FWorkerCount;
+  // WorkerCount: elastic pool ceiling (0 = auto → default 200).
+  // The pool STARTS at MinWorkerCount (default: auto 4–16) and grows under load.
+  // Startup is always fast regardless of WorkerCount.
+  LServer.WorkerCount    := FWorkerCount;
+  LServer.MinWorkerCount := FMinWorkerCount;
 
   // MaxConnections at TCP level — 0 means unlimited (Poseidon backpressure via worker pool)
   if FMaxConns > 0 then
@@ -281,14 +289,15 @@ begin
 end;
 
 initialization
-  THorseProviderPoseidonNative.FPort        := 0;
-  THorseProviderPoseidonNative.FHost        := '';
-  THorseProviderPoseidonNative.FWorkerCount := THorseProviderPoseidonNative.DEFAULT_WORKER_COUNT;
-  THorseProviderPoseidonNative.FMaxConns    := 0;
-  THorseProviderPoseidonNative.FKeepAlive   := True;
-  THorseProviderPoseidonNative.FListenQueue := 0;
-  THorseProviderPoseidonNative.FRunning     := False;
-  THorseProviderPoseidonNative.FServer      := nil;
-  THorseProviderPoseidonNative.FEvent       := nil;
+  THorseProviderPoseidonNative.FPort           := 0;
+  THorseProviderPoseidonNative.FHost           := '';
+  THorseProviderPoseidonNative.FWorkerCount    := THorseProviderPoseidonNative.DEFAULT_WORKER_COUNT;
+  THorseProviderPoseidonNative.FMinWorkerCount := THorseProviderPoseidonNative.DEFAULT_MIN_WORKER_COUNT;
+  THorseProviderPoseidonNative.FMaxConns       := 0;
+  THorseProviderPoseidonNative.FKeepAlive      := True;
+  THorseProviderPoseidonNative.FListenQueue    := 0;
+  THorseProviderPoseidonNative.FRunning        := False;
+  THorseProviderPoseidonNative.FServer         := nil;
+  THorseProviderPoseidonNative.FEvent          := nil;
 
 end.

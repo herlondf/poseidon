@@ -58,7 +58,9 @@ type
     FWSHandlers:      TDictionary<string, TWSMessageCallback>;
     FWSLock:          TCriticalSection;
     FH2Enabled:       Boolean;         // HTTP/2 via ALPN; requires SSL. Default False.
-    FWorkerCount:     Integer;         // 0 = auto (ProcessorCount * 2, min 4)
+    FWorkerCount:     Integer;         // 0 = auto max (DEFAULT_MAX_WORKERS = 200)
+    FMinWorkerCount:  Integer;         // 0 = auto min (same as IO workers, 4–16)
+    FRequestPool:     TElasticWorkerPool; // elastic request-handler pool
     FOnLog:           TOnPoseidonLog;
     FOnRequestLog:    TOnPoseidonRequestLog;  // access log callback; nil = silent
     FAllowedMethods:  TArray<string>;  // S-1: empty = accept all (default)
@@ -175,10 +177,15 @@ type
     // HTTP/2 via ALPN: when True and SSL is configured, the server negotiates "h2"
     // and handles HTTP/2 connections. Must be set before Listen(). Default False.
     property HTTP2Enabled: Boolean read FH2Enabled write FH2Enabled;
-    // Number of worker threads. 0 = auto (max(4, ProcessorCount*2)).
-    // For blocking workloads (e.g. DB + ACBr calls), set to the maximum number
-    // of concurrent requests you want to support (e.g. 200).
-    property WorkerCount: Integer read FWorkerCount write FWorkerCount;
+    // Maximum concurrent request-handler threads (elastic pool ceiling).
+    // 0 = auto (default 200). For blocking workloads (DB, ACBr) set explicitly.
+    // The pool STARTS with MinWorkerCount threads and grows here under load,
+    // so startup is always fast regardless of this value.
+    property WorkerCount:    Integer read FWorkerCount    write FWorkerCount;
+    // Minimum concurrent request-handler threads kept alive at all times.
+    // 0 = auto (same as IO workers: max(4, ProcessorCount*2) capped at 16).
+    // Use MinWorkerCount to pre-warm the pool without setting a high max.
+    property MinWorkerCount: Integer read FMinWorkerCount write FMinWorkerCount;
     // Optional log callback. When assigned, all internal errors are routed here.
     // When nil (default), errors are written to ErrOutput.
     property OnLog: TOnPoseidonLog read FOnLog write FOnLog;
@@ -266,6 +273,7 @@ uses
   Poseidon.Net.IO.IOCP,
   Poseidon.Net.SSL,
   Poseidon.Net.Pool.Buffer,
+  Poseidon.Net.Pool.Workers,
   Poseidon.Net.Security,
   Poseidon.Net.ResponseBuilder,
   Poseidon.Net.HTTP1.Parser;
@@ -275,6 +283,7 @@ uses
   Poseidon.Net.IO.Epoll,
   Poseidon.Net.SSL,
   Poseidon.Net.Pool.Buffer,
+  Poseidon.Net.Pool.Workers,
   Poseidon.Net.Security,
   Poseidon.Net.ResponseBuilder,
   Poseidon.Net.HTTP1.Parser;
@@ -289,11 +298,17 @@ const
   RECV_BUF_SIZE    = 32768;  // was 8192 — match CrossSocket; reduz recv() syscalls em payloads maiores
   ACCUM_INITIAL    = 8192;
   WORKER_COUNT_MIN = 4;
-  // W15: cap auto-computed workers — ProcessorCount*2 on high-core machines
-  // (e.g. 100 logical → 200 threads) stalled the Delphi debugger at startup
-  // and wasted stack memory with no throughput gain. IOCP saturates well below
-  // that. Explicit FWorkerCount > 0 bypasses this cap.
-  WORKER_COUNT_MAX = 16;
+  // W15: cap auto-computed IO workers — ProcessorCount*2 on high-core machines
+  // (e.g. 100 logical → 200 threads) wasted stack with no throughput gain.
+  // IO workers only handle I/O events (recv/send); request handlers run in
+  // the elastic TElasticWorkerPool, so this cap can stay low.
+  WORKER_COUNT_MAX      = 16;
+  // Default ceiling for the elastic request-worker pool. Pools start at
+  // min workers (4–16) and grow here only when all workers are busy.
+  // 200 × 8MB stack = 1.6GB — well within safe limits.
+  DEFAULT_MAX_WORKERS   = 200;
+  // Workers above MinWorkerCount self-terminate after this many ms idle.
+  WORKER_IDLE_TIMEOUT_MS = 30000;
 
 // ===========================================================================
 // Shared: SSL helpers — encrypt-and-send + handshake write-BIO flush
@@ -775,7 +790,10 @@ begin
 end;
 
 procedure TPoseidonNativeServer._DispatchAccumBuf(AConn: Pointer);
-// R-5: thin shim — builds TDispatchConfig snapshot and delegates to FDispatcher.
+// Builds a TDispatchConfig snapshot and posts request handling to the elastic
+// worker pool. IO workers return immediately to process more I/O events.
+// TNativeConn.AddRef/Release guards the connection lifetime across the async
+// boundary: the connection stays alive until the pool worker's finally runs.
 var
   LCfg: TDispatchConfig;
 begin
@@ -796,7 +814,20 @@ begin
   LCfg.MetricsEnabled       := FMetricsEnabled;
   LCfg.MetricsPath          := FMetricsPath;
   LCfg.MetricsAllowedCIDR   := FMetricsAllowedCIDR;
-  FDispatcher.Dispatch(AConn, LCfg);
+
+  // AddRef before posting: pool worker holds this ref until Dispatch returns.
+  // Prevents the connection from being freed if _CloseConn runs concurrently
+  // (e.g. idle-sweep timeout) while the pool worker is in a blocking handler.
+  TNativeConn(AConn).AddRef;
+  FRequestPool.Post(
+    procedure
+    begin
+      try
+        FDispatcher.Dispatch(AConn, LCfg);
+      finally
+        TNativeConn(AConn).Release;
+      end;
+    end);
 end;
 
 procedure TPoseidonNativeServer._ProcessRecv(AConn: Pointer;
@@ -1020,6 +1051,12 @@ var
 begin
   if FActive then
     try Stop except end;
+  // Guard: if Stop was skipped (e.g. never called Listen), pool may still exist.
+  if Assigned(FRequestPool) then
+  begin
+    FRequestPool.Shutdown(1000);
+    FreeAndNil(FRequestPool);
+  end;
   if FCertCtxByHost <> nil then
   begin
     for LPair in FCertCtxByHost do
@@ -1368,7 +1405,9 @@ end;
 procedure TPoseidonNativeServer.Listen(const AHost: string; APort: Integer;
   AOnRequest: TOnNativeRequest; AOnListen: TProc);
 var
-  LWorkers: Integer;
+  LIOWorkers:  Integer;
+  LMinReq:     Integer;
+  LMaxReq:     Integer;
 begin
   if FActive then
     raise Exception.Create('TPoseidonNativeServer: already listening');
@@ -1378,15 +1417,22 @@ begin
   FConnLock  := TCriticalSection.Create;
   FConnList  := TList.Create;
 
-  // W14: ProcessorCount×2 wins ~50% at c=100 — extra workers absorb wait time.
-  // Cap at WORKER_COUNT_MAX to avoid stack waste on high-core machines.
-  if FWorkerCount > 0 then
-    LWorkers := FWorkerCount
-  else
-    LWorkers := Min(Max(WORKER_COUNT_MIN, TThread.ProcessorCount * 2), WORKER_COUNT_MAX);
-
-  FIOBackend.StartListening(AHost, APort, LWorkers, FTCPFastOpen,
+  // IO tier: small fixed pool — handles kernel I/O events only (recv/send).
+  // W14: ProcessorCount×2 wins ~50% at c=100; cap at 16 to avoid stack waste.
+  // IO workers no longer run blocking handlers, so the cap stays low safely.
+  LIOWorkers := Min(Max(WORKER_COUNT_MIN, TThread.ProcessorCount * 2),
+                    WORKER_COUNT_MAX);
+  FIOBackend.StartListening(AHost, APort, LIOWorkers, FTCPFastOpen,
     TServerIOAdapter.Create(Self));
+
+  // Request tier: elastic pool — runs blocking handlers (DB, ACBr, etc.).
+  // Starts with LMinReq threads (fast debugger startup), grows to LMaxReq.
+  LMinReq := FMinWorkerCount;
+  if LMinReq <= 0 then LMinReq := LIOWorkers;   // default: same as IO workers
+  LMaxReq := FWorkerCount;
+  if LMaxReq <= 0 then LMaxReq := DEFAULT_MAX_WORKERS;  // default: 200
+  FRequestPool := TElasticWorkerPool.Create(LMinReq, LMaxReq,
+                    WORKER_IDLE_TIMEOUT_MS);
 
   if FMetricsEnabled then
     FMetrics := TPoseidonMetrics.Create;
@@ -1461,6 +1507,16 @@ begin
     end;
   finally
     FConnLock.Leave;
+  end;
+
+  // Drain request pool — pool workers may still be in blocking handlers.
+  // They will finish, call SendResponse (which may fail on closed sockets),
+  // and then exit. IO workers process any resulting send completions while
+  // still alive; we join them only after pool workers are done.
+  if Assigned(FRequestPool) then
+  begin
+    FRequestPool.Shutdown(FDrainTimeoutMs);
+    FreeAndNil(FRequestPool);
   end;
 
   FIOBackend.SignalWorkers;
