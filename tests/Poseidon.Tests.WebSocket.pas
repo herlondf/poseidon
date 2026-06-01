@@ -85,6 +85,16 @@ type
     procedure BuildHandshakeResponse_DeflateEnabled_ContainsExtensionHeader;
     [Test]
     procedure BuildHandshakeResponse_DeflateDisabled_NoExtensionHeader;
+
+    // ApplyRXDeflate (issue #45 — inflate on RX)
+    [Test]
+    procedure ApplyRXDeflate_RSV1WithCompressedPayload_DecompressesAndClearsRSV1;
+    [Test]
+    procedure ApplyRXDeflate_RSV1False_PayloadUnchanged;
+    [Test]
+    procedure ApplyRXDeflate_EmptyPayloadWithRSV1_NoError;
+    [Test]
+    procedure ParseFrame_CompressedFrameRoundTrip_AfterApplyRXDeflate_MatchesOriginal;
   end;
   {$M-}
 
@@ -450,6 +460,110 @@ begin
   LRespStr := TEncoding.ASCII.GetString(LResp);
   Assert.IsFalse(Pos('Sec-WebSocket-Extensions', LRespStr) > 0,
     'Default handshake response must not contain Sec-WebSocket-Extensions header');
+end;
+
+// =============================================================================
+// ApplyRXDeflate tests — issue #45 (permessage-deflate inflate on RX)
+// =============================================================================
+
+procedure TPoseidonWebSocketTests.ApplyRXDeflate_RSV1WithCompressedPayload_DecompressesAndClearsRSV1;
+// Compress a known string, set RSV1=True on a fake frame, call ApplyRXDeflate,
+// verify the payload is decompressed and RSV1 is cleared.
+var
+  LOriginal:   TBytes;
+  LFrame:      TWebSocketFrame;
+begin
+  LOriginal        := TEncoding.UTF8.GetBytes('Hello permessage-deflate RX!');
+  LFrame.Opcode    := OPCODE_TEXT;
+  LFrame.FinFlag   := True;
+  LFrame.RSV1      := True;
+  LFrame.Payload   := TWSDeflateUtils.Compress(LOriginal);
+
+  TWebSocketUtils.ApplyRXDeflate(LFrame);
+
+  Assert.IsFalse(LFrame.RSV1,
+    'RSV1 must be cleared after ApplyRXDeflate');
+  Assert.AreEqual(Length(LOriginal), Length(LFrame.Payload),
+    'Decompressed length must match original');
+  Assert.AreEqual(TEncoding.UTF8.GetString(LOriginal),
+                  TEncoding.UTF8.GetString(LFrame.Payload),
+    'Decompressed content must match original');
+end;
+
+procedure TPoseidonWebSocketTests.ApplyRXDeflate_RSV1False_PayloadUnchanged;
+// When RSV1=False, ApplyRXDeflate must leave the payload untouched (no-op).
+var
+  LOriginal: TBytes;
+  LFrame:    TWebSocketFrame;
+begin
+  LOriginal        := TEncoding.UTF8.GetBytes('plain uncompressed payload');
+  LFrame.Opcode    := OPCODE_TEXT;
+  LFrame.FinFlag   := True;
+  LFrame.RSV1      := False;
+  LFrame.Payload   := Copy(LOriginal);
+
+  TWebSocketUtils.ApplyRXDeflate(LFrame);
+
+  Assert.IsFalse(LFrame.RSV1);
+  Assert.AreEqual(Length(LOriginal), Length(LFrame.Payload),
+    'Payload must not change when RSV1 is False');
+  Assert.AreEqual(TEncoding.UTF8.GetString(LOriginal),
+                  TEncoding.UTF8.GetString(LFrame.Payload));
+end;
+
+procedure TPoseidonWebSocketTests.ApplyRXDeflate_EmptyPayloadWithRSV1_NoError;
+// RSV1=True with an empty payload — must not raise and must clear RSV1.
+var
+  LFrame: TWebSocketFrame;
+begin
+  LFrame.Opcode  := OPCODE_TEXT;
+  LFrame.FinFlag := True;
+  LFrame.RSV1    := True;
+  SetLength(LFrame.Payload, 0);
+
+  TWebSocketUtils.ApplyRXDeflate(LFrame);
+
+  Assert.IsFalse(LFrame.RSV1, 'RSV1 must be cleared even on empty payload');
+  CheckInt(0, Length(LFrame.Payload));
+end;
+
+procedure TPoseidonWebSocketTests.ParseFrame_CompressedFrameRoundTrip_AfterApplyRXDeflate_MatchesOriginal;
+// Full RX round-trip:
+// 1. Compress original bytes
+// 2. Build a deflate frame (RSV1=True) with the compressed payload
+// 3. ParseFrame to decode the wire bytes back into TWebSocketFrame
+// 4. ApplyRXDeflate to inflate the payload
+// 5. Verify result matches original
+var
+  LOriginal:   TBytes;
+  LCompressed: TBytes;
+  LWireFrame:  TBytes;
+  LParsed:     TWebSocketFrame;
+  LConsumed:   Integer;
+begin
+  LOriginal   := TEncoding.UTF8.GetBytes(
+    'WebSocket permessage-deflate end-to-end RX inflate test.');
+  LCompressed := TWSDeflateUtils.Compress(LOriginal);
+
+  // Build the wire frame as a client would send it (RSV1=1, unmasked for simplicity)
+  LWireFrame := TWebSocketUtils.BuildFrame(OPCODE_TEXT, True, True, LCompressed);
+
+  // Parse back from bytes
+  Assert.IsTrue(
+    TWebSocketUtils.ParseFrame(@LWireFrame[0], Length(LWireFrame), LParsed, LConsumed),
+    'ParseFrame must succeed on a valid deflate frame');
+  Assert.IsTrue(LParsed.RSV1, 'RSV1 must be True after ParseFrame on deflate frame');
+  CheckInt(OPCODE_TEXT, LParsed.Opcode);
+
+  // Apply inflate
+  TWebSocketUtils.ApplyRXDeflate(LParsed);
+
+  Assert.IsFalse(LParsed.RSV1, 'RSV1 must be cleared after ApplyRXDeflate');
+  Assert.AreEqual(Length(LOriginal), Length(LParsed.Payload),
+    'Inflated payload length must match original');
+  Assert.AreEqual(TEncoding.UTF8.GetString(LOriginal),
+                  TEncoding.UTF8.GetString(LParsed.Payload),
+    'Inflated payload must match original bytes');
 end;
 
 initialization

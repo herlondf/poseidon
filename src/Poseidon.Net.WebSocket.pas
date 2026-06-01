@@ -70,6 +70,13 @@ type
     class function ParseFrame(const ABuf: PByte; ABufLen: Integer;
       out AFrame: TWebSocketFrame; out AConsumed: Integer): Boolean; static;
 
+    // Apply permessage-deflate inflate to a received frame (RFC 7692 §7.2.2).
+    // If AFrame.RSV1 = True and the payload is non-empty, decompresses
+    // AFrame.Payload in place and clears AFrame.RSV1.
+    // No-op when RSV1 = False (uncompressed frame).
+    // Call this after ParseFrame when the session has deflate negotiated.
+    class procedure ApplyRXDeflate(var AFrame: TWebSocketFrame); static;
+
     // Encode an outbound frame. Server frames are never masked (per RFC 6455).
     class function BuildFrame(AOpcode: Byte; AFin: Boolean;
       const APayload: TBytes): TBytes; overload; static;
@@ -260,33 +267,54 @@ end;
 // ===========================================================================
 
 class function TWSDeflateUtils.Compress(const AData: TBytes): TBytes;
+// Uses the raw zlib deflate API with Z_SYNC_FLUSH so that the output ends with
+// the 00 00 FF FF sync-flush marker required by RFC 7692 §7.2.1.
+// TZCompressionStream uses Z_FINISH on destruction, which does NOT produce
+// the sync-flush marker, so we bypass the stream wrapper here.
+const
+  CHUNK = 32768;
 var
-  LIn:  TBytesStream;
-  LOut: TBytesStream;
-  LZ:   TZCompressionStream;
-  LLen: Integer;
+  LStrm: z_stream;
+  LOut:  TBytesStream;
+  LBuf:  array[0..CHUNK - 1] of Byte;
+  LRet:  Integer;
+  LLen:  Integer;
+  LSize: Integer;
 begin
   SetLength(Result, 0);
   if Length(AData) = 0 then Exit;
-  LIn  := TBytesStream.Create(AData);
+
+  FillChar(LStrm, SizeOf(LStrm), 0);
+  // windowBits = -15: raw DEFLATE (no zlib/gzip wrapper)
+  if deflateInit2(LStrm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8,
+       Z_DEFAULT_STRATEGY) <> Z_OK then
+    raise Exception.Create('WSDeflate: deflateInit2 failed');
+
   LOut := TBytesStream.Create;
   try
-    // WindowBits = -15: raw DEFLATE (no zlib/gzip header or checksum)
-    LZ := TZCompressionStream.Create(LOut, zcDefault, -15);
-    try
-      LZ.CopyFrom(LIn, 0);
-    finally
-      LZ.Free;  // flushes and writes trailing 00 00 FF FF sync-flush marker
-    end;
+    LStrm.next_in  := @AData[0];
+    LStrm.avail_in := Length(AData);
+    // Z_SYNC_FLUSH: flushes all pending output and appends 00 00 FF FF
+    repeat
+      LStrm.next_out  := @LBuf[0];
+      LStrm.avail_out := CHUNK;
+      LRet := deflate(LStrm, Z_SYNC_FLUSH);
+      if LRet < Z_OK then
+        raise Exception.CreateFmt('WSDeflate: deflate error %d', [LRet]);
+      LLen := CHUNK - LStrm.avail_out;
+      if LLen > 0 then
+        LOut.Write(LBuf[0], LLen);
+    until LStrm.avail_out > 0;  // avail_out > 0 means no more pending output
+    deflateEnd(LStrm);
+
     // Strip trailing 00 00 FF FF (4 bytes) per RFC 7692 §7.2.1
-    LLen := LOut.Size;
-    if LLen >= 4 then
-      Dec(LLen, 4);
-    SetLength(Result, LLen);
-    if LLen > 0 then
-      Move(LOut.Bytes[0], Result[0], LLen);
+    LSize := LOut.Size;
+    if LSize >= 4 then
+      Dec(LSize, 4);
+    SetLength(Result, LSize);
+    if LSize > 0 then
+      Move(LOut.Bytes[0], Result[0], LSize);
   finally
-    LIn.Free;
     LOut.Free;
   end;
 end;
@@ -300,6 +328,8 @@ var
   LData: TBytes;
   LOut:  TBytesStream;
   LZ:    TZDecompressionStream;
+  LBuf:  TBytes;
+  LRead: Integer;
 begin
   SetLength(Result, 0);
   if Length(AData) = 0 then Exit;
@@ -309,11 +339,19 @@ begin
   Move(SYNC_FLUSH[0], LData[Length(AData)], 4);
   LIn  := TBytesStream.Create(LData);
   LOut := TBytesStream.Create;
+  SetLength(LBuf, 32768);
   try
     // WindowBits = -15: raw INFLATE
     LZ := TZDecompressionStream.Create(LIn, -15);
     try
-      LOut.CopyFrom(LZ, 0);
+      // Read in a loop until EOF — do NOT pass 0 to CopyFrom because that
+      // uses LZ.Size (= compressed size) as the byte count, which stops short
+      // of the full decompressed output.
+      repeat
+        LRead := LZ.Read(LBuf[0], Length(LBuf));
+        if LRead > 0 then
+          LOut.Write(LBuf[0], LRead);
+      until LRead = 0;
     finally
       LZ.Free;
     end;
@@ -324,6 +362,14 @@ begin
     LIn.Free;
     LOut.Free;
   end;
+end;
+
+class procedure TWebSocketUtils.ApplyRXDeflate(var AFrame: TWebSocketFrame);
+begin
+  if not AFrame.RSV1 then Exit;
+  if Length(AFrame.Payload) > 0 then
+    AFrame.Payload := TWSDeflateUtils.Decompress(AFrame.Payload);
+  AFrame.RSV1 := False;
 end;
 
 class function TWebSocketUtils.HandshakeAccept(const AClientKey: string): string;
