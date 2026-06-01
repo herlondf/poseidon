@@ -164,8 +164,26 @@ begin
 end;
 
 function TNativeWebRequest.GetFieldByName(const Name: string): string;
+var
+  I: Integer;
+  LSB: TStringBuilder;
 begin
-  Result := _Header(Name);
+  // 'ALL_RAW' is the ISAPI convention used by Horse.Core.Param.Header to enumerate
+  // all headers via GetFieldByName. Return them in 'Key: Value\r\n' format so the
+  // TStringList with NameValueSeparator=':' can parse them correctly.
+  if SameText(Name, 'ALL_RAW') then
+  begin
+    LSB := TStringBuilder.Create;
+    try
+      for I := 0 to High(FReq.Headers) do
+        LSB.Append(FReq.Headers[I].Key).Append(': ').Append(FReq.Headers[I].Value).Append(#13#10);
+      Result := LSB.ToString;
+    finally
+      LSB.Free;
+    end;
+  end
+  else
+    Result := _Header(Name);
 end;
 
 function TNativeWebRequest.ReadClient(var Buffer; Count: Integer): Integer;
