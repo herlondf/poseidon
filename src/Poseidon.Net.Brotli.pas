@@ -58,12 +58,9 @@ type
 
 implementation
 
-uses
-{$IFDEF MSWINDOWS}
-  Winapi.Windows;
-{$ELSE}
-  Posix.Dlfcn;
-{$ENDIF}
+// No platform-specific import needed: System.SysUtils exposes cross-platform
+// LoadLibrary / FreeLibrary / GetProcAddress (HMODULE = NativeUInt on all targets).
+// This avoids Pointer<->NativeUInt casts that dcclinux64 rejects (E2010).
 
 const
   BROTLI_DEFAULT_LGWIN = 22;   // ~4 MB window; valid for quality 0-11
@@ -79,35 +76,21 @@ end;
 
 class destructor TPoseidonBrotli.Destroy;
 begin
-{$IFDEF MSWINDOWS}
-  if FLibEnc <> 0 then FreeLibrary(FLibEnc);
-  if (FLibDec <> 0) and (FLibDec <> FLibEnc) then FreeLibrary(FLibDec);
-{$ELSE}
-  if FLibEnc <> 0 then dlclose(Pointer(FLibEnc));
-  if (FLibDec <> 0) and (FLibDec <> FLibEnc) then dlclose(Pointer(FLibDec));
-{$ENDIF}
+  if FLibEnc <> 0 then System.SysUtils.FreeLibrary(FLibEnc);
+  if (FLibDec <> 0) and (FLibDec <> FLibEnc) then System.SysUtils.FreeLibrary(FLibDec);
   FLock.Free;
 end;
 
 class function TPoseidonBrotli.TryLoadLib(const AName: string): NativeUInt;
 begin
-{$IFDEF MSWINDOWS}
-  Result := LoadLibrary(PChar(AName));
-{$ELSE}
-  Result := NativeUInt(dlopen(MarshaledAString(AnsiString(AName)),
-    RTLD_LAZY or RTLD_GLOBAL));
-{$ENDIF}
+  Result := System.SysUtils.LoadLibrary(PChar(AName));
 end;
 
 class function TPoseidonBrotli.TryGetProc(ALib: NativeUInt;
   const AName: string): Pointer;
 begin
   if ALib = 0 then Exit(nil);
-{$IFDEF MSWINDOWS}
-  Result := GetProcAddress(ALib, PChar(AName));
-{$ELSE}
-  Result := dlsym(Pointer(ALib), MarshaledAString(AnsiString(AName)));
-{$ENDIF}
+  Result := System.SysUtils.GetProcAddress(ALib, PChar(AName));
 end;
 
 class procedure TPoseidonBrotli.EnsureInit;
@@ -135,13 +118,7 @@ begin
       if @FEncoderCompress <> nil then
         FLibEnc := LLib
       else
-      begin
-{$IFDEF MSWINDOWS}
-        FreeLibrary(LLib);
-{$ELSE}
-        dlclose(Pointer(LLib));
-{$ENDIF}
-      end;
+        System.SysUtils.FreeLibrary(LLib);
     end;
 
     // --- Decoder ---
@@ -164,13 +141,7 @@ begin
         if @FDecoderDecompress <> nil then
           FLibDec := LLib
         else
-        begin
-{$IFDEF MSWINDOWS}
-          FreeLibrary(LLib);
-{$ELSE}
-          dlclose(Pointer(LLib));
-{$ENDIF}
-        end;
+          System.SysUtils.FreeLibrary(LLib);
       end;
     end;
 
