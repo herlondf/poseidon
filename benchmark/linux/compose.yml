@@ -1,13 +1,15 @@
 version: "3.9"
 
 # benchmark/linux/compose.yml
-# Orquestra Poseidon, Horse/CrossSocket, HAProxy e Bombardier para benchmark.
+# Orquestra o servidor Poseidon para benchmark Linux.
 #
-# Uso:
+# Uso padrão:
 #   cd benchmark/linux
-#   ./build-bench.sh            # compila os binários Linux64
-#   docker compose up -d poseidon horse haproxy
-#   ./run-benchmark.sh          # executa todos os cenários e gera relatório
+#   docker compose up -d poseidon
+#   ./run-benchmark.sh
+#
+# Para cenários comparativos (horse + haproxy), ative o profile:
+#   docker compose --profile comparison up -d
 
 networks:
   bench:
@@ -45,9 +47,11 @@ services:
       start_period: 5s
 
   # ---------------------------------------------------------------------------
-  # Horse/CrossSocket — baseline para comparação
+  # Horse/CrossSocket — baseline para comparação (profile: comparison)
   # ---------------------------------------------------------------------------
   horse:
+    profiles:
+      - comparison
     build:
       context: ./horse
     image: bench-horse:latest
@@ -67,10 +71,11 @@ services:
       start_period: 5s
 
   # ---------------------------------------------------------------------------
-  # HAProxy — load balancer / healthcheck monitor
-  # Portas: 8081→poseidon, 8082→horse, 9090→stats
+  # HAProxy — load balancer / healthcheck monitor (profile: comparison)
   # ---------------------------------------------------------------------------
   haproxy:
+    profiles:
+      - comparison
     image: haproxy:2.8-alpine
     container_name: haproxy
     volumes:
@@ -85,7 +90,7 @@ services:
       poseidon:
         condition: service_healthy
       horse:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------

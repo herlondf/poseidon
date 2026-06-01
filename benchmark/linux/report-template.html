@@ -3,112 +3,61 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Poseidon vs Horse — Benchmark Report</title>
+  <title>Poseidon — Benchmark Report</title>
   <script src="https://cdn.plot.ly/plotly-2.30.0.min.js" charset="utf-8"></script>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
            margin: 0; background: #0f172a; color: #e2e8f0; }
-    .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 2rem; }
     h1 { color: #38bdf8; font-size: 1.8rem; margin-bottom: 0.25rem; }
     .subtitle { color: #64748b; font-size: 0.9rem; margin-bottom: 2rem; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
     .card { background: #1e293b; border-radius: 0.75rem; padding: 1.5rem;
-            border: 1px solid #334155; }
+            border: 1px solid #334155; margin-bottom: 1.5rem; }
     .card h2 { font-size: 1.1rem; margin: 0 0 1rem; color: #94a3b8; }
     table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
     th { text-align: left; color: #64748b; padding: 0.4rem 0.6rem;
          border-bottom: 1px solid #334155; }
     td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #1e293b; }
-    .badge-poseidon { color: #38bdf8; font-weight: 600; }
-    .badge-horse    { color: #fb923c; font-weight: 600; }
-    .avail-ok   { color: #4ade80; font-weight: 600; }
-    .avail-fail { color: #f87171; font-weight: 600; }
-    .chart-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;
-                 margin-top: 1.5rem; }
-    @media (max-width: 900px) { .grid, .chart-row { grid-template-columns: 1fr; } }
+    .val { color: #38bdf8; font-weight: 600; }
+    .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    @media (max-width: 700px) { .chart-row { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
 <div class="container">
-  <h1>Poseidon vs Horse/CrossSocket</h1>
-  <div class="subtitle">Benchmark Linux — {{TIMESTAMP}}</div>
+  <h1>Poseidon — Benchmark Linux</h1>
+  <div class="subtitle">{{TIMESTAMP}}</div>
 
   <!-- ── Tabela de resultados ─────────────────────────────────────────── -->
-  <div class="card" style="margin-bottom:1.5rem">
-    <h2>Resultados por cenário</h2>
+  <div class="card">
+    <h2>Resultados</h2>
     <table>
       <thead>
         <tr>
           <th>Cenário</th>
-          <th>Impl.</th>
           <th>RPS</th>
           <th>P50 (ms)</th>
           <th>P95 (ms)</th>
           <th>P99 (ms)</th>
-          <th>Disponibilidade</th>
-          <th>Downtime (s)</th>
+          <th>Req 2xx</th>
         </tr>
       </thead>
       <tbody>
-        <!-- Ping -->
         <tr>
-          <td rowspan="2">Ping (500 clientes)</td>
-          <td class="badge-poseidon">Poseidon</td>
-          <td>{{P_PING_RPS}}</td>
-          <td>{{P_PING_P50}}</td>
-          <td>{{P_PING_P95}}</td>
-          <td>{{P_PING_P99}}</td>
-          <td class="avail-ok">100%</td>
-          <td>0</td>
+          <td>Ping — 500 clientes</td>
+          <td class="val">{{PING_RPS}}</td>
+          <td>{{PING_P50}}</td>
+          <td>{{PING_P95}}</td>
+          <td>{{PING_P99}}</td>
+          <td>{{PING_2XX}}</td>
         </tr>
         <tr>
-          <td class="badge-horse">Horse/CS</td>
-          <td>{{H_PING_RPS}}</td>
-          <td>{{H_PING_P50}}</td>
-          <td>{{H_PING_P95}}</td>
-          <td>{{H_PING_P99}}</td>
-          <td class="avail-ok">100%</td>
-          <td>0</td>
-        </tr>
-        <!-- Payload -->
-        <tr>
-          <td rowspan="2">Payload 1KB (100 clientes)</td>
-          <td class="badge-poseidon">Poseidon</td>
-          <td>{{P_PL_RPS}}</td>
-          <td>—</td>
-          <td>{{P_PL_P95}}</td>
-          <td>—</td>
-          <td class="avail-ok">100%</td>
-          <td>0</td>
-        </tr>
-        <tr>
-          <td class="badge-horse">Horse/CS</td>
-          <td>{{H_PL_RPS}}</td>
-          <td>—</td>
-          <td>{{H_PL_P95}}</td>
-          <td>—</td>
-          <td class="avail-ok">100%</td>
-          <td>0</td>
-        </tr>
-        <!-- ALB saturation -->
-        <tr>
-          <td rowspan="2">ALB Saturation / NFCe (90×30s flood)</td>
-          <td class="badge-poseidon">Poseidon</td>
-          <td>{{P_ALB_RPS}}</td>
-          <td>—</td>
-          <td>—</td>
-          <td>—</td>
-          <td class="avail-ok">{{P_ALB_AVAIL}}%</td>
-          <td>{{P_ALB_DT}}</td>
-        </tr>
-        <tr>
-          <td class="badge-horse">Horse/CS</td>
-          <td>{{H_ALB_RPS}}</td>
-          <td>—</td>
-          <td>—</td>
-          <td>—</td>
-          <td class="avail-fail">{{H_ALB_AVAIL}}%</td>
-          <td>{{H_ALB_DT}}</td>
+          <td>Payload 1KB — 100 clientes</td>
+          <td class="val">{{PAYLOAD_RPS}}</td>
+          <td>{{PAYLOAD_P50}}</td>
+          <td>{{PAYLOAD_P95}}</td>
+          <td>{{PAYLOAD_P99}}</td>
+          <td>{{PAYLOAD_2XX}}</td>
         </tr>
       </tbody>
     </table>
@@ -117,102 +66,45 @@
   <!-- ── Gráficos ──────────────────────────────────────────────────────── -->
   <div class="chart-row">
     <div class="card">
-      <h2>RPS — Ping</h2>
-      <div id="chart-rps-ping" style="height:220px"></div>
+      <h2>RPS por cenário</h2>
+      <div id="chart-rps" style="height:240px"></div>
     </div>
     <div class="card">
-      <h2>Latência P50/P95/P99 — Ping (ms)</h2>
-      <div id="chart-lat-ping" style="height:220px"></div>
-    </div>
-    <div class="card">
-      <h2>RPS — Payload 1KB</h2>
-      <div id="chart-rps-payload" style="height:220px"></div>
-    </div>
-  </div>
-
-  <div class="chart-row" style="margin-top:1rem">
-    <div class="card" style="grid-column:1/3">
-      <h2>ALB Saturation — Disponibilidade (%) e RPS via HAProxy</h2>
-      <div id="chart-alb" style="height:250px"></div>
-    </div>
-    <div class="card">
-      <h2>RPS Comparativo (todos os cenários)</h2>
-      <div id="chart-rps-all" style="height:250px"></div>
+      <h2>Latência P50 / P95 / P99 (ms)</h2>
+      <div id="chart-lat" style="height:240px"></div>
     </div>
   </div>
 </div>
 
 <script>
-const LAYOUT_BASE = {
+const COLOR = '#38bdf8';
+const LAYOUT = {
   paper_bgcolor: 'rgba(0,0,0,0)',
   plot_bgcolor:  'rgba(0,0,0,0)',
-  font:          { color: '#94a3b8', size: 11 },
-  margin:        { t: 10, b: 40, l: 50, r: 10 },
-  xaxis: { gridcolor: '#334155' },
-  yaxis: { gridcolor: '#334155' },
-  legend: { orientation: 'h', y: -0.25 }
+  font:   { color: '#94a3b8', size: 11 },
+  margin: { t: 10, b: 50, l: 55, r: 10 },
+  xaxis:  { gridcolor: '#334155' },
+  yaxis:  { gridcolor: '#334155' }
 };
 const CFG = { responsive: true, displayModeBar: false };
 
-const POSEIDON_COLOR = '#38bdf8';
-const HORSE_COLOR    = '#fb923c';
+Plotly.newPlot('chart-rps', [{
+  x: ['Ping (500c)', 'Payload 1KB (100c)'],
+  y: [{{PING_RPS}}, {{PAYLOAD_RPS}}],
+  type: 'bar',
+  marker: { color: COLOR },
+  text: [Math.round({{PING_RPS}}).toLocaleString(), Math.round({{PAYLOAD_RPS}}).toLocaleString()],
+  textposition: 'outside'
+}], { ...LAYOUT, yaxis: { ...LAYOUT.yaxis, title: 'req/s' } }, CFG);
 
-// RPS ping
-Plotly.newPlot('chart-rps-ping', [
-  { x: ['Poseidon', 'Horse/CS'], y: [{{P_PING_RPS}}, {{H_PING_RPS}}],
-    type: 'bar', marker: { color: [POSEIDON_COLOR, HORSE_COLOR] },
-    text: ['{{P_PING_RPS}}', '{{H_PING_RPS}}'], textposition: 'outside' }
-], { ...LAYOUT_BASE, yaxis: { ...LAYOUT_BASE.yaxis, title: 'req/s' } }, CFG);
-
-// Latency ping
-Plotly.newPlot('chart-lat-ping', [
-  { x: ['P50', 'P95', 'P99'],
-    y: [{{P_PING_P50}}, {{P_PING_P95}}, {{P_PING_P99}}],
-    type: 'bar', name: 'Poseidon', marker: { color: POSEIDON_COLOR } },
-  { x: ['P50', 'P95', 'P99'],
-    y: [{{H_PING_P50}}, {{H_PING_P95}}, {{H_PING_P99}}],
-    type: 'bar', name: 'Horse/CS', marker: { color: HORSE_COLOR } }
-], { ...LAYOUT_BASE, barmode: 'group',
-     yaxis: { ...LAYOUT_BASE.yaxis, title: 'ms' } }, CFG);
-
-// RPS payload
-Plotly.newPlot('chart-rps-payload', [
-  { x: ['Poseidon', 'Horse/CS'], y: [{{P_PL_RPS}}, {{H_PL_RPS}}],
-    type: 'bar', marker: { color: [POSEIDON_COLOR, HORSE_COLOR] },
-    text: ['{{P_PL_RPS}}', '{{H_PL_RPS}}'], textposition: 'outside' }
-], { ...LAYOUT_BASE, yaxis: { ...LAYOUT_BASE.yaxis, title: 'req/s' } }, CFG);
-
-// ALB saturation
-Plotly.newPlot('chart-alb', [
-  { x: ['Poseidon', 'Horse/CS'],
-    y: [parseFloat('{{P_ALB_AVAIL}}') || 100, parseFloat('{{H_ALB_AVAIL}}') || 0],
-    type: 'bar', name: 'Disponibilidade (%)',
-    marker: { color: [POSEIDON_COLOR, HORSE_COLOR] },
-    text: ['{{P_ALB_AVAIL}}%', '{{H_ALB_AVAIL}}%'], textposition: 'outside',
-    yaxis: 'y' },
-  { x: ['Poseidon', 'Horse/CS'],
-    y: [{{P_ALB_RPS}}, {{H_ALB_RPS}}],
-    type: 'scatter', mode: 'markers', name: 'RPS /ping',
-    marker: { color: ['#4ade80', '#f87171'], size: 12, symbol: 'diamond' },
-    yaxis: 'y2' }
-], {
-  ...LAYOUT_BASE,
-  yaxis:  { ...LAYOUT_BASE.yaxis, title: 'Disponibilidade (%)', range: [0, 110] },
-  yaxis2: { ...LAYOUT_BASE.yaxis, title: 'RPS', overlaying: 'y', side: 'right',
-             gridcolor: 'transparent' },
-  legend: { orientation: 'h', y: -0.3 }
-}, CFG);
-
-// RPS all scenarios
-Plotly.newPlot('chart-rps-all', [
-  { x: ['Ping', 'Payload 1KB', 'ALB /ping'],
-    y: [{{P_PING_RPS}}, {{P_PL_RPS}}, {{P_ALB_RPS}}],
-    type: 'bar', name: 'Poseidon', marker: { color: POSEIDON_COLOR } },
-  { x: ['Ping', 'Payload 1KB', 'ALB /ping'],
-    y: [{{H_PING_RPS}}, {{H_PL_RPS}}, {{H_ALB_RPS}}],
-    type: 'bar', name: 'Horse/CS', marker: { color: HORSE_COLOR } }
-], { ...LAYOUT_BASE, barmode: 'group',
-     yaxis: { ...LAYOUT_BASE.yaxis, title: 'req/s' } }, CFG);
+Plotly.newPlot('chart-lat', [
+  { x: ['Ping P50', 'Ping P95', 'Ping P99', 'Payload P50', 'Payload P95', 'Payload P99'],
+    y: [{{PING_P50}}, {{PING_P95}}, {{PING_P99}},
+        {{PAYLOAD_P50}}, {{PAYLOAD_P95}}, {{PAYLOAD_P99}}],
+    type: 'bar',
+    marker: { color: [COLOR, COLOR, COLOR, '#818cf8', '#818cf8', '#818cf8'] }
+  }
+], { ...LAYOUT, yaxis: { ...LAYOUT.yaxis, title: 'ms' } }, CFG);
 </script>
 </body>
 </html>

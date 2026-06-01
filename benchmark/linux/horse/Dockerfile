@@ -3,7 +3,7 @@ FROM debian:bookworm-slim
 # Runtime dependencies for Horse/CrossSocket
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        libssl3 ca-certificates && \
+        libssl3 ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

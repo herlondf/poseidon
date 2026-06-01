@@ -3,7 +3,7 @@
 # Lê um arquivo JSON de resultados e gera um relatório HTML com Plotly.js.
 #
 # Uso:
-#   ./generate-report.sh bench-results-20260531-120000.json report.html
+#   ./generate-report.sh bench-results-<timestamp>.json report.html
 
 set -euo pipefail
 
@@ -34,40 +34,28 @@ require_cmd jq
 # ---------------------------------------------------------------------------
 
 extract() {
-  local PATH_="$1"
-  jq -r "${PATH_} // \"N/A\"" "${INPUT}"
+  jq -r "(${1}) // \"N/A\"" "${INPUT}"
 }
 
 extract_num() {
-  local PATH_="$1"
-  jq -r "${PATH_} // 0" "${INPUT}"
+  jq -r "(${1}) // 0" "${INPUT}"
 }
 
 TIMESTAMP="$(extract '.timestamp')"
 
-# Ping scenario
-P_PING_RPS="$(extract_num '.scenarios.ping.poseidon.result.rps.mean')"
-H_PING_RPS="$(extract_num '.scenarios.ping.horse.result.rps.mean')"
-P_PING_P50="$(extract_num '.scenarios.ping.poseidon.result.latencies.mean / 1000000')"
-H_PING_P50="$(extract_num '.scenarios.ping.horse.result.latencies.mean / 1000000')"
-P_PING_P95="$(extract_num '.scenarios.ping.poseidon.result.latencies.percentile95 / 1000000')"
-H_PING_P95="$(extract_num '.scenarios.ping.horse.result.latencies.percentile95 / 1000000')"
-P_PING_P99="$(extract_num '.scenarios.ping.poseidon.result.latencies.percentile99 / 1000000')"
-H_PING_P99="$(extract_num '.scenarios.ping.horse.result.latencies.percentile99 / 1000000')"
+# Ping — latência em microsegundos → ms (÷ 1000)
+PING_RPS="$(extract_num '.scenarios.ping.result.rps.mean')"
+PING_P50="$(extract_num '(.scenarios.ping.result.latency.mean // 0) / 1000')"
+PING_P95="$(extract_num '(.scenarios.ping.result.latency.percentiles["95"] // 0) / 1000')"
+PING_P99="$(extract_num '(.scenarios.ping.result.latency.percentiles["99"] // 0) / 1000')"
+PING_2XX="$(extract_num '.scenarios.ping.result.req2xx')"
 
-# Payload scenario
-P_PL_RPS="$(extract_num '.scenarios.payload_1kb.poseidon.result.rps.mean')"
-H_PL_RPS="$(extract_num '.scenarios.payload_1kb.horse.result.rps.mean')"
-P_PL_P95="$(extract_num '.scenarios.payload_1kb.poseidon.result.latencies.percentile95 / 1000000')"
-H_PL_P95="$(extract_num '.scenarios.payload_1kb.horse.result.latencies.percentile95 / 1000000')"
-
-# ALB saturation
-P_ALB_RPS="$(extract_num '.scenarios.alb_saturation.poseidon.result.rps.mean')"
-H_ALB_RPS="$(extract_num '.scenarios.alb_saturation.horse.result.rps.mean')"
-P_ALB_AVAIL="$(extract '.scenarios.alb_saturation.poseidon.haproxy.avail_pct')"
-H_ALB_AVAIL="$(extract '.scenarios.alb_saturation.horse.haproxy.avail_pct')"
-P_ALB_DT="$(extract_num '.scenarios.alb_saturation.poseidon.haproxy.downtime_sec')"
-H_ALB_DT="$(extract_num '.scenarios.alb_saturation.horse.haproxy.downtime_sec')"
+# Payload
+PAYLOAD_RPS="$(extract_num '.scenarios.payload_1kb.result.rps.mean')"
+PAYLOAD_P50="$(extract_num '(.scenarios.payload_1kb.result.latency.mean // 0) / 1000')"
+PAYLOAD_P95="$(extract_num '(.scenarios.payload_1kb.result.latency.percentiles["95"] // 0) / 1000')"
+PAYLOAD_P99="$(extract_num '(.scenarios.payload_1kb.result.latency.percentiles["99"] // 0) / 1000')"
+PAYLOAD_2XX="$(extract_num '.scenarios.payload_1kb.result.req2xx')"
 
 # ---------------------------------------------------------------------------
 # Substitute placeholders in template
@@ -75,24 +63,16 @@ H_ALB_DT="$(extract_num '.scenarios.alb_saturation.horse.haproxy.downtime_sec')"
 
 sed \
   -e "s|{{TIMESTAMP}}|${TIMESTAMP}|g" \
-  -e "s|{{P_PING_RPS}}|${P_PING_RPS}|g" \
-  -e "s|{{H_PING_RPS}}|${H_PING_RPS}|g" \
-  -e "s|{{P_PING_P50}}|${P_PING_P50}|g" \
-  -e "s|{{H_PING_P50}}|${H_PING_P50}|g" \
-  -e "s|{{P_PING_P95}}|${P_PING_P95}|g" \
-  -e "s|{{H_PING_P95}}|${H_PING_P95}|g" \
-  -e "s|{{P_PING_P99}}|${P_PING_P99}|g" \
-  -e "s|{{H_PING_P99}}|${H_PING_P99}|g" \
-  -e "s|{{P_PL_RPS}}|${P_PL_RPS}|g" \
-  -e "s|{{H_PL_RPS}}|${H_PL_RPS}|g" \
-  -e "s|{{P_PL_P95}}|${P_PL_P95}|g" \
-  -e "s|{{H_PL_P95}}|${H_PL_P95}|g" \
-  -e "s|{{P_ALB_RPS}}|${P_ALB_RPS}|g" \
-  -e "s|{{H_ALB_RPS}}|${H_ALB_RPS}|g" \
-  -e "s|{{P_ALB_AVAIL}}|${P_ALB_AVAIL}|g" \
-  -e "s|{{H_ALB_AVAIL}}|${H_ALB_AVAIL}|g" \
-  -e "s|{{P_ALB_DT}}|${P_ALB_DT}|g" \
-  -e "s|{{H_ALB_DT}}|${H_ALB_DT}|g" \
+  -e "s|{{PING_RPS}}|${PING_RPS}|g" \
+  -e "s|{{PING_P50}}|${PING_P50}|g" \
+  -e "s|{{PING_P95}}|${PING_P95}|g" \
+  -e "s|{{PING_P99}}|${PING_P99}|g" \
+  -e "s|{{PING_2XX}}|${PING_2XX}|g" \
+  -e "s|{{PAYLOAD_RPS}}|${PAYLOAD_RPS}|g" \
+  -e "s|{{PAYLOAD_P50}}|${PAYLOAD_P50}|g" \
+  -e "s|{{PAYLOAD_P95}}|${PAYLOAD_P95}|g" \
+  -e "s|{{PAYLOAD_P99}}|${PAYLOAD_P99}|g" \
+  -e "s|{{PAYLOAD_2XX}}|${PAYLOAD_2XX}|g" \
   "${TEMPLATE}" > "${OUTPUT}"
 
 echo "Relatório gerado: ${OUTPUT}"
