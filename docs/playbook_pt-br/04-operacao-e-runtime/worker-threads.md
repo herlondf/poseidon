@@ -9,8 +9,34 @@ O Poseidon despacha requisições para um pool de threads. O tamanho padrão é 
 workers = pico_de_requisições_simultâneas × (1 + avg_espera_ms / avg_cpu_ms)
 ```
 
+### Por tipo de workload
+
+| Workload | `WorkerCount` recomendado | Motivo |
+|----------|--------------------------|--------|
+| CPU-bound (em memória, sem I/O) | `nº de CPUs lógicas × 2` | Mais workers aumentam overhead de troca de contexto sem ganho de throughput |
+| I/O-bound (queries no BD, APIs externas) | `pico_clientes_simultâneos × (1 + wait_ms / cpu_ms)` | Workers bloqueados seguram uma thread; mais threads = fila menor |
+| Misto | Comece com `auto`; ajuste com o benchmark de escalonamento de workers | Deixe os dados decidirem |
+
+### Evidência do benchmark — curva de escalonamento (latência DAO, 50 clientes simultâneos)
+
+`RPS teórico máximo = workers × (1000 / DAO_ms)`. Resultados com 50 clientes simultâneos:
+
+| Workers | DAO=5ms RPS | DAO=30ms RPS | DAO=100ms RPS | Observação |
+|---------|-------------|--------------|---------------|------------|
+| 4       | 664         | 130          | 40            | **Saturado** em todas as latências; corresponde à teoria (4×200=800, 4×33=133, 4×10=40) |
+| 8       | 1 238       | 257          | 79            | Margem aparece; latência média cai abaixo de 50% do W=4 |
+| auto    | 1 949       | 499          | 78            | Adapta-se à contagem de CPUs da máquina; tipicamente próximo do ótimo |
+| 16      | 1 938       | 502          | 126           | Retorno decrescente em 5ms; ganho significativo em 100ms |
+| 32      | 2 110       | 706          | 239           | Melhor RPS bruto em DAO alto; overhead de troca de contexto visível em 5ms |
+
+Regra de diagnóstico: se `latência_média > 2 × handler_sleep_ms`, adicione mais workers.
+
 Para handlers puramente em memória: `WorkerCount = número de CPUs × 2` é suficiente.
-Para handlers que acessam banco de dados (I/O bloqueante): mantenha o padrão 200 ou iguale ao tamanho do pool de conexões.
+Para handlers que acessam banco de dados (I/O bloqueante): comece com `auto` e ajuste
+para cima se `latência_média > 2 × DB_query_ms`.
+
+> Para a matriz completa de escalonamento de workers (W=4…32 × DAO=5/30/100ms × concorrência=10/50),
+> execute `Poseidon.Benchmark.Workers`, que gera relatórios HTML em `benchmark/bin/`.
 
 ## Alterando o número de workers
 

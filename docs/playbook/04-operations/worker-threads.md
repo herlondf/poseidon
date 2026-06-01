@@ -9,8 +9,34 @@ Poseidon dispatches incoming requests to a thread pool. The default pool size is
 workers = peak_concurrent_requests × (1 + avg_blocking_wait_ms / avg_cpu_ms)
 ```
 
+### By workload type
+
+| Workload | Recommended `WorkerCount` | Why |
+|----------|--------------------------|-----|
+| CPU-bound (in-memory, no I/O) | `logical CPU count` – `× 2` | More workers add context-switch overhead without increasing throughput |
+| I/O-bound (DB queries, external APIs) | `peak_concurrent_clients × (1 + wait_ms / cpu_ms)` | Blocked workers hold a thread; more threads = shorter queue |
+| Mixed | Start at `auto`; tune with the workers scaling benchmark | Let data decide |
+
+### Benchmark evidence — scaling curve (DAO latency, 50 concurrent clients)
+
+`Theoretical max RPS = workers × (1000 / DAO_ms)`. Results at 50 concurrent clients:
+
+| Workers | DAO=5ms RPS | DAO=30ms RPS | DAO=100ms RPS | Notes |
+|---------|-------------|--------------|---------------|-------|
+| 4       | 664         | 130          | 40            | **Saturated** at all latencies; matches theory (4×200=800, 4×33=133, 4×10=40) |
+| 8       | 1 238       | 257          | 79            | Headroom appears; avg latency drops below 50% of W=4 |
+| auto    | 1 949       | 499          | 78            | Adapts to machine CPU count; typically near-optimal |
+| 16      | 1 938       | 502          | 126           | Diminishing returns at 5ms; significant gain at 100ms |
+| 32      | 2 110       | 706          | 239           | Best raw RPS at high DAO; context-switch overhead visible at 5ms |
+
+Diagnostic rule: if `avg_latency > 2 × handler_sleep_ms`, add more workers.
+
 For pure in-memory handlers: `WorkerCount = logical CPU count × 2` is sufficient.
-For handlers that hit a database (blocking I/O): keep the default 200 or match your DB pool size.
+For handlers that hit a database (blocking I/O): start with `auto`, then tune upward if
+`avg_latency > 2 × DB_query_ms`.
+
+> For the full workers scaling matrix (W=4…32 × DAO=5/30/100ms × concurrency=10/50),
+> run `Poseidon.Benchmark.Workers` which generates HTML reports in `benchmark/bin/`.
 
 ## Changing worker count
 
