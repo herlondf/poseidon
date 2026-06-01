@@ -34,18 +34,20 @@ const
 
 type
   TBenchScenarioDef = record
-    Name:        string;
-    Description: string;
-    Endpoint:    string;
-    Method:      string;
-    Body:        string;
-    Count:       Integer;   // total de requests
-    Threads:     Integer;   // 1 = sequencial
-    WarmupCount: Integer;
+    Name:          string;
+    Description:   string;
+    Endpoint:      string;
+    Method:        string;
+    Body:          string;
+    Count:         Integer;   // total de requests
+    Threads:       Integer;   // 1 = sequencial
+    WarmupCount:   Integer;
+    DAOLatencyMs:  Integer;   // latência injetada no FakeDAO antes do cenário (0 = sem latência)
     class function Make(
       const AName, ADesc, AEndpoint, AMethod: string;
       const ACount, AThreads, AWarmup: Integer;
-      const ABody: string = ''
+      const ABody: string = '';
+      const ADAOLatencyMs: Integer = 0
     ): TBenchScenarioDef; static;
   end;
 
@@ -71,10 +73,11 @@ type
     constructor Create(const ALib: TBenchLibrary; const AScenario: string);
     destructor  Destroy; override;
 
-    procedure AddLatency(const AMs: Int64);
+    procedure AddLatency(const AUs: Int64);  // valor em microsegundos
     procedure IncError;
     function  Count:        Integer;
     function  SuccessCount: Integer;
+    function  RawLatency(const AIndex: Integer): Int64;  // µs, for copying between runs
     function  RPS:          Double;
     function  AvgMs:        Double;
     function  P50:          Int64;
@@ -94,17 +97,19 @@ implementation
 class function TBenchScenarioDef.Make(
   const AName, ADesc, AEndpoint, AMethod: string;
   const ACount, AThreads, AWarmup: Integer;
-  const ABody: string
+  const ABody: string;
+  const ADAOLatencyMs: Integer
 ): TBenchScenarioDef;
 begin
-  Result.Name        := AName;
-  Result.Description := ADesc;
-  Result.Endpoint    := AEndpoint;
-  Result.Method      := AMethod;
-  Result.Body        := ABody;
-  Result.Count       := ACount;
-  Result.Threads     := AThreads;
-  Result.WarmupCount := AWarmup;
+  Result.Name         := AName;
+  Result.Description  := ADesc;
+  Result.Endpoint     := AEndpoint;
+  Result.Method       := AMethod;
+  Result.Body         := ABody;
+  Result.Count        := ACount;
+  Result.Threads      := AThreads;
+  Result.WarmupCount  := AWarmup;
+  Result.DAOLatencyMs := ADAOLatencyMs;
 end;
 
 { TBenchMetrics }
@@ -126,11 +131,11 @@ begin
   inherited;
 end;
 
-procedure TBenchMetrics.AddLatency(const AMs: Int64);
+procedure TBenchMetrics.AddLatency(const AUs: Int64);
 begin
   FLock.Acquire;
   try
-    FLatencies.Add(AMs);
+    FLatencies.Add(AUs);  // armazenado em µs
     FSortDirty := True;
   finally
     FLock.Release;
@@ -175,6 +180,16 @@ begin
   Result := FLatencies.Count;
 end;
 
+function TBenchMetrics.RawLatency(const AIndex: Integer): Int64;
+begin
+  FLock.Acquire;
+  try
+    Result := FLatencies[AIndex];
+  finally
+    FLock.Release;
+  end;
+end;
+
 function TBenchMetrics.SuccessCount: Integer;
 begin
   Result := Max(0, Count - ErrorCount);
@@ -194,7 +209,7 @@ begin
   if Count = 0 then Exit(0);
   LSum := 0;
   for LV in FLatencies do Inc(LSum, LV);
-  Result := LSum / Count;
+  Result := (LSum / Count) / 1000.0;  // µs → ms
 end;
 
 function TBenchMetrics.P50: Int64;  begin Result := Percentile(50);  end;

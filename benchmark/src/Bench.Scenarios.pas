@@ -25,6 +25,7 @@ type
     FResults:   TObjectList<TBenchMetrics>;
     FBaseURL:   string;
     FProgress:  TProgressProc;
+    FRuns:      Integer;
 
     procedure RunScenario(
       const ADef:     TBenchScenarioDef;
@@ -52,6 +53,10 @@ type
     procedure Run;
     function  Results: TObjectList<TBenchMetrics>;
 
+    // Number of times each scenario is run; the run closest to the median RPS
+    // is kept. Default = 1 (no repetition). Odd values recommended (3, 5).
+    property Runs: Integer read FRuns write FRuns;
+
     class function DefaultScenarios: TArray<TBenchScenarioDef>;
   end;
 
@@ -67,6 +72,7 @@ begin
   inherited Create;
   FBaseURL   := ABaseURL;
   FProgress  := AProgress;
+  FRuns      := 1;
   FAdapters  := TList<IBenchAdapter>.Create;
   FScenarios := TList<TBenchScenarioDef>.Create;
   FResults   := TObjectList<TBenchMetrics>.Create(True);
@@ -151,18 +157,29 @@ begin
     TBenchScenarioDef.Make(
       'FakeDAO: GET /users/1 (fast, 5ms)',
       'Simula SELECT por PK com 5ms de latência. Workers bloqueados.',
-      '/users/1', 'GET', 50, 1, 3),
+      '/users/1', 'GET', 50, 1, 3, '', 5),
 
     TBenchScenarioDef.Make(
       'FakeDAO: GET /users (list, fast)',
       'Simula SELECT paginado com 10ms de latência (2×fast).',
-      '/users?page=1&pageSize=20', 'GET', 30, 1, 2),
+      '/users?page=1&pageSize=20', 'GET', 30, 1, 2, '', 10),
 
     // ---- Mixed / realistic workload ----
     TBenchScenarioDef.Make(
       'Mixed Load (10 threads)',
       '10 threads concorrentes em /ping. Workload realista multi-cliente.',
-      '/ping', 'GET', 700, 10, 5)
+      '/ping', 'GET', 700, 10, 5),
+
+    // ---- Worker saturation (tests pool pressure) ----
+    TBenchScenarioDef.Make(
+      'Concurrent 100 threads',
+      '100 threads × 10 requests = 1000 total. Pressão extrema no pool IOCP.',
+      '/ping', 'GET', 1000, 100, 0),
+
+    TBenchScenarioDef.Make(
+      'FakeDAO: Concurrent 20t (5ms)',
+      '20 threads × 5 requests com DAO 5ms. Worker saturation com I/O bloqueante.',
+      '/users/1', 'GET', 100, 20, 0, '', 5)
   ];
 end;
 
@@ -195,10 +212,17 @@ procedure TBenchRunner.RunScenario(
   const AAdapter: IBenchAdapter
 );
 var
-  LLib:     TBenchLibrary;
-  LMetrics: TBenchMetrics;
-  LBaseURL: string;
-  I:        Integer;
+  LLib:       TBenchLibrary;
+  LMetrics:   TBenchMetrics;
+  LBaseURL:   string;
+  I:          Integer;
+  LRuns:      Integer;
+  LCandidates: TObjectList<TBenchMetrics>;
+  LRPSList:   TArray<Double>;
+  LMedianRPS: Double;
+  LBestDist:  Double;
+  LBestIdx:   Integer;
+  LDist:      Double;
 begin
   // Mapear nome do adapter para enum
   LLib := libPoseidonAuto;
@@ -222,6 +246,10 @@ begin
   if LBaseURL = '' then
     LBaseURL := FBaseURL;
 
+  // Aplica a latência DAO configurada no cenário (0 = sem latência).
+  // Deve vir antes do Reset para que o DAO já esteja configurado no warmup.
+  AAdapter.SetDAOLatencyMs(ADef.DAOLatencyMs);
+
   // Reset antes de cenários sequenciais
   if ADef.Threads <= 1 then
     AAdapter.Reset;
@@ -240,17 +268,77 @@ begin
     end;
   end;
 
-  LMetrics.MemStart := GetWorkingSetBytes;
+  LRuns := Max(1, FRuns);
 
-  if ADef.Threads <= 1 then
-    RunSequential(ADef, AAdapter, LMetrics)
+  if LRuns = 1 then
+  begin
+    // Single run — original code path
+    LMetrics.MemStart := GetWorkingSetBytes;
+    if ADef.Threads <= 1 then
+      RunSequential(ADef, AAdapter, LMetrics)
+    else
+      RunConcurrent(ADef, AAdapter, LMetrics);
+    LMetrics.MemEnd := GetWorkingSetBytes;
+  end
   else
-    RunConcurrent(ADef, AAdapter, LMetrics);
+  begin
+    // Multi-run: collect N results, keep the run closest to median RPS.
+    LCandidates := TObjectList<TBenchMetrics>.Create(True);
+    try
+      SetLength(LRPSList, LRuns);
+      for I := 0 to LRuns - 1 do
+      begin
+        if I > 0 then
+        begin
+          // Brief pause between runs to let OS settle
+          Sleep(200);
+          if ADef.Threads <= 1 then
+            AAdapter.Reset;
+        end;
+        LCandidates.Add(TBenchMetrics.Create(LLib, ADef.Name));
+        LCandidates[I].MemStart := GetWorkingSetBytes;
+        if ADef.Threads <= 1 then
+          RunSequential(ADef, AAdapter, LCandidates[I])
+        else
+          RunConcurrent(ADef, AAdapter, LCandidates[I]);
+        LCandidates[I].MemEnd := GetWorkingSetBytes;
+        LRPSList[I] := LCandidates[I].RPS;
+        Log(Format('   [%s] run %d/%d: %.1f rps',
+          [AAdapter.Name, I + 1, LRuns, LRPSList[I]]));
+      end;
 
-  LMetrics.MemEnd := GetWorkingSetBytes;
+      // Find median RPS
+      TArray.Sort<Double>(LRPSList);
+      LMedianRPS := LRPSList[LRuns div 2];
 
-  Log(Format('   [%s] %.1f rps | avg %.1fms | p99 %dms | erros: %d',
-    [AAdapter.Name, LMetrics.RPS, LMetrics.AvgMs, LMetrics.P99, LMetrics.ErrorCount]));
+      // Pick the candidate closest to the median
+      LBestIdx  := 0;
+      LBestDist := Abs(LCandidates[0].RPS - LMedianRPS);
+      for I := 1 to LCandidates.Count - 1 do
+      begin
+        LDist := Abs(LCandidates[I].RPS - LMedianRPS);
+        if LDist < LBestDist then
+        begin
+          LBestDist := LDist;
+          LBestIdx  := I;
+        end;
+      end;
+
+      // Copy winner into the pre-allocated LMetrics slot in FResults
+      LMetrics.TotalMs   := LCandidates[LBestIdx].TotalMs;
+      LMetrics.ErrorCount := LCandidates[LBestIdx].ErrorCount;
+      LMetrics.MemStart  := LCandidates[LBestIdx].MemStart;
+      LMetrics.MemEnd    := LCandidates[LBestIdx].MemEnd;
+      // Re-add all latencies from the winning run
+      for I := 0 to LCandidates[LBestIdx].Count - 1 do
+        LMetrics.AddLatency(LCandidates[LBestIdx].RawLatency(I));
+    finally
+      LCandidates.Free;
+    end;
+  end;
+
+  Log(Format('   [%s] %.1f rps | avg %.2fms | p99 %.2fms | erros: %d',
+    [AAdapter.Name, LMetrics.RPS, LMetrics.AvgMs, LMetrics.P99 / 1000.0, LMetrics.ErrorCount]));
 end;
 
 procedure TBenchRunner.RunSequential(
@@ -272,7 +360,7 @@ begin
   begin
     try
       LMs := AAdapter.Execute(LBaseURL + ADef.Endpoint, ADef.Method, ADef.Body);
-      AMetrics.AddLatency(LMs);
+      AMetrics.AddLatency(LMs);  // já em µs
     except
       on E: Exception do
       begin
@@ -349,7 +437,7 @@ begin
             begin
               try
                 LMs := LClone.Execute(LURL, LMeth, LBody);
-                AMetrics.AddLatency(LMs);
+                AMetrics.AddLatency(LMs);  // já em µs
               except
                 on E: Exception do
                 begin

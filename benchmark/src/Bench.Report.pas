@@ -154,7 +154,7 @@ end;
 function TBenchReport.FormatMs(const V: Int64): string;
 begin
   if V < 0 then Result := '&mdash;'
-  else Result := IntToStr(V) + ' ms';
+  else Result := Format('%.2f ms', [V / 1000.0]);  // V em µs → exibir em ms
 end;
 
 function TBenchReport.FormatMsd(const V: Double): string;
@@ -345,7 +345,7 @@ begin
 
   for LLib := Low(TBenchLibrary) to High(TBenchLibrary) do
   begin
-    LM := ResultFor(LLib, 'Sequential GET');
+    LM := ResultFor(LLib, 'Payload: Tiny (28 B)');
     if (LM <> nil) and not LM.Skipped and (LM.RPS > LBestRPSVal) then
     begin
       LBestRPSVal := LM.RPS;
@@ -367,7 +367,7 @@ begin
 
   for LLib := Low(TBenchLibrary) to High(TBenchLibrary) do
   begin
-    LM := ResultFor(LLib, 'Sequential GET');
+    LM := ResultFor(LLib, 'Payload: Tiny (28 B)');
     if (LM <> nil) and not LM.Skipped and (LM.P99 < LMinP99) and (LM.P99 > 0) then
     begin
       LMinP99     := LM.P99;
@@ -471,9 +471,9 @@ begin
       end else
       begin
         LRps.Append(Format('%.1f', [LM.RPS]).Replace(',', '.'));
-        LP50.Append(IntToStr(LM.P50));
-        LP95.Append(IntToStr(LM.P95));
-        LP99.Append(IntToStr(LM.P99));
+        LP50.Append(Format('%.2f', [LM.P50 / 1000.0]).Replace(',', '.'));
+        LP95.Append(Format('%.2f', [LM.P95 / 1000.0]).Replace(',', '.'));
+        LP99.Append(Format('%.2f', [LM.P99 / 1000.0]).Replace(',', '.'));
       end;
     end;
 
@@ -682,7 +682,7 @@ var
   LFirst:    Boolean;
   I:         Integer;
 begin
-  LScens[0] := 'Sequential GET';
+  LScens[0] := 'Payload: Tiny (28 B)';
   LScens[1] := 'Concurrent 10 threads';
   LScens[2] := 'Concurrent 50 threads';
 

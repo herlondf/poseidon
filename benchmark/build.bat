@@ -27,5 +27,26 @@ if %ERRORLEVEL% equ 0 (
 ) else (
   echo.
   echo ERRO na compilacao. Codigo: %ERRORLEVEL%
+  exit /b %ERRORLEVEL%
+)
+
+%DCC64% ^
+  --no-config ^
+  -B ^
+  -CC ^
+  -DRELEASE ^
+  "-NSSystem;Xml;Data;Datasnap;Web;Soap;Winapi;System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win" ^
+  "-U%BDS%\lib\Win64\release;.\src;..\src" ^
+  "-I.\src;..\src" ^
+  -E.\bin ^
+  "-N0.\dcu\Release" ^
+  Poseidon.Benchmark.Workers.dpr
+
+if %ERRORLEVEL% equ 0 (
+  echo.
+  echo Compilacao concluida: bin\Poseidon.Benchmark.Workers.exe
+) else (
+  echo.
+  echo ERRO na compilacao. Codigo: %ERRORLEVEL%
 )
 endlocal

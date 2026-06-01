@@ -68,6 +68,7 @@ begin
     LRunner := TBenchRunner.Create('',
       procedure(const AMsg: string) begin WriteLn(AMsg); end);
     try
+      LRunner.Runs := 5;  // 5-run median — eliminates run-to-run OS warmup variance
       LRunner.AddAdapter(LW4);
       LRunner.AddAdapter(LAuto);
       LRunner.AddAdapter(LGzip);

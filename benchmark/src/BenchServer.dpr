@@ -19,6 +19,7 @@ uses
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
+  System.Generics.Collections,
 {$IFDEF POSEIDON}
   Poseidon.Net.Types,
   Poseidon.Net.HttpServer,
@@ -44,8 +45,10 @@ var
 begin
   LFields := '';
   for I := 1 to 20 do
+  begin
+    if I > 1 then LFields := LFields + ',';
     LFields := LFields + Format('"field%d":"value%d"', [I, I]);
-    if I < 20 then LFields := LFields + ',';
+  end;
   Result := '{' + LFields + '}';
 end;
 
@@ -68,9 +71,10 @@ end;
 // Poseidon handler
 // ---------------------------------------------------------------------------
 var
-  GMedium:   TBytes;
-  GLarge:    TBytes;
-  GDAO:      TFakeDAO;
+  GMedium:    TBytes;
+  GLarge:     TBytes;
+  GDAO:       TFakeDAO;
+  GStopEvent: TEvent;
 
 procedure HandleRequest(
   const AReq:          TPoseidonNativeRequest;
@@ -80,6 +84,7 @@ procedure HandleRequest(
   out   AExtraHeaders: TArray<TPair<string,string>>);
 var
   LUptime: Int64;
+  LRec:    TFakeUserRecord;
 begin
   AStatus       := 200;
   AContentType  := 'application/json';
@@ -99,7 +104,7 @@ begin
   end
   else if (AReq.Method = 'POST') and (AReq.Path = '/dao/slow') then
   begin
-    GDAO.FindByID(1, nil^);  // blocks for DAO_LATENCY_SEFAZ ms
+    GDAO.FindByID(1, LRec);  // blocks for DAO_LATENCY_SEFAZ ms
     ABody := TEncoding.UTF8.GetBytes('{"ok":true}');
   end
   else if AReq.Path = '/status' then
@@ -122,19 +127,28 @@ var
   LReady:  TEvent;
 begin
   WriteLn('BenchServer [Poseidon] starting on port ' + IntToStr(HTTP_PORT));
-  LReady  := TEvent.Create(nil, True, False, '');
-  GMedium := TEncoding.UTF8.GetBytes(MediumJSON);
-  GLarge  := TEncoding.UTF8.GetBytes(LargeJSON);
-  GDAO    := TFakeDAO.Create(DAO_LATENCY_SEFAZ);
-  GStartedAt := Now;
-  LServer := TPoseidonNativeServer.Create;
+  LReady      := TEvent.Create(nil, True, False, '');
+  GStopEvent  := TEvent.Create(nil, True, False, '');
+  GMedium     := TEncoding.UTF8.GetBytes(MediumJSON);
+  GLarge      := TEncoding.UTF8.GetBytes(LargeJSON);
+  GDAO        := TFakeDAO.Create(DAO_LATENCY_SEFAZ);
+  GStartedAt  := Now;
+  LServer     := TPoseidonNativeServer.Create;
   try
-    LServer.Listen('0.0.0.0', HTTP_PORT, HandleRequest,
+    LServer.Listen('0.0.0.0', HTTP_PORT,
+      procedure(const AReq: TPoseidonNativeRequest; out AStatus: Integer;
+        out AContentType: string; out ABody: TBytes;
+        out AExtraHeaders: TArray<TPair<string,string>>)
+      begin
+        HandleRequest(AReq, AStatus, AContentType, ABody, AExtraHeaders);
+      end,
       procedure begin LReady.SetEvent; WriteLn('Listening.'); end);
+    GStopEvent.WaitFor(INFINITE);  // Block until Docker SIGTERM kills process
   finally
     LServer.Free;
     GDAO.Free;
     LReady.Free;
+    GStopEvent.Free;
   end;
 end;
 {$ENDIF}

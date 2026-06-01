@@ -23,6 +23,7 @@ uses
   System.Classes,
   System.SyncObjs,
   System.Generics.Collections,
+  System.Generics.Defaults,
   Poseidon.Net.Types,
   Poseidon.Net.HttpServer,
   Bench.FakeDAO;

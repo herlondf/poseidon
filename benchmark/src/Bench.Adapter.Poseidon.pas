@@ -52,6 +52,7 @@ type
 
     function Execute(const AURL, AMethod: string; const ABody: string = ''): Int64;
     procedure Reset;
+    procedure SetDAOLatencyMs(const AMs: Integer);
     function Name: string;
     function IsAvailable: Boolean; virtual;
     function Clone: IBenchAdapter; virtual; abstract;
@@ -208,7 +209,8 @@ begin
       LStream.Free;
     end;
   end;
-  Result := LSW.ElapsedMilliseconds;
+  // Retorna µs com resolução real de TStopwatch (evita truncamento para 0 em sub-ms)
+  Result := LSW.ElapsedTicks * 1000000 div TStopwatch.Frequency;
 end;
 
 procedure TBenchAdapterPoseidonBase.Reset;
@@ -217,6 +219,11 @@ begin
   FClient := THTTPClient.Create;
   FClient.HandleRedirects := False;
   AcceptAllCerts;
+end;
+
+procedure TBenchAdapterPoseidonBase.SetDAOLatencyMs(const AMs: Integer);
+begin
+  FServer.SetDAOLatencyMs(AMs);
 end;
 
 function TBenchAdapterPoseidonBase.Name: string;

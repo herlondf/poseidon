@@ -6,15 +6,15 @@ program Poseidon.Benchmark.Workers;
 //
 // Answers: "how many workers do I need for an API with ~Xms DB queries?"
 //
-// Matrix (24 combinations):
-//   Workers: 4, auto (8), 16, 32
+// Matrix (30 combinations):
+//   Workers: 4, auto (~8), 8, 16, 32
 //   DAO Latency: 5ms (fast), 30ms (medium), 100ms (slow)
 //   Concurrency: 10, 50 clients
 //
 // Theoretical max RPS = Workers * (1000 / LatencyMs).
 // Report shows actual RPS as % of theoretical max.
 //
-// Generates: benchmark\bin\poseidon-bench-workers.html
+// Generates: benchmark\bin\poseidon-bench-workers-dao<N>ms.html
 
 uses
   System.SysUtils,
@@ -43,12 +43,12 @@ type
 
 procedure RunWorkerMatrix;
 var
-  LWorkerConfigs:  array[0..3] of TWorkerConfig;
+  LWorkerConfigs:  array[0..4] of TWorkerConfig;
   LLatencyConfigs: array[0..2] of TLatencyConfig;
   LConcurrencies:  array[0..1] of Integer;
   LWI, LLI, LCI:  Integer;
   LPort:           Integer;
-  LAdapters:       array[0..3] of IBenchAdapter;  // one per worker config
+  LAdapters:       array[0..4] of IBenchAdapter;  // one per worker config
   LRunner:         TBenchRunner;
   LReport:         TBenchReport;
   LScenarios:      TArray<TBenchScenarioDef>;
@@ -57,8 +57,9 @@ var
 begin
   LWorkerConfigs[0].Workers := 4;      LWorkerConfigs[0].Label_ := 'W=4';
   LWorkerConfigs[1].Workers := 0;      LWorkerConfigs[1].Label_ := 'W=auto';
-  LWorkerConfigs[2].Workers := 16;     LWorkerConfigs[2].Label_ := 'W=16';
-  LWorkerConfigs[3].Workers := 32;     LWorkerConfigs[3].Label_ := 'W=32';
+  LWorkerConfigs[2].Workers := 8;      LWorkerConfigs[2].Label_ := 'W=8';
+  LWorkerConfigs[3].Workers := 16;     LWorkerConfigs[3].Label_ := 'W=16';
+  LWorkerConfigs[4].Workers := 32;     LWorkerConfigs[4].Label_ := 'W=32';
 
   LLatencyConfigs[0].Ms := DAO_LATENCY_FAST;   LLatencyConfigs[0].Label_ := 'DAO=5ms';
   LLatencyConfigs[1].Ms := DAO_LATENCY_MEDIUM; LLatencyConfigs[1].Label_ := 'DAO=30ms';
@@ -80,7 +81,7 @@ begin
     WriteLn(Format('--- DAO latency: %dms ---', [LLatencyConfigs[LLI].Ms]));
 
     // Spin up one server per worker config
-    for LWI := 0 to 3 do
+    for LWI := 0 to 4 do
     begin
       LAdapters[LWI] := TBenchAdapterConfigurable.Create(
         LWorkerConfigs[LWI].Label_ + ' / ' + LLatencyConfigs[LLI].Label_,
@@ -108,7 +109,9 @@ begin
         '/users/1', 'GET',
         LConcurrencies[LCI] * 20,  // total requests
         LConcurrencies[LCI],        // threads
-        5                           // warmup
+        5,                          // warmup
+        '',                         // body
+        LLatencyConfigs[LLI].Ms     // DAOLatencyMs — must match adapter config
       );
     end;
 
@@ -116,7 +119,7 @@ begin
     LRunner := TBenchRunner.Create('',
       procedure(const AMsg: string) begin WriteLn(AMsg); end);
     try
-      for LWI := 0 to 3 do
+      for LWI := 0 to 4 do
         LRunner.AddAdapter(LAdapters[LWI]);
       for LCI := 0 to High(LConcurrencies) do
         LRunner.AddScenario(LScenarios[LCI]);
@@ -143,9 +146,9 @@ begin
     end;
 
     // Clean up adapters (servers) for this latency batch
-    for LWI := 0 to 3 do
+    for LWI := 0 to 4 do
       LAdapters[LWI] := nil;
-    LPort := LPort + 4;
+    LPort := LPort + 5;
     WriteLn;
   end;
 
