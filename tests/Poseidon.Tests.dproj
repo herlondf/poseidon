@@ -71,6 +71,7 @@
     <DCCReference Include="Poseidon.Tests.SerializerCookies.pas"/>
     <DCCReference Include="Poseidon.Tests.StabilityMiddleware.pas"/>
     <DCCReference Include="Poseidon.Tests.StaticMetrics.pas"/>
+    <DCCReference Include="Poseidon.Tests.HorseCompat.pas"/>
     <DCCReference Include="mocks\Poseidon.Mock.SSLProvider.pas"/>
     <DCCReference Include="mocks\Poseidon.Mock.WebRequest.pas"/>
     <DCCReference Include="mocks\Poseidon.Mock.WebResponse.pas"/>

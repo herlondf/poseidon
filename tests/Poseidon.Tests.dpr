@@ -34,6 +34,8 @@ uses
   Poseidon.Tests.SerializerCookies,
   Poseidon.Tests.StabilityMiddleware,
   Poseidon.Tests.StaticMetrics,
+  // Horse compatibility tests
+  Poseidon.Tests.HorseCompat,
   // Mocks
   Poseidon.Mock.SSLProvider,
   Poseidon.Mock.WebRequest,

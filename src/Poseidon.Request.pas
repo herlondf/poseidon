@@ -26,6 +26,8 @@ type
     FCookie: TPoseidonParam;
     FContentFields: TPoseidonParam;
     FBody: TObject;
+    FSession: TObject;
+    FOwnsSession: Boolean;
     procedure InitHeaders;
     procedure InitQuery;
     procedure InitCookie;
@@ -69,9 +71,14 @@ type
 
     function RawWebRequest: TWebRequest;
 
+    // --- Horse compatibility: Session ---
+    // Stores a per-request session object (JWT middleware sets this).
+    // Session<T> retrieves; Session(obj) stores. Matches Horse API exactly.
+    function Session<T: class>: T; overload;
+    function Session(const ASession: TObject): TPoseidonRequest; overload;
+
     // --- Horse compatibility aliases ---
     // These methods allow Horse middlewares and handlers to work without changes.
-    // Req.Body → Req.RawBody; Req.Body<T> → Req.GetBody<T>
     function Body: string; overload;
     function Body<T: class>: T; overload;
     function Body(const ABody: TObject): TPoseidonRequest; overload;
@@ -81,7 +88,9 @@ implementation
 
 constructor TPoseidonRequest.Create(AWebRequest: TWebRequest);
 begin
-  FWebRequest := AWebRequest;
+  FWebRequest    := AWebRequest;
+  FSession       := nil;
+  FOwnsSession   := False;
 end;
 
 destructor TPoseidonRequest.Destroy;
@@ -92,6 +101,8 @@ begin
   FCookie.Free;
   FContentFields.Free;
   FBody.Free;
+  if FOwnsSession then
+    FSession.Free;
   inherited;
 end;
 
@@ -334,6 +345,11 @@ begin
   end;
   FBody.Free;
   FBody := nil;
+  if FOwnsSession then
+    FreeAndNil(FSession)
+  else
+    FSession := nil;
+  FOwnsSession := False;
 end;
 
 function TPoseidonRequest.GetSignedCookie(const AName, ASecret: string;
@@ -346,6 +362,23 @@ begin
   LRaw := Cookie.Get(AName);
   if LRaw = '' then Exit;
   Result := TCookieFormat.VerifySigned(LRaw, ASecret, AValue);
+end;
+
+// --- Horse compatibility: Session ---
+
+function TPoseidonRequest.Session<T>: T;
+begin
+  Result := T(FSession);
+end;
+
+function TPoseidonRequest.Session(const ASession: TObject): TPoseidonRequest;
+begin
+  // If a previous session was set and we own it, free it first
+  if FOwnsSession and (FSession <> nil) and (FSession <> ASession) then
+    FSession.Free;
+  FSession     := ASession;
+  FOwnsSession := True;
+  Result       := Self;
 end;
 
 // --- Horse compatibility aliases ---

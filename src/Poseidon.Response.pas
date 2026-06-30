@@ -19,6 +19,7 @@ type
     FRawBody:        TBytes;
     FRawContentType: string;
     FHasRawBody:     Boolean;
+    FContent:        TObject;
 
     function SerializeToJSON(AObject: TObject): TJSONObject;
   public
@@ -335,6 +336,7 @@ begin
   FRawBody        := nil;
   FRawContentType := '';
   FHasRawBody     := False;
+  FContent        := nil;  // do not free — caller owns Content objects
 end;
 
 { W4: raw-bytes body helpers }
@@ -435,14 +437,13 @@ end;
 
 function TPoseidonResponse.Content: TObject;
 begin
-  Result := nil;  // Poseidon doesn't store content object; return nil for compat
+  Result := FContent;
 end;
 
 function TPoseidonResponse.Content(const AContent: TObject): TPoseidonResponse;
 begin
-  // Horse stores the content object for later retrieval. Poseidon doesn't need
-  // this pattern but we accept the call silently for compatibility.
-  Result := Self;
+  FContent := AContent;
+  Result   := Self;
 end;
 
 end.
