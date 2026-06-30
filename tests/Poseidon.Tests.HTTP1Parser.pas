@@ -40,6 +40,11 @@ type
     [Test] procedure Smuggling_CLAndChunked_ReturnsBadRequest;
     [Test] procedure AccumBufShifted_AfterParse;
     [Test] procedure PipelinedRequests_OnlyFirstConsumed;
+    // Fase 4: edge cases
+    [Test] procedure HeaderSize_ExactlyAtLimit_Accepted;
+    [Test] procedure EmptyBody_POST_ContentLength0;
+    [Test] procedure QueryString_EncodedChars_Preserved;
+    [Test] procedure HTTP10_NoConnectionHeader_KeepAliveIsFalse;
   end;
 
   [TestFixture]
@@ -407,6 +412,93 @@ begin
     LMethod, LPath, LQS, LHeaders, LBody, LKeep, LConsumed, LBad));
   Assert.AreEqual('/first', LPath);
   CheckInt(Length(MakeReq(LReq1)), LConsumed);
+end;
+
+// ---------------------------------------------------------------------------
+// Fase 4: ParseHTTP1Request edge cases
+// ---------------------------------------------------------------------------
+
+procedure THTTP1ParseRequestTests.HeaderSize_ExactlyAtLimit_Accepted;
+// Headers that fit exactly within the max header size must be accepted.
+var
+  LBuf:      TBytes;
+  LMethod, LPath, LQS: string;
+  LHeaders:  TArray<TPair<string,string>>;
+  LBody:     TBytes;
+  LKeep:     Boolean;
+  LConsumed: Integer;
+  LBad:      Boolean;
+  LReq:      string;
+  LLimit:    Integer;
+begin
+  LReq   := 'GET / HTTP/1.1'#13#10'Host: x'#13#10#13#10;
+  LLimit := Length(TEncoding.ASCII.GetBytes(LReq));  // exactly header size
+  LBuf   := TEncoding.ASCII.GetBytes(LReq);
+
+  Assert.IsTrue(ParseHTTP1Request(LBuf, Length(LBuf), LLimit, 8388608,
+    LMethod, LPath, LQS, LHeaders, LBody, LKeep, LConsumed, LBad),
+    'Request that fits exactly in MaxHeaderSize must be accepted');
+  Assert.IsFalse(LBad);
+end;
+
+procedure THTTP1ParseRequestTests.EmptyBody_POST_ContentLength0;
+// POST with Content-Length: 0 is valid — body should be empty, not incomplete.
+var
+  LBuf:      TBytes;
+  LMethod, LPath, LQS: string;
+  LHeaders:  TArray<TPair<string,string>>;
+  LBody:     TBytes;
+  LKeep:     Boolean;
+  LConsumed: Integer;
+  LBad:      Boolean;
+begin
+  LBuf := MakeReq(
+    'POST /api HTTP/1.1'#13#10 +
+    'Content-Length: 0'#13#10 +
+    'Host: x'#13#10 +
+    #13#10);
+  Assert.IsTrue(ParseHTTP1Request(LBuf, Length(LBuf), 65536, 8388608,
+    LMethod, LPath, LQS, LHeaders, LBody, LKeep, LConsumed, LBad),
+    'POST with Content-Length: 0 must be accepted as complete');
+  Assert.IsFalse(LBad);
+  Assert.AreEqual('POST', LMethod);
+  CheckInt(0, Length(LBody), 'Body must be empty for Content-Length: 0');
+end;
+
+procedure THTTP1ParseRequestTests.QueryString_EncodedChars_Preserved;
+// Percent-encoded characters in query string must be preserved as-is.
+var
+  LBuf:      TBytes;
+  LMethod, LPath, LQS: string;
+  LHeaders:  TArray<TPair<string,string>>;
+  LBody:     TBytes;
+  LKeep:     Boolean;
+  LConsumed: Integer;
+  LBad:      Boolean;
+begin
+  LBuf := MakeReq('GET /api?name=Jo%C3%A3o&city=S%C3%A3o%20Paulo HTTP/1.1'#13#10 +
+    'Host: x'#13#10#13#10);
+  Assert.IsTrue(ParseHTTP1Request(LBuf, Length(LBuf), 65536, 8388608,
+    LMethod, LPath, LQS, LHeaders, LBody, LKeep, LConsumed, LBad));
+  Assert.AreEqual('name=Jo%C3%A3o&city=S%C3%A3o%20Paulo', LQS,
+    'Percent-encoded query string must be preserved verbatim');
+end;
+
+procedure THTTP1ParseRequestTests.HTTP10_NoConnectionHeader_KeepAliveIsFalse;
+// HTTP/1.0 without explicit Connection header defaults to close.
+var
+  LBuf:      TBytes;
+  LMethod, LPath, LQS: string;
+  LHeaders:  TArray<TPair<string,string>>;
+  LBody:     TBytes;
+  LKeep:     Boolean;
+  LConsumed: Integer;
+  LBad:      Boolean;
+begin
+  LBuf := MakeReq('GET / HTTP/1.0'#13#10'Host: x'#13#10#13#10);
+  Assert.IsTrue(ParseHTTP1Request(LBuf, Length(LBuf), 65536, 8388608,
+    LMethod, LPath, LQS, LHeaders, LBody, LKeep, LConsumed, LBad));
+  Assert.IsFalse(LKeep, 'HTTP/1.0 without Connection header must default to close');
 end;
 
 // ---------------------------------------------------------------------------

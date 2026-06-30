@@ -22,6 +22,9 @@ uses
   Poseidon.Tests.Metrics,
   Poseidon.Tests.Dispatcher,
   Poseidon.Tests.WebAdapters,
+  Poseidon.Tests.Connection,
+  Poseidon.Tests.Workers,
+  Poseidon.Tests.PoolNative,
   Poseidon.Mock.SSLProvider;
 
 var

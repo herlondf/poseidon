@@ -3,10 +3,13 @@ unit Poseidon.Tests.WebAdapters;
 // DUnitX unit tests for Poseidon.Net.WebAdapters.Native.
 //
 // Coverage:
-//   TNativeWebRequest.Reset — pool reuse: QueryFields cache is invalidated and
-//     repopulated from the new request's QueryString on every Reset call.
-//   TNativeWebResponse.CommitResponse — when ContentType is not set, FOnFlush
-//     receives AContentType = '' (not a default value like 'text/plain').
+//   TNativeWebRequest.Reset — pool reuse cache invalidation (QueryFields,
+//     CookieFields, MethodType).
+//   TNativeWebRequest.GetStringVariable — all supported SV indices.
+//   TNativeWebRequest.GetFieldByName — ALL_RAW ISAPI convention.
+//   TNativeWebRequest.ReadClient / ReadString — body reading.
+//   TNativeWebResponse.CommitResponse — ContentType, ContentStream, headers.
+//   TNativeWebResponse.Reset — state isolation.
 
 interface
 
@@ -18,9 +21,30 @@ type
   [TestFixture]
   TNativeWebRequestTests = class
   public
+    // --- Pool reuse (Reset) ---
     [Test] procedure Reset_AfterEmptyQS_ReadsNewQueryParams;
     [Test] procedure Reset_AfterNonEmptyQS_StaleParamsNotBleedThrough;
     [Test] procedure Reset_EmptyQS_ClearsPreviousParams;
+    [Test] procedure Reset_CookieFields_NotBleedThrough;
+    [Test] procedure Reset_MethodType_UpdatedCorrectly;
+    // --- GetStringVariable ---
+    [Test] procedure GetStringVariable_Method_ReturnsCorrect;
+    [Test] procedure GetStringVariable_PathWithQS_ReturnsFullURI;
+    [Test] procedure GetStringVariable_QueryString_ReturnsOnly;
+    [Test] procedure GetStringVariable_PathInfo_ReturnsPathOnly;
+    [Test] procedure GetStringVariable_Host_ReturnsHeader;
+    [Test] procedure GetStringVariable_ContentType_ReturnsHeader;
+    [Test] procedure GetStringVariable_RemoteAddr_ReturnsIP;
+    [Test] procedure GetStringVariable_Cookie_ReturnsHeader;
+    [Test] procedure GetStringVariable_Authorization_ReturnsHeader;
+    [Test] procedure GetStringVariable_UnknownIndex_ReturnsEmpty;
+    // --- GetFieldByName ---
+    [Test] procedure GetFieldByName_AllRaw_ReturnsAllHeaders;
+    [Test] procedure GetFieldByName_SpecificHeader_ReturnsValue;
+    // --- ReadClient / ReadString ---
+    [Test] procedure ReadClient_ReturnsBodyBytes;
+    [Test] procedure ReadString_ReturnsUTF8Body;
+    [Test] procedure ReadClient_EmptyBody_ReturnsZero;
   end;
 
   [TestFixture]
@@ -28,6 +52,11 @@ type
   public
     [Test] procedure CommitResponse_NoContentTypeSet_FlushesEmptyString;
     [Test] procedure CommitResponse_ContentTypeSet_FlushesCorrectValue;
+    [Test] procedure CommitResponse_WithContentStream_FlushesStreamData;
+    [Test] procedure CommitResponse_WithCustomHeaders_FlushesAll;
+    [Test] procedure Reset_ClearsAllState;
+    [Test] procedure CommitResponse_CalledOnce_FlushesOnce;
+    [Test] procedure SendRedirect_FlushesLocationHeader;
   end;
   {$M-}
 
@@ -35,11 +64,12 @@ implementation
 
 uses
   System.SysUtils,
+  System.Classes,
   System.Generics.Collections,
   Poseidon.Net.Types,
   Poseidon.Net.WebAdapters.Native;
 
-function MakeReq(const APath, AQueryString: string): TPoseidonNativeRequest;
+function MakeReq(const APath, AQueryString: string): TPoseidonNativeRequest; overload;
 begin
   Result.Method      := 'GET';
   Result.Path        := APath;
@@ -48,6 +78,19 @@ begin
   Result.RemoteAddr  := '127.0.0.1';
   Result.KeepAlive   := False;
   Result.Headers     := [];
+end;
+
+function MakeReq(const AMethod, APath, AQueryString: string;
+  const AHeaders: TArray<TPair<string,string>>;
+  const ABody: TBytes): TPoseidonNativeRequest; overload;
+begin
+  Result.Method      := AMethod;
+  Result.Path        := APath;
+  Result.QueryString := AQueryString;
+  Result.RawBody     := ABody;
+  Result.RemoteAddr  := '10.0.0.42:54321';
+  Result.KeepAlive   := True;
+  Result.Headers     := AHeaders;
 end;
 
 // ---------------------------------------------------------------------------
@@ -131,6 +174,291 @@ begin
   end;
 end;
 
+procedure TNativeWebRequestTests.Reset_CookieFields_NotBleedThrough;
+// Pool reuse: first request has Cookie header, second does not.
+// CookieFields must NOT carry stale values from the first request.
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('GET', '/api', '', [
+      TPair<string,string>.Create('Cookie', 'session=abc123; theme=dark')
+    ], []));
+  try
+    // Force lazy init of FCookieFields
+    Assert.AreEqual('abc123', LWebReq.CookieFields.Values['session'],
+      'session cookie must be present on first request');
+
+    // Pool reuse: new request without cookies
+    LWebReq.Reset(MakeReq('/ping', ''));
+
+    Assert.AreEqual('', LWebReq.CookieFields.Values['session'],
+      'session cookie must not bleed through after Reset');
+    Assert.AreEqual('', LWebReq.CookieFields.Values['theme'],
+      'theme cookie must not bleed through after Reset');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.Reset_MethodType_UpdatedCorrectly;
+// Pool reuse: GET request reused for POST must reflect POST in MethodType.
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(MakeReq('/api', ''));
+  try
+    Assert.AreEqual('GET', LWebReq.Method, 'Initial method must be GET');
+
+    LWebReq.Reset(MakeReq('POST', '/api/data', '',
+      [TPair<string,string>.Create('Content-Type', 'application/json')],
+      TEncoding.UTF8.GetBytes('{"x":1}')));
+
+    Assert.AreEqual('POST', LWebReq.Method, 'Method must be POST after Reset');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetStringVariable_Method_ReturnsCorrect;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('DELETE', '/item/42', '', [], []));
+  try
+    // SV index 0 = Method
+    Assert.AreEqual('DELETE', LWebReq.MethodType.ToString);
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetStringVariable_PathWithQS_ReturnsFullURI;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(MakeReq('/search', 'q=hello'));
+  try
+    // SV index 2 = URL (path + query string)
+    Assert.AreEqual('/search?q=hello', LWebReq.URL,
+      'URL must include path and query string');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetStringVariable_QueryString_ReturnsOnly;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(MakeReq('/api', 'key=val&n=1'));
+  try
+    // SV index 3 = Query
+    Assert.AreEqual('key=val&n=1', LWebReq.Query,
+      'Query must return only the query string');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetStringVariable_PathInfo_ReturnsPathOnly;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(MakeReq('/empresa/123/nfce', 'page=1'));
+  try
+    // SV index 4/5 = PathInfo
+    Assert.AreEqual('/empresa/123/nfce', LWebReq.PathInfo,
+      'PathInfo must return path without query string');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetStringVariable_Host_ReturnsHeader;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('GET', '/api', '', [
+      TPair<string,string>.Create('Host', 'app.docfiscall.com.br')
+    ], []));
+  try
+    Assert.AreEqual('app.docfiscall.com.br', LWebReq.Host,
+      'Host must come from Host header');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetStringVariable_ContentType_ReturnsHeader;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('POST', '/data', '', [
+      TPair<string,string>.Create('Content-Type', 'application/json; charset=utf-8')
+    ], TEncoding.UTF8.GetBytes('{}')));
+  try
+    Assert.AreEqual('application/json; charset=utf-8', LWebReq.ContentType,
+      'ContentType must match Content-Type header');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetStringVariable_RemoteAddr_ReturnsIP;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('GET', '/', '', [], []));
+  try
+    // SV index 21/22 = RemoteAddr
+    Assert.AreEqual('10.0.0.42:54321', LWebReq.RemoteAddr,
+      'RemoteAddr must return client IP:port');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetStringVariable_Cookie_ReturnsHeader;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('GET', '/', '', [
+      TPair<string,string>.Create('Cookie', 'sid=xyz; lang=pt')
+    ], []));
+  try
+    // SV index 27 = Cookie
+    Assert.AreEqual('sid=xyz; lang=pt', LWebReq.Cookie,
+      'Cookie must return Cookie header value');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetStringVariable_Authorization_ReturnsHeader;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('GET', '/secure', '', [
+      TPair<string,string>.Create('Authorization', 'Bearer tok123')
+    ], []));
+  try
+    // SV index 28 = Authorization
+    Assert.AreEqual('Bearer tok123', LWebReq.Authorization,
+      'Authorization must return Authorization header value');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetStringVariable_UnknownIndex_ReturnsEmpty;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(MakeReq('/', ''));
+  try
+    // SV index 99 = unknown
+    Assert.AreEqual('', LWebReq.GetStringVariable(99),
+      'Unknown SV index must return empty string');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetFieldByName_AllRaw_ReturnsAllHeaders;
+var
+  LWebReq: TNativeWebRequest;
+  LRaw: string;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('GET', '/', '', [
+      TPair<string,string>.Create('Host', 'localhost'),
+      TPair<string,string>.Create('Accept', '*/*'),
+      TPair<string,string>.Create('X-Custom', 'value')
+    ], []));
+  try
+    LRaw := LWebReq.GetFieldByName('ALL_RAW');
+    Assert.IsTrue(Pos('Host: localhost', LRaw) > 0, 'ALL_RAW must contain Host header');
+    Assert.IsTrue(Pos('Accept: */*', LRaw) > 0, 'ALL_RAW must contain Accept header');
+    Assert.IsTrue(Pos('X-Custom: value', LRaw) > 0, 'ALL_RAW must contain X-Custom header');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.GetFieldByName_SpecificHeader_ReturnsValue;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('GET', '/', '', [
+      TPair<string,string>.Create('X-Request-ID', '12345')
+    ], []));
+  try
+    Assert.AreEqual('12345', LWebReq.GetFieldByName('X-Request-ID'),
+      'GetFieldByName must return the matching header value');
+    Assert.AreEqual('', LWebReq.GetFieldByName('X-Missing'),
+      'GetFieldByName for absent header must return empty string');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.ReadClient_ReturnsBodyBytes;
+var
+  LWebReq: TNativeWebRequest;
+  LBuf: array[0..255] of Byte;
+  LRead: Integer;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('POST', '/data', '', [],
+      TEncoding.UTF8.GetBytes('Hello World')));
+  try
+    LRead := LWebReq.ReadClient(LBuf, SizeOf(LBuf));
+    Assert.AreEqual(11, LRead, 'ReadClient must return number of bytes read');
+    Assert.AreEqual('Hello World',
+      TEncoding.UTF8.GetString(TBytes(@LBuf), 0, LRead),
+      'ReadClient must copy body bytes into buffer');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.ReadString_ReturnsUTF8Body;
+var
+  LWebReq: TNativeWebRequest;
+begin
+  LWebReq := TNativeWebRequest.Create(
+    MakeReq('POST', '/data', '', [],
+      TEncoding.UTF8.GetBytes('Texto UTF-8')));
+  try
+    Assert.AreEqual('Texto UTF-8', LWebReq.ReadString(100),
+      'ReadString must return UTF-8 decoded body');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebRequestTests.ReadClient_EmptyBody_ReturnsZero;
+var
+  LWebReq: TNativeWebRequest;
+  LBuf: array[0..31] of Byte;
+begin
+  LWebReq := TNativeWebRequest.Create(MakeReq('/', ''));
+  try
+    Assert.AreEqual(0, LWebReq.ReadClient(LBuf, SizeOf(LBuf)),
+      'ReadClient with empty body must return 0');
+  finally
+    LWebReq.Free;
+  end;
+end;
+
 // ---------------------------------------------------------------------------
 // TNativeWebResponseTests
 // ---------------------------------------------------------------------------
@@ -198,6 +526,192 @@ begin
 
     Assert.AreEqual('application/json', LFlushedCT,
       'AContentType must match the explicitly assigned ContentType');
+  finally
+    LWebResp.Free;
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebResponseTests.CommitResponse_WithContentStream_FlushesStreamData;
+// When ContentStream has data and FContent is empty, CommitResponse must
+// read from the stream.
+var
+  LWebReq:     TNativeWebRequest;
+  LWebResp:    TNativeWebResponse;
+  LFlushedBody: TBytes;
+  LStream:     TStringStream;
+begin
+  LFlushedBody := nil;
+  LWebReq  := TNativeWebRequest.Create(MakeReq('/data', ''));
+  LWebResp := TNativeWebResponse.Create(LWebReq,
+    procedure(AStatus: Integer; const AContentType: string;
+              const ABody: TBytes;
+              const AExtra: TArray<TPair<string,string>>)
+    begin
+      LFlushedBody := ABody;
+    end);
+  try
+    LStream := TStringStream.Create('stream-content', TEncoding.UTF8);
+    LWebResp.ContentStream := LStream;
+    LWebResp.StatusCode    := 200;
+
+    LWebResp.CommitResponse;
+
+    Assert.AreEqual('stream-content',
+      TEncoding.UTF8.GetString(LFlushedBody),
+      'Body must come from ContentStream when Content is empty');
+  finally
+    LWebResp.Free;
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebResponseTests.CommitResponse_WithCustomHeaders_FlushesAll;
+var
+  LWebReq:       TNativeWebRequest;
+  LWebResp:      TNativeWebResponse;
+  LFlushedExtra: TArray<TPair<string,string>>;
+  LFlushedCT:    string;
+begin
+  LFlushedExtra := nil;
+  LFlushedCT    := '';
+  LWebReq  := TNativeWebRequest.Create(MakeReq('/api', ''));
+  LWebResp := TNativeWebResponse.Create(LWebReq,
+    procedure(AStatus: Integer; const AContentType: string;
+              const ABody: TBytes;
+              const AExtra: TArray<TPair<string,string>>)
+    begin
+      LFlushedCT    := AContentType;
+      LFlushedExtra := AExtra;
+    end);
+  try
+    LWebResp.ContentType := 'application/json';
+    LWebResp.SetCustomHeader('X-Request-ID', '999');
+    LWebResp.SetCustomHeader('X-Powered-By', 'Poseidon');
+    LWebResp.Content    := '{}';
+    LWebResp.StatusCode := 200;
+
+    LWebResp.CommitResponse;
+
+    Assert.AreEqual('application/json', LFlushedCT,
+      'ContentType must be flushed correctly');
+    Assert.AreEqual(2, Length(LFlushedExtra),
+      'Must flush 2 extra headers (excluding Content-Type)');
+  finally
+    LWebResp.Free;
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebResponseTests.Reset_ClearsAllState;
+var
+  LWebReq:  TNativeWebRequest;
+  LWebResp: TNativeWebResponse;
+  LFlushedStatus: Integer;
+  LFlushedBody: TBytes;
+begin
+  LFlushedStatus := 0;
+  LFlushedBody   := nil;
+  LWebReq  := TNativeWebRequest.Create(MakeReq('/api', ''));
+  LWebResp := TNativeWebResponse.Create(LWebReq,
+    procedure(AStatus: Integer; const AContentType: string;
+              const ABody: TBytes;
+              const AExtra: TArray<TPair<string,string>>)
+    begin
+      LFlushedStatus := AStatus;
+      LFlushedBody   := ABody;
+    end);
+  try
+    // Set state on first use
+    LWebResp.StatusCode  := 404;
+    LWebResp.Content     := 'not found';
+    LWebResp.ContentType := 'text/plain';
+
+    // Reset for pool reuse
+    LWebResp.Reset(
+      procedure(AStatus: Integer; const AContentType: string;
+                const ABody: TBytes;
+                const AExtra: TArray<TPair<string,string>>)
+      begin
+        LFlushedStatus := AStatus;
+        LFlushedBody   := ABody;
+      end);
+
+    Assert.AreEqual(200, LWebResp.StatusCode,
+      'StatusCode must be 200 after Reset');
+    Assert.AreEqual('', LWebResp.Content,
+      'Content must be empty after Reset');
+
+    LWebResp.Content := 'ok';
+    LWebResp.CommitResponse;
+
+    Assert.AreEqual(200, LFlushedStatus,
+      'Flushed status must be 200 (reset default)');
+    Assert.AreEqual('ok', TEncoding.UTF8.GetString(LFlushedBody),
+      'Flushed body must be from new Content, not stale');
+  finally
+    LWebResp.Free;
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebResponseTests.CommitResponse_CalledOnce_FlushesOnce;
+var
+  LWebReq:    TNativeWebRequest;
+  LWebResp:   TNativeWebResponse;
+  LCallCount: Integer;
+begin
+  LCallCount := 0;
+  LWebReq  := TNativeWebRequest.Create(MakeReq('/api', ''));
+  LWebResp := TNativeWebResponse.Create(LWebReq,
+    procedure(AStatus: Integer; const AContentType: string;
+              const ABody: TBytes;
+              const AExtra: TArray<TPair<string,string>>)
+    begin
+      Inc(LCallCount);
+    end);
+  try
+    LWebResp.Content    := 'data';
+    LWebResp.StatusCode := 200;
+    LWebResp.CommitResponse;
+
+    Assert.AreEqual(1, LCallCount,
+      'FOnFlush must be called exactly once per CommitResponse');
+  finally
+    LWebResp.Free;
+    LWebReq.Free;
+  end;
+end;
+
+procedure TNativeWebResponseTests.SendRedirect_FlushesLocationHeader;
+var
+  LWebReq:       TNativeWebRequest;
+  LWebResp:      TNativeWebResponse;
+  LFlushedStatus: Integer;
+  LFlushedExtra: TArray<TPair<string,string>>;
+begin
+  LFlushedStatus := 0;
+  LFlushedExtra  := nil;
+  LWebReq  := TNativeWebRequest.Create(MakeReq('/old', ''));
+  LWebResp := TNativeWebResponse.Create(LWebReq,
+    procedure(AStatus: Integer; const AContentType: string;
+              const ABody: TBytes;
+              const AExtra: TArray<TPair<string,string>>)
+    begin
+      LFlushedStatus := AStatus;
+      LFlushedExtra  := AExtra;
+    end);
+  try
+    LWebResp.SendRedirect('/new-location');
+
+    Assert.AreEqual(303, LFlushedStatus,
+      'SendRedirect must flush status 303');
+    Assert.AreEqual(1, Length(LFlushedExtra),
+      'SendRedirect must flush exactly one extra header');
+    Assert.AreEqual('Location', LFlushedExtra[0].Key,
+      'Extra header must be Location');
+    Assert.AreEqual('/new-location', LFlushedExtra[0].Value,
+      'Location must match the redirect URI');
   finally
     LWebResp.Free;
     LWebReq.Free;

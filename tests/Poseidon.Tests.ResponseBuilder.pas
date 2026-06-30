@@ -53,6 +53,14 @@ type
     [Test] procedure DefaultErrorBody_IsValidJSON;
     [Test] procedure Response_EndsWithDoubleCRLF_BeforeBody;
 
+    // Edge cases — Fase 3
+    [Test] procedure Status_204_NoContentStatusLine;
+    [Test] procedure Status_301_WithLocationHeader;
+    [Test] procedure LargeBody_ContentLengthCorrect;
+    [Test] procedure ExtraHeaders_MultipleValues;
+    [Test] procedure ContentType_WithCharset_PreservedVerbatim;
+    [Test] procedure Status_503_ServiceUnavailable;
+
     // P-4: BuildHTTPResponsePooled
     [Test] procedure Pooled_ContentMatchesNonPooled;
     [Test] procedure Pooled_ActualLen_EqualsNonPooledLength;
@@ -324,6 +332,85 @@ begin
   // Body starts at LHeaderEnd + 4 (the CRLFCRLF is 4 bytes, Pos returns 1-based)
   // Length of body = total - (header section + 4 separator bytes)
   CheckInt(Length(LBody), Length(LFull) - (LHeaderEnd + 3));
+end;
+
+// ── Fase 3: Edge cases ──────────────────────────────────────────────────────
+
+procedure TResponseBuilderTests.Status_204_NoContentStatusLine;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(204, '', [], False, [], False, ''));
+  Assert.IsTrue(HasStatusLine(LResp, 'HTTP/1.1 204 No Content'));
+  Assert.IsTrue(HasHeader(LResp, 'Content-Length', '0'),
+    '204 with empty body must have Content-Length: 0');
+end;
+
+procedure TResponseBuilderTests.Status_301_WithLocationHeader;
+var
+  LExtra: TArray<TPair<string,string>>;
+  LResp:  string;
+begin
+  LExtra := [TPair<string,string>.Create('Location', 'https://new.example.com/path')];
+  LResp  := ResponseToString(
+    BuildHTTPResponse(301, 'text/plain', [], False, LExtra, False, ''));
+  Assert.IsTrue(HasStatusLine(LResp, 'HTTP/1.1 301 Moved Permanently'));
+  Assert.IsTrue(HasHeader(LResp, 'Location', 'https://new.example.com/path'));
+end;
+
+procedure TResponseBuilderTests.LargeBody_ContentLengthCorrect;
+var
+  LBody: TBytes;
+  LResp: string;
+begin
+  SetLength(LBody, 1048576);  // 1 MB
+  FillChar(LBody[0], Length(LBody), Ord('X'));
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'application/octet-stream', LBody, True, [], False, ''));
+  Assert.IsTrue(HasHeader(LResp, 'Content-Length', '1048576'),
+    'Content-Length must be 1048576 for 1 MB body');
+end;
+
+procedure TResponseBuilderTests.ExtraHeaders_MultipleValues;
+var
+  LExtra: TArray<TPair<string,string>>;
+  LResp:  string;
+begin
+  SetLength(LExtra, 5);
+  LExtra[0] := TPair<string,string>.Create('X-A', '1');
+  LExtra[1] := TPair<string,string>.Create('X-B', '2');
+  LExtra[2] := TPair<string,string>.Create('X-C', '3');
+  LExtra[3] := TPair<string,string>.Create('X-D', '4');
+  LExtra[4] := TPair<string,string>.Create('X-E', '5');
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/plain', [], False, LExtra, False, ''));
+  Assert.IsTrue(HasHeader(LResp, 'X-A', '1'), 'Must contain X-A header');
+  Assert.IsTrue(HasHeader(LResp, 'X-E', '5'), 'Must contain X-E header');
+end;
+
+procedure TResponseBuilderTests.ContentType_WithCharset_PreservedVerbatim;
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, 'text/html; charset=utf-8', [], False, [], False, ''));
+  Assert.IsTrue(HasHeader(LResp, 'Content-Type', 'text/html; charset=utf-8'),
+    'Custom Content-Type with charset must be preserved verbatim');
+end;
+
+procedure TResponseBuilderTests.Status_503_ServiceUnavailable;
+var
+  LExtra: TArray<TPair<string,string>>;
+  LResp:  string;
+begin
+  LExtra := [TPair<string,string>.Create('Retry-After', '5')];
+  LResp  := ResponseToString(
+    BuildHTTPResponse(503, 'text/plain',
+      TEncoding.ASCII.GetBytes('Service Unavailable'),
+      False, LExtra, False, ''));
+  Assert.IsTrue(HasStatusLine(LResp, 'HTTP/1.1 503 Service Unavailable'));
+  Assert.IsTrue(HasHeader(LResp, 'Retry-After', '5'));
 end;
 
 // ── P-4: BuildHTTPResponsePooled ─────────────────────────────────────────────
