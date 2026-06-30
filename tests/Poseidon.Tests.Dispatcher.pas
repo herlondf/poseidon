@@ -47,12 +47,15 @@ type
     [Test] procedure RateLimitDenied_HandlerNotInvoked;
   end;
 
+  // R-5 backpressure was moved from Dispatcher to HttpServer._DispatchAccumBuf.
+  // Dispatcher now always receives MaxQueueDepth=0 (no check).  These tests
+  // verify the Dispatcher passes requests through regardless of config values.
   [TestFixture]
   TDispatcherBackpressureTests = class
   public
     [Test] procedure QueueNotFull_HandlerInvoked;
-    [Test] procedure QueueFull_Returns503;
-    [Test] procedure QueueFull_HandlerNotInvoked;
+    [Test] procedure QueueFull_DispatcherPassesThrough;
+    [Test] procedure QueueFull_HandlerStillInvoked;
     [Test] procedure MaxQueueDepthZero_NoBackpressure;
   end;
 
@@ -558,7 +561,10 @@ begin
   end;
 end;
 
-procedure TDispatcherBackpressureTests.QueueFull_Returns503;
+procedure TDispatcherBackpressureTests.QueueFull_DispatcherPassesThrough;
+// R-5 backpressure is now enforced in HttpServer._DispatchAccumBuf, not here.
+// Dispatcher must pass requests through even when MaxQueueDepth/InFlightCount
+// values suggest overload — it no longer checks them.
 var
   LConn:   TNativeConn;
   LMock:   TMockCallbacks;
@@ -567,20 +573,21 @@ var
 begin
   LConn   := MakeConn('GET', '/');
   LMock   := TMockCallbacks.Create;
-  LIF     := 5;   // already at the limit
+  LIF     := 5;   // at the limit — Dispatcher should NOT care
   LConfig := DefaultConfig(@LIF);
   LConfig.MaxQueueDepth := 5;
   try
     DoDispatch(LConn, LConfig, LMock);
-    Assert.AreEqual(503, LMock.SendResponseStatus,
-      'Request arriving when in-flight >= MaxQueueDepth must receive 503');
+    Assert.AreEqual(200, LMock.SendResponseStatus,
+      'Dispatcher must pass request through (backpressure is in HttpServer)');
   finally
     LConn.Free;
     LMock := nil;
   end;
 end;
 
-procedure TDispatcherBackpressureTests.QueueFull_HandlerNotInvoked;
+procedure TDispatcherBackpressureTests.QueueFull_HandlerStillInvoked;
+// Since backpressure moved to HttpServer, Dispatcher always invokes handler.
 var
   LConn:   TNativeConn;
   LMock:   TMockCallbacks;
@@ -594,8 +601,8 @@ begin
   LConfig.MaxQueueDepth := 5;
   try
     DoDispatch(LConn, LConfig, LMock);
-    Assert.IsFalse(LMock.HandlerInvoked,
-      'Application handler must NOT be invoked when queue is full');
+    Assert.IsTrue(LMock.HandlerInvoked,
+      'Dispatcher must invoke handler (backpressure is in HttpServer)');
   finally
     LConn.Free;
     LMock := nil;

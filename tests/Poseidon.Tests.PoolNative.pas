@@ -49,9 +49,12 @@ begin
   Result.Headers     := [];
 end;
 
-function DummyFlush: TNativeFlushProc;
+var
+  GDummyFlush: TNativeFlushProc;
+
+procedure _InitDummyFlush;
 begin
-  Result := procedure(AStatus: Integer; const AContentType: string;
+  GDummyFlush := procedure(AStatus: Integer; const AContentType: string;
     const ABody: TBytes; const AExtra: TArray<TPair<string,string>>)
   begin
     // no-op
@@ -67,7 +70,7 @@ var
   LWebReq: TNativeWebRequest;
   LWebRes: TNativeWebResponse;
 begin
-  TNativeContextPool.Acquire(MakeReq('GET', '/ping', ''), DummyFlush,
+  TNativeContextPool.Acquire(MakeReq('GET', '/ping', ''), GDummyFlush,
     LWebReq, LWebRes);
   try
     Assert.IsNotNull(LWebReq, 'Acquired WebReq must not be nil');
@@ -84,12 +87,12 @@ var
   LWebRes1, LWebRes2: TNativeWebResponse;
 begin
   // First cycle
-  TNativeContextPool.Acquire(MakeReq('GET', '/a', ''), DummyFlush,
+  TNativeContextPool.Acquire(MakeReq('GET', '/a', ''), GDummyFlush,
     LWebReq1, LWebRes1);
   TNativeContextPool.Release(LWebReq1, LWebRes1);
 
   // Second cycle — should reuse the released objects
-  TNativeContextPool.Acquire(MakeReq('GET', '/b', ''), DummyFlush,
+  TNativeContextPool.Acquire(MakeReq('GET', '/b', ''), GDummyFlush,
     LWebReq2, LWebRes2);
   try
     Assert.AreSame(LWebReq1, LWebReq2,
@@ -110,7 +113,7 @@ var
 begin
   // First request with query params
   TNativeContextPool.Acquire(
-    MakeReq('GET', '/search', 'q=hello&page=1'), DummyFlush,
+    MakeReq('GET', '/search', 'q=hello&page=1'), GDummyFlush,
     LWebReq, LWebRes);
   // Touch QueryFields to trigger lazy init
   Assert.AreEqual('hello', LWebReq.QueryFields.Values['q']);
@@ -118,7 +121,7 @@ begin
 
   // Second request without query params
   TNativeContextPool.Acquire(
-    MakeReq('POST', '/data', ''), DummyFlush,
+    MakeReq('POST', '/data', ''), GDummyFlush,
     LWebReq, LWebRes);
   try
     Assert.AreEqual('', LWebReq.QueryFields.Values['q'],
@@ -158,7 +161,7 @@ begin
             begin
               TNativeContextPool.Acquire(
                 MakeReq('GET', '/t' + IntToStr(J), 'i=' + IntToStr(J)),
-                DummyFlush, LReq, LRes);
+                GDummyFlush, LReq, LRes);
               TNativeContextPool.Release(LReq, LRes);
             end;
           except
@@ -197,7 +200,7 @@ begin
   // Acquire 10 pairs
   for I := 0 to High(LPairs) do
     TNativeContextPool.Acquire(
-      MakeReq('GET', '/p' + IntToStr(I), ''), DummyFlush,
+      MakeReq('GET', '/p' + IntToStr(I), ''), GDummyFlush,
       LPairs[I].Req, LPairs[I].Res);
 
   // Release all 10 — pool accepts them
@@ -208,6 +211,7 @@ begin
 end;
 
 initialization
+  _InitDummyFlush;
   TDUnitX.RegisterTestFixture(TNativeContextPoolTests);
 
 end.

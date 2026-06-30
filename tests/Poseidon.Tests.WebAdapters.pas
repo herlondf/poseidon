@@ -227,8 +227,9 @@ begin
   LWebReq := TNativeWebRequest.Create(
     MakeReq('DELETE', '/item/42', '', [], []));
   try
-    // SV index 0 = Method
-    Assert.AreEqual('DELETE', LWebReq.MethodType.ToString);
+    // SV index 0 = Method — accessed via public Method property
+    Assert.AreEqual('DELETE', LWebReq.Method,
+      'Method must return the HTTP verb from the request');
   finally
     LWebReq.Free;
   end;
@@ -358,14 +359,15 @@ begin
 end;
 
 procedure TNativeWebRequestTests.GetStringVariable_UnknownIndex_ReturnsEmpty;
+// GetStringVariable is protected — we test indirectly via ScriptName
+// which maps to SV index 7 (not overridden → returns empty via inherited).
 var
   LWebReq: TNativeWebRequest;
 begin
   LWebReq := TNativeWebRequest.Create(MakeReq('/', ''));
   try
-    // SV index 99 = unknown
-    Assert.AreEqual('', LWebReq.GetStringVariable(99),
-      'Unknown SV index must return empty string');
+    Assert.AreEqual('', LWebReq.ScriptName,
+      'ScriptName (unmapped SV) must return empty string');
   finally
     LWebReq.Free;
   end;
@@ -415,6 +417,7 @@ var
   LWebReq: TNativeWebRequest;
   LBuf: array[0..255] of Byte;
   LRead: Integer;
+  LResult: TBytes;
 begin
   LWebReq := TNativeWebRequest.Create(
     MakeReq('POST', '/data', '', [],
@@ -422,8 +425,10 @@ begin
   try
     LRead := LWebReq.ReadClient(LBuf, SizeOf(LBuf));
     Assert.AreEqual(11, LRead, 'ReadClient must return number of bytes read');
+    SetLength(LResult, LRead);
+    Move(LBuf[0], LResult[0], LRead);
     Assert.AreEqual('Hello World',
-      TEncoding.UTF8.GetString(TBytes(@LBuf), 0, LRead),
+      TEncoding.UTF8.GetString(LResult),
       'ReadClient must copy body bytes into buffer');
   finally
     LWebReq.Free;
