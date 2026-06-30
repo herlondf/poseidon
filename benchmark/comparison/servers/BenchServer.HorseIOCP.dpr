@@ -1,16 +1,44 @@
 program BenchServer.HorseIOCP;
 // Horse Latest (master) + IOCP native provider (Windows only)
+// Uses the exact same pattern as Horse's own benchmarks/win_comparison/HorseBench.dpr
 {$APPTYPE CONSOLE}
 {$DEFINE HORSE_PROVIDER_IOCP}
 uses
-  System.SysUtils, Horse, Bench.HorseRoutes;
-var LPort: Integer;
+  System.SysUtils,
+  Horse,
+  Horse.Provider.IOCP;
 begin
-  LPort := StrToIntDef(GetEnvironmentVariable('BENCH_PORT'), 9805);
-  RegisterBenchRoutes('HorseLatest+IOCP');
-  THorse.Listen(LPort,
-    procedure begin
-      Writeln(Format('[Horse Latest + IOCP] port %d', [LPort]));
-    end);
-  while True do Sleep(1000);
+  try
+    THorse.Get('/ping',
+      procedure(Req: THorseRequest; Res: THorseResponse)
+      begin
+        Res.ContentType('application/json').Send('"pong"');
+      end);
+
+    THorse.Get('/json',
+      procedure(Req: THorseRequest; Res: THorseResponse)
+      begin
+        Res.ContentType('application/json')
+          .Send('{"message":"Hello, World!","framework":"HorseLatest+IOCP"}');
+      end);
+
+    THorse.Post('/upload',
+      procedure(Req: THorseRequest; Res: THorseResponse)
+      begin
+        Res.ContentType('text/plain').Send('received:' + IntToStr(Length(Req.Body)));
+      end);
+
+    THorse.Get('/delay',
+      procedure(Req: THorseRequest; Res: THorseResponse)
+      begin
+        Sleep(50);
+        Res.ContentType('text/plain').Send('ok');
+      end);
+
+    Writeln('[Horse Latest + IOCP] port 9805');
+    THorse.Listen(9805);
+  except
+    on E: Exception do
+      Writeln(E.ClassName, ': ', E.Message);
+  end;
 end.
