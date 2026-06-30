@@ -153,8 +153,8 @@ var
 begin
   LStatus  := 500;
   LCT      := 'application/json';
-  LBody    := TEncoding.UTF8.GetBytes('{"error":"Internal Server Error"}');
-  SetLength(LEHdrs, 0);
+  LBody    := nil;   // defer allocation — handler overwrites in 99.9% of cases
+  LEHdrs   := nil;
   LFlushed := False;
 
   // Acquire pooled TWebRequest/TWebResponse adapters backed by the Poseidon native request

@@ -39,6 +39,7 @@ implementation
 
 uses
   System.SysUtils,
+  System.SyncObjs,
   System.Generics.Collections;
 
 const
@@ -52,6 +53,7 @@ type
 
 var
   GPool: TStack<TNativePair>;
+  GPoolCS: TCriticalSection;   // TCriticalSection is lighter than TMonitor under contention
 
 class procedure TNativeContextPool.Acquire(
   const AReq:   TPoseidonNativeRequest;
@@ -62,13 +64,13 @@ var
   LPair: TNativePair;
   LHave: Boolean;
 begin
-  TMonitor.Enter(GPool);
+  GPoolCS.Enter;
   try
     LHave := GPool.Count > 0;
     if LHave then
       LPair := GPool.Pop;
   finally
-    TMonitor.Exit(GPool);
+    GPoolCS.Leave;
   end;
 
   if LHave then
@@ -92,7 +94,7 @@ var
   LPair:   TNativePair;
   LPooled: Boolean;
 begin
-  TMonitor.Enter(GPool);
+  GPoolCS.Enter;
   try
     LPooled := GPool.Count < MAX_POOL_SIZE;
     if LPooled then
@@ -102,7 +104,7 @@ begin
       GPool.Push(LPair);
     end;
   finally
-    TMonitor.Exit(GPool);
+    GPoolCS.Leave;
   end;
   if not LPooled then
   begin
@@ -112,7 +114,8 @@ begin
 end;
 
 initialization
-  GPool := TStack<TNativePair>.Create;
+  GPool   := TStack<TNativePair>.Create;
+  GPoolCS := TCriticalSection.Create;
 
 finalization
   while GPool.Count > 0 do
@@ -122,5 +125,6 @@ finalization
     LPair.WebReq.Free;
   end;
   FreeAndNil(GPool);
+  FreeAndNil(GPoolCS);
 
 end.
