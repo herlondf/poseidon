@@ -33,9 +33,12 @@ if (-not (Test-Path $Payload)) {
 
 # --- Server definitions ---
 $Servers = @(
-    @{ Name = "Poseidon";        Port = 9801; Binary = "BenchServer.Poseidon.exe" },
-    @{ Name = "Horse+Indy";      Port = 9802; Binary = "BenchServer.HorseIndy.exe" },
-    @{ Name = "Horse+Poseidon";  Port = 9803; Binary = "BenchServer.HorsePoseidon.exe" }
+    @{ Name = "Poseidon";              Port = 9801; Binary = "BenchServer.Poseidon.exe" },
+    @{ Name = "Horse3.2+Indy";         Port = 9802; Binary = "BenchServer.HorseIndy320.exe" },
+    @{ Name = "Horse3.2+Poseidon";     Port = 9803; Binary = "BenchServer.HorsePoseidon320.exe" },
+    @{ Name = "HorseLatest+Indy";      Port = 9804; Binary = "BenchServer.HorseIndyLatest.exe" },
+    @{ Name = "HorseLatest+IOCP";      Port = 9805; Binary = "BenchServer.HorseIOCP.exe" },
+    @{ Name = "HorseLatest+HttpSys";   Port = 9806; Binary = "BenchServer.HorseHttpSys.exe" }
 )
 
 $Connections     = 100
