@@ -96,23 +96,23 @@ run_scenario() {
         ping)
             $BOMBARDIER -c $CONNECTIONS -n $REQUESTS \
                 "http://127.0.0.1:${port}/ping" \
-                -p r -o json --print result > "$outfile" 2>/dev/null
+                -o j > "$outfile" 2>/dev/null
             ;;
         json)
             $BOMBARDIER -c $CONNECTIONS -n $REQUESTS \
                 "http://127.0.0.1:${port}/json" \
-                -p r -o json --print result > "$outfile" 2>/dev/null
+                -o j > "$outfile" 2>/dev/null
             ;;
         upload)
             $BOMBARDIER -c $CONNECTIONS -n $UPLOAD_REQUESTS \
                 -m POST -f "$PAYLOAD" \
                 "http://127.0.0.1:${port}/upload" \
-                -p r -o json --print result > "$outfile" 2>/dev/null
+                -o j > "$outfile" 2>/dev/null
             ;;
         delay)
             $BOMBARDIER -c $CONNECTIONS -n $REQUESTS \
                 "http://127.0.0.1:${port}/delay" \
-                -p r -o json --print result > "$outfile" 2>/dev/null
+                -o j > "$outfile" 2>/dev/null
             ;;
     esac
 

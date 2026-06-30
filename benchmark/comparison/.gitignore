@@ -1,0 +1,21 @@
+# Cloned dependencies — fetch via build-all.ps1
+vendor/
+
+# Build artifacts
+bin/
+dcu/
+*.dcu
+*.exe
+*.o
+*.res
+
+# Benchmark data files
+payload5mb.bin
+results/
+
+# Delphi temp
+*.identcache
+*.local
+*.stat
+__history/
+__recovery/

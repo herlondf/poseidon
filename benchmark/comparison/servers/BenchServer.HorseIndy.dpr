@@ -48,6 +48,9 @@ begin
     procedure
     begin
       Writeln(Format('[Horse+Indy] listening on port %d', [LPort]));
-      Writeln('Press Enter to stop...');
+      Writeln('Running... kill process to stop.');
     end);
+
+  // THorse.Listen returns after callback — keep process alive until killed
+  while True do Sleep(1000);
 end.

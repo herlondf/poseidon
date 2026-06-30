@@ -71,16 +71,22 @@ function Run-Scenario($name, $port, $scenario) {
         "upload" { $args += @("-n", $UploadRequests, "-m", "POST", "-f", $Payload, "http://127.0.0.1:${port}/upload") }
         "delay"  { $args += @("-n", $Requests, "http://127.0.0.1:${port}/delay") }
     }
-    $args += @("-p", "r", "-o", "json", "--print", "result")
+    $args += @("-o", "j")
 
-    & $Bombardier @args 2>$null | Out-File -FilePath $outFile -Encoding utf8
-
-    try {
-        $json = Get-Content $outFile -Raw | ConvertFrom-Json
-        $rps = [math]::Round($json.result.rps.mean, 2)
-        Write-Host "$rps RPS" -ForegroundColor Green
-    } catch {
-        Write-Host "N/A" -ForegroundColor Yellow
+    $rawOutput = & $Bombardier @args 2>$null | Out-String
+    # bombardier outputs progress lines then JSON on the last line
+    $jsonLine = ($rawOutput -split "`n" | Where-Object { $_ -match '^\s*\{' }) -join ""
+    if ($jsonLine) {
+        $jsonLine | Out-File -FilePath $outFile -Encoding utf8 -NoNewline
+        try {
+            $j = $jsonLine | ConvertFrom-Json
+            $rps = [math]::Round($j.result.rps.mean, 2)
+            Write-Host "$rps RPS" -ForegroundColor Green
+        } catch {
+            Write-Host "N/A (parse error)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "N/A (no output)" -ForegroundColor Yellow
     }
 }
 
@@ -102,9 +108,8 @@ foreach ($srv in $Servers) {
 
     Write-Host ">>> $($srv.Name) (port $($srv.Port))" -ForegroundColor Cyan
 
-    # Start server
-    $proc = Start-Process -FilePath $binaryPath -PassThru -WindowStyle Hidden `
-        -RedirectStandardInput "NUL"
+    # Start server in background (servers run until killed, no stdin needed)
+    $proc = Start-Process -FilePath $binaryPath -PassThru -WindowStyle Hidden
     Start-Sleep -Seconds 2
 
     if (-not (Wait-ForPort $srv.Port)) {
@@ -140,7 +145,8 @@ foreach ($srv in $Servers) {
         $f = Join-Path $ResultsDir "$($srv.Name)-${sc}.json"
         if (Test-Path $f) {
             try {
-                $j = Get-Content $f -Raw | ConvertFrom-Json
+                $raw = Get-Content $f -Raw
+                $j = $raw | ConvertFrom-Json
                 $vals += [math]::Round($j.result.rps.mean, 2).ToString()
             } catch { $vals += "N/A" }
         } else { $vals += "N/A" }

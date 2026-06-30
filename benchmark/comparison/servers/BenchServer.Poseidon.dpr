@@ -8,6 +8,8 @@ program BenchServer.Poseidon;
 
 uses
   System.SysUtils,
+  System.Classes,
+  System.SyncObjs,
   Poseidon.Net.HttpServer,
   Poseidon.Net.Types,
   Bench.Handlers;
@@ -15,20 +17,32 @@ uses
 var
   LServer: TPoseidonNativeServer;
   LPort:   Integer;
+  LReady:  TEvent;
 begin
-  LPort := StrToIntDef(GetEnvironmentVariable('BENCH_PORT'), 9801);
+  LPort  := StrToIntDef(GetEnvironmentVariable('BENCH_PORT'), 9801);
+  LReady := TEvent.Create(nil, True, False, '');
 
   LServer := TPoseidonNativeServer.Create;
   try
-    LServer.Listen('0.0.0.0', LPort, PoseidonHandler,
+    // Listen blocks on IO event loop — launch in a thread
+    TThread.CreateAnonymousThread(
       procedure
       begin
-        Writeln(Format('[Poseidon Native] listening on port %d', [LPort]));
-        Writeln('Press Enter to stop...');
-      end);
-    Readln;
-    LServer.Stop;
+        LServer.Listen('0.0.0.0', LPort, PoseidonHandler,
+          procedure
+          begin
+            Writeln(Format('[Poseidon Native] listening on port %d', [LPort]));
+            LReady.SetEvent;
+          end);
+      end).Start;
+
+    LReady.WaitFor(5000);
+    Writeln('Running... kill process to stop.');
+    // Block until killed (Ctrl+C or SIGTERM)
+    while True do Sleep(1000);
   finally
+    LServer.Stop;
     LServer.Free;
+    LReady.Free;
   end;
 end.
