@@ -346,22 +346,26 @@ var
   LExtra:      TArray<TPair<string,string>>;
   LExtraCount: Integer;
 begin
-  LCT         := '';
-  LExtraCount := 0;
-  SetLength(LExtra, FCustomHeaders.Count);
+  LCT := '';
 
-  for I := 0 to FCustomHeaders.Count - 1 do
+  // Fast path: skip header iteration when no custom headers (99% of API requests)
+  if FCustomHeaders.Count > 0 then
   begin
-    if SameText(FCustomHeaders.Names[I], 'Content-Type') then
-      LCT := FCustomHeaders.ValueFromIndex[I]
-    else
+    LExtraCount := 0;
+    SetLength(LExtra, FCustomHeaders.Count);
+    for I := 0 to FCustomHeaders.Count - 1 do
     begin
-      LExtra[LExtraCount] := TPair<string,string>.Create(
-        FCustomHeaders.Names[I], FCustomHeaders.ValueFromIndex[I]);
-      Inc(LExtraCount);
+      if SameText(FCustomHeaders.Names[I], 'Content-Type') then
+        LCT := FCustomHeaders.ValueFromIndex[I]
+      else
+      begin
+        LExtra[LExtraCount] := TPair<string,string>.Create(
+          FCustomHeaders.Names[I], FCustomHeaders.ValueFromIndex[I]);
+        Inc(LExtraCount);
+      end;
     end;
+    SetLength(LExtra, LExtraCount);
   end;
-  SetLength(LExtra, LExtraCount);
 
   if (ContentStream <> nil) and (ContentStream.Size > 0) and (FContent = '') then
   begin

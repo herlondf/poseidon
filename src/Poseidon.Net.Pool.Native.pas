@@ -1,17 +1,9 @@
-﻿unit Poseidon.Net.Pool.Native;
+unit Poseidon.Net.Pool.Native;
 
 // Thread-safe object pool for TNativeWebRequest / TNativeWebResponse pairs.
 //
 // Eliminates per-request heap allocation of the native adapter wrappers.
-// Complements TPoseidonRequestPool (pools TPoseidonRequest/Response layer).
-//
-// Usage (handled internally by TPoseidonProviderNative):
-//   TNativeContextPool.Acquire(AReq, AFlush, LWebReq, LWebRes);
-//   try
-//     ... handle request ...
-//   finally
-//     TNativeContextPool.Release(LWebReq, LWebRes);
-//   end;
+// Uses TCriticalSection (lighter than TMonitor under contention).
 //
 // When the pool is exhausted, Acquire falls back to heap allocation.
 
@@ -53,7 +45,7 @@ type
 
 var
   GPool: TStack<TNativePair>;
-  GPoolCS: TCriticalSection;   // TCriticalSection is lighter than TMonitor under contention
+  GPoolCS: TCriticalSection;
 
 class procedure TNativeContextPool.Acquire(
   const AReq:   TPoseidonNativeRequest;
