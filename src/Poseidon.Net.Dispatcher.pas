@@ -422,7 +422,7 @@ begin
       [TPair<string,string>.Create('Retry-After', '1')],
       AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
     FCallbacks.SendResponse(AConn, LResp, 0);
-    if LReq.KeepAlive then FCallbacks.PostRecv(AConn);
+    // OnSendComplete re-arma recv (keep-alive) ou fecha — não chamar PostRecv aqui
     Exit;
   end;
 
@@ -437,7 +437,7 @@ begin
         TEncoding.ASCII.GetBytes('Forbidden'), LReq.KeepAlive, [],
         AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
       FCallbacks.SendResponse(AConn, LResp, 0);
-      if LReq.KeepAlive then FCallbacks.PostRecv(AConn);
+      // OnSendComplete re-arma recv (keep-alive) ou fecha — não chamar PostRecv aqui
       Exit;
     end;
     if FCallbacks.GetMetricsBody(LReq.Path, LConn.RemoteAddr, LBody) then
@@ -446,34 +446,20 @@ begin
         LBody, LReq.KeepAlive, [],
         AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
       FCallbacks.SendResponse(AConn, LResp, 0);
-      if LReq.KeepAlive then FCallbacks.PostRecv(AConn);
+      // OnSendComplete re-arma recv (keep-alive) ou fecha — não chamar PostRecv aqui
       Exit;
     end;
   end;
 
-  // R-5: backpressure — shed load with 503 when inflight exceeds MaxQueueDepth
-  if (AConfig.MaxQueueDepth > 0) and
-     (TInterlocked.Read(AConfig.InFlightCount^) >= AConfig.MaxQueueDepth) then
-  begin
-    LResp := BuildHTTPResponse(503, 'text/plain',
-      TEncoding.ASCII.GetBytes('Service Unavailable'), LReq.KeepAlive, [],
-      AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
-    FCallbacks.SendResponse(AConn, LResp, 0);
-    if LReq.KeepAlive then FCallbacks.PostRecv(AConn);
-    Exit;
-  end;
-
   // --------------------------------------------------------------------------
   // Invoke application handler
+  // R-5 backpressure (MaxQueueDepth / FInFlightCount) is now enforced in
+  // _DispatchAccumBuf *before* queuing, so FInFlightCount already counts
+  // queued + executing tasks.  No check or AdjustInflight call needed here.
   // --------------------------------------------------------------------------
   LRxBytes   := Length(LReq.RawBody);
   LStartTick := Int64(TThread.GetTickCount64);
-  FCallbacks.AdjustInflight(1);
-  try
-    FCallbacks.InvokeRequest(LReq, LStatus, LCT, LBody, LExtra);
-  finally
-    FCallbacks.AdjustInflight(-1);
-  end;
+  FCallbacks.InvokeRequest(LReq, LStatus, LCT, LBody, LExtra);
 
   _TryCompressResponse(LReq, AConfig, LCT, LBody, LExtra);
 

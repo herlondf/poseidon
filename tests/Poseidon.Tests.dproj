@@ -59,6 +59,7 @@
     <DCCReference Include="Poseidon.Tests.HPACK.pas"/>
     <DCCReference Include="Poseidon.Tests.Metrics.pas"/>
     <DCCReference Include="Poseidon.Tests.Dispatcher.pas"/>
+    <DCCReference Include="Poseidon.Tests.WebAdapters.pas"/>
     <DCCReference Include="mocks\Poseidon.Mock.SSLProvider.pas"/>
   </ItemGroup>
   <ProjectExtensions>

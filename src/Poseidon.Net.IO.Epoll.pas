@@ -89,35 +89,35 @@ type
   end;
 
 function epoll_create1(flags: Integer): Integer; cdecl;
-  external 'c' name 'epoll_create1';
+  external 'libc.so.6' name 'epoll_create1';
 function epoll_ctl(epfd, op, fd: Integer; event: Pointer): Integer; cdecl;
-  external 'c' name 'epoll_ctl';
+  external 'libc.so.6' name 'epoll_ctl';
 function epoll_wait(epfd: Integer; events: Pointer; maxevents, timeout: Integer): Integer; cdecl;
-  external 'c' name 'epoll_wait';
+  external 'libc.so.6' name 'epoll_wait';
 
 function _LinuxAccept4(sockfd: Integer; addr: Pointer; addrlen: Pointer;
-  flags: Integer): Integer; cdecl; external 'c' name 'accept4';
+  flags: Integer): Integer; cdecl; external 'libc.so.6' name 'accept4';
 function _LinuxPipe(pipefd: PInteger): Integer; cdecl;
-  external 'c' name 'pipe';
+  external 'libc.so.6' name 'pipe';
 function _LinuxRead(fd: Integer; buf: Pointer; count: NativeUInt): NativeInt; cdecl;
-  external 'c' name 'read';
+  external 'libc.so.6' name 'read';
 function _LinuxWrite(fd: Integer; buf: Pointer; count: NativeUInt): NativeInt; cdecl;
-  external 'c' name 'write';
+  external 'libc.so.6' name 'write';
 function _LinuxClose(fd: Integer): Integer; cdecl;
-  external 'c' name 'close';
+  external 'libc.so.6' name 'close';
 
 function _LinuxSocket(domain, typ, protocol: Integer): Integer; cdecl;
-  external 'c' name 'socket';
+  external 'libc.so.6' name 'socket';
 function _LinuxBind(sockfd: Integer; addr: Pointer; addrlen: UInt32): Integer; cdecl;
-  external 'c' name 'bind';
+  external 'libc.so.6' name 'bind';
 function _LinuxListen(sockfd, backlog: Integer): Integer; cdecl;
-  external 'c' name 'listen';
+  external 'libc.so.6' name 'listen';
 function _LinuxSetsockopt(sockfd, level, optname: Integer; optval: Pointer; optlen: UInt32): Integer; cdecl;
-  external 'c' name 'setsockopt';
+  external 'libc.so.6' name 'setsockopt';
 function _LinuxRecv(sockfd: Integer; buf: Pointer; len: NativeUInt; flags: Integer): NativeInt; cdecl;
-  external 'c' name 'recv';
+  external 'libc.so.6' name 'recv';
 function _LinuxSend(sockfd: Integer; buf: Pointer; len: NativeUInt; flags: Integer): NativeInt; cdecl;
-  external 'c' name 'send';
+  external 'libc.so.6' name 'send';
 
 // ---------------------------------------------------------------------------
 // TEpollBackend

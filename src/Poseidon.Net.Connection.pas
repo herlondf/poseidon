@@ -44,6 +44,7 @@ type
     AccumLen:      Integer;
     KeepAlive:     Boolean;
     LastActivity:  TDateTime;    // updated on every _ProcessRecv — drives idle-timeout
+    InFlightPool:  Integer;      // atomic counter: >0 while pool lambdas hold this connection; idle-sweep skips it
     SSLHandle:     Pointer;    // SSL* (nil when plain HTTP)
     SSLReadBio:    Pointer;    // BIO* — encrypted bytes from network
     SSLWriteBio:   Pointer;    // BIO* — encrypted bytes to network
@@ -98,6 +99,7 @@ begin
   AccumLen     := 0;
   KeepAlive    := False;
   LastActivity := Now;
+  InFlightPool := 0;
   SSLHandle    := nil;
   SSLReadBio   := nil;
   SSLWriteBio  := nil;

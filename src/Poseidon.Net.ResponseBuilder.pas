@@ -230,14 +230,17 @@ begin
   Move(LStatusBytes[0], ABuf[LPos], Length(LStatusBytes));
   Inc(LPos, Length(LStatusBytes));
 
-  Move(G_CT_PREFIX[0], ABuf[LPos], Length(G_CT_PREFIX));
-  Inc(LPos, Length(G_CT_PREFIX));
-  if Length(LCTValue) > 0 then
+  if AContentType <> '' then
   begin
-    Move(LCTValue[0], ABuf[LPos], Length(LCTValue));
-    Inc(LPos, Length(LCTValue));
+    Move(G_CT_PREFIX[0], ABuf[LPos], Length(G_CT_PREFIX));
+    Inc(LPos, Length(G_CT_PREFIX));
+    if Length(LCTValue) > 0 then
+    begin
+      Move(LCTValue[0], ABuf[LPos], Length(LCTValue));
+      Inc(LPos, Length(LCTValue));
+    end;
+    ABuf[LPos] := $0D; ABuf[LPos + 1] := $0A; Inc(LPos, 2);
   end;
-  ABuf[LPos] := $0D; ABuf[LPos + 1] := $0A; Inc(LPos, 2);
 
   Move(G_CL_PREFIX[0], ABuf[LPos], Length(G_CL_PREFIX));
   Inc(LPos, Length(G_CL_PREFIX));
@@ -273,7 +276,7 @@ var
   LCTValue:     TBytes;
   LCTAlloced:   Boolean;
   LExtraStr:    string;
-  LBodyLen, LCLLen, LExtraLen: Integer;
+  LBodyLen, LCLLen, LExtraLen, LCTLen: Integer;
   I:            Integer;
 begin
   LStatusBytes := GetStatusLineBytes(AStatus);
@@ -294,8 +297,12 @@ begin
   if AServerBanner <> '' then
     LExtraStr := LExtraStr + 'Server: ' + AServerBanner + #13#10;
   LExtraLen := Length(LExtraStr);
+  if AContentType <> '' then
+    LCTLen := Length(G_CT_PREFIX) + Length(LCTValue) + 2
+  else
+    LCTLen := 0;
   Result := Length(LStatusBytes)
-          + Length(G_CT_PREFIX) + Length(LCTValue) + 2
+          + LCTLen
           + Length(G_CL_PREFIX) + LCLLen + 2
           + Length(LConnBytes)
           + LExtraLen

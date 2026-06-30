@@ -99,8 +99,9 @@ implementation
 
 const
   // Linux x86-64 syscall numbers
-  NR_IO_URING_SETUP = NativeInt(425);
-  NR_IO_URING_ENTER = NativeInt(426);
+  NR_IO_URING_SETUP    = NativeInt(425);
+  NR_IO_URING_ENTER    = NativeInt(426);
+  NR_IO_URING_REGISTER = NativeInt(427);
 
   // io_uring_enter flags
   IORING_ENTER_GETEVENTS = UInt32(1);
@@ -124,6 +125,12 @@ const
 
   RECV_BUF_SIZE = 32768;
   RING_ENTRIES  = 512;
+
+  // io_uring_register opcodes
+  IORING_REGISTER_PROBE = UInt32(8);   // added in kernel 5.6
+
+  // io_uring_probe_op flag — op is supported by this kernel
+  IO_URING_OP_SUPPORTED = UInt16(1);
 
   // Linux setsockopt level/option constants not in the RTL
   SO_REUSEPORT = 15;
@@ -196,6 +203,27 @@ type
     flags:     UInt32;
   end;
 
+  // io_uring_register IORING_REGISTER_PROBE structs (kernel 5.6+).
+  // Used in the constructor to verify RECV/SEND opcode support before committing
+  // to the io_uring backend.  If the register call fails (EINVAL on < 5.6), we
+  // raise ENotSupportedException so HttpServer falls back to TEpollBackend.
+  TIOUringProbeOp = packed record
+    op:    Byte;
+    resv:  Byte;
+    flags: UInt16;   // IO_URING_OP_SUPPORTED = 1
+    resv2: UInt32;
+  end;
+
+  // Header followed by ops[0..last_op] — we only care about ops up to opcode 23
+  // (IORING_OP_SEND), so a fixed array of 32 entries is more than enough.
+  TIOUringProbe = packed record
+    last_op:  Byte;
+    ops_len:  Byte;
+    resv:     UInt16;
+    resv2:    array[0..2] of UInt32;
+    ops:      array[0..31] of TIOUringProbeOp;
+  end;
+
   // Heap-allocated recv context: stable buffer for in-flight IORING_OP_RECV.
   // Allocated in PostRecv; freed after the CQE is processed.
   PRecvCtx = ^TRecvCtx;
@@ -210,7 +238,7 @@ type
 
 // libc's variadic syscall(2) — used for io_uring syscalls not yet in the RTL.
 function _csyscall(number: NativeInt): NativeInt; cdecl;
-  external 'c' name 'syscall'; varargs;
+  external 'libc.so.6' name 'syscall'; varargs;
 
 function _io_uring_setup(AEntries: UInt32; AParams: Pointer): Integer; inline;
 begin
@@ -225,26 +253,34 @@ begin
     AFd, AToSubmit, AMinComplete, AFlags, nil, NativeInt(0)));
 end;
 
+// opcode, arg, nr_args, flags (flags always 0 for REGISTER_PROBE).
+function _io_uring_register(AFd: Integer; AOpcode: UInt32;
+  AArg: Pointer; ANrArgs: UInt32): Integer; inline;
+begin
+  Result := Integer(_csyscall(NR_IO_URING_REGISTER,
+    AFd, AOpcode, AArg, ANrArgs));
+end;
+
 // ---------------------------------------------------------------------------
 // libc helpers (same set as TEpollBackend — duplicated to avoid cross-coupling)
 // ---------------------------------------------------------------------------
 
 function _LinuxAccept4(sockfd: Integer; addr: Pointer; addrlen: Pointer;
-  flags: Integer): Integer; cdecl; external 'c' name 'accept4';
-function _LinuxClose(fd: Integer): Integer; cdecl; external 'c' name 'close';
+  flags: Integer): Integer; cdecl; external 'libc.so.6' name 'accept4';
+function _LinuxClose(fd: Integer): Integer; cdecl; external 'libc.so.6' name 'close';
 function _LinuxSocket(domain, typ, protocol: Integer): Integer; cdecl;
-  external 'c' name 'socket';
+  external 'libc.so.6' name 'socket';
 function _LinuxBind(sockfd: Integer; addr: Pointer; addrlen: UInt32): Integer; cdecl;
-  external 'c' name 'bind';
+  external 'libc.so.6' name 'bind';
 function _LinuxListen(sockfd, backlog: Integer): Integer; cdecl;
-  external 'c' name 'listen';
+  external 'libc.so.6' name 'listen';
 function _LinuxSetsockopt(sockfd, level, optname: Integer; optval: Pointer;
-  optlen: UInt32): Integer; cdecl; external 'c' name 'setsockopt';
+  optlen: UInt32): Integer; cdecl; external 'libc.so.6' name 'setsockopt';
 
 function _LinuxMmap(addr: Pointer; length: NativeUInt; prot, flags, fd: Integer;
-  offset: Int64): Pointer; cdecl; external 'c' name 'mmap';
+  offset: Int64): Pointer; cdecl; external 'libc.so.6' name 'mmap';
 function _LinuxMunmap(addr: Pointer; length: NativeUInt): Integer; cdecl;
-  external 'c' name 'munmap';
+  external 'libc.so.6' name 'munmap';
 
 // ---------------------------------------------------------------------------
 // TIOUringBackend — constructor / destructor
@@ -254,17 +290,16 @@ constructor TIOUringBackend.Create;
 var
   LParams: TIOUringParams;
   LFd:     Integer;
+  LProbe:  TIOUringProbe;
 begin
   inherited Create;
 
-  // Probe io_uring with a minimal ring (1 entry).  If the syscall exists the
-  // kernel returns either the ring fd (success) or EINVAL (bad params but
-  // syscall is present).  ENOSYS means "not in this kernel"; EPERM means
-  // "blocked by seccomp / policy".  Both indicate we must fall back to epoll.
+  // Phase 1: check io_uring_setup is available (kernel >= 5.1).
+  // Returns ring fd on success, or -ENOSYS / -EPERM on failure.
   FillChar(LParams, SizeOf(LParams), 0);
   LFd := _io_uring_setup(1, @LParams);
   if LFd >= 0 then
-    _LinuxClose(LFd)               // probe succeeded — actual ring set up in StartListening
+    _LinuxClose(LFd)
   else
   begin
     case GetLastError of
@@ -276,6 +311,29 @@ begin
       raise ENotSupportedException.CreateFmt(
         'io_uring probe failed (errno %d)', [GetLastError]);
     end;
+  end;
+
+  // Phase 2: verify IORING_OP_RECV (22) and IORING_OP_SEND (23) are supported.
+  // These opcodes require kernel >= 5.6.  IORING_REGISTER_PROBE itself was added
+  // in 5.6, so -EINVAL here means the kernel predates 5.6 and lacks RECV/SEND.
+  // We open a fresh 1-entry ring solely for the probe, then close it immediately.
+  FillChar(LParams, SizeOf(LParams), 0);
+  LFd := _io_uring_setup(1, @LParams);
+  if LFd >= 0 then
+  try
+    FillChar(LProbe, SizeOf(LProbe), 0);
+    if _io_uring_register(LFd, IORING_REGISTER_PROBE, @LProbe,
+         SizeOf(LProbe.ops) div SizeOf(TIOUringProbeOp)) < 0 then
+      raise ENotSupportedException.Create(
+        'io_uring unavailable: IORING_REGISTER_PROBE failed (kernel < 5.6)');
+
+    if (LProbe.last_op < IORING_OP_SEND) or
+       ((LProbe.ops[IORING_OP_RECV].flags and IO_URING_OP_SUPPORTED) = 0) or
+       ((LProbe.ops[IORING_OP_SEND].flags and IO_URING_OP_SUPPORTED) = 0) then
+      raise ENotSupportedException.Create(
+        'io_uring unavailable: IORING_OP_RECV/SEND not supported (kernel < 5.6)');
+  finally
+    _LinuxClose(LFd);
   end;
 
   FRingFd       := -1;
@@ -470,17 +528,22 @@ end;
 
 procedure TIOUringBackend.PostRecv(AConn: Pointer);
 var
-  LCtx: PRecvCtx;
+  LCtx:  PRecvCtx;
+  LConn: TNativeConn absolute AConn;
 begin
   New(LCtx);
-  LCtx^.Conn := TNativeConn(AConn);
+  LCtx^.Conn := LConn;
+  LConn.AddRef;  // #43: keep conn alive while recv CQE is in-flight
   FSQLock.Acquire;
   try
-    if not _SubmitSQE(IORING_OP_RECV, TNativeConn(AConn).Socket,
+    if not _SubmitSQE(IORING_OP_RECV, LConn.Socket,
       @LCtx^.Buf[0], RECV_BUF_SIZE, UInt64(LCtx)) then
     begin
-      // Ring full — free context; connection will be reaped by the idle sweep.
+      // Ring full — cancel the ref we just took and signal an error so the
+      // server closes the connection instead of leaving it orphaned forever.
+      LConn.Release;
       Dispose(LCtx);
+      FCallbacks.OnConnError(AConn);
       Exit;
     end;
     _io_uring_enter(FRingFd, 1, 0, 0);
@@ -566,12 +629,14 @@ begin
   if LTotal = 0 then LTotal := Length(AConn.PendingSend);
   LRemain := LTotal - AConn.SentBytes;
 
+  AConn.AddRef;  // #43: keep conn alive while send CQE is in-flight
   FSQLock.Acquire;
   try
     if not _SubmitSQE(IORING_OP_SEND, AConn.Socket,
       @AConn.PendingSend[AConn.SentBytes], UInt32(LRemain),
       UInt64(AConn) or UD_TAG_SEND) then
     begin
+      AConn.Release;  // op not posted — drop the ref we just took
       FCallbacks.OnConnError(AConn);
       Exit;
     end;
@@ -587,10 +652,10 @@ end;
 
 procedure TIOUringBackend._ProcessCQE(AUserData: UInt64; ARes: Int32);
 var
-  LCtx:    PRecvCtx;
-  LConn:   TNativeConn;
-  LSent:   Integer;
-  LTotal:  Integer;
+  LCtx:       PRecvCtx;
+  LConn:      TNativeConn;
+  LRecvConn:  TNativeConn;
+  LTotal:     Integer;
 begin
   if AUserData = UD_SHUTDOWN then
   begin
@@ -601,12 +666,14 @@ begin
   if (AUserData and UD_TAG_SEND) <> 0 then
   begin
     // --- Send completion ---
+    // user_data encodes the connection pointer with bit 0 set as the send tag.
     LConn := TNativeConn(Pointer(UInt64(AUserData and not UD_TAG_SEND)));
 
     if ARes <= 0 then
     begin
       // Error or connection closed by peer during send
       FCallbacks.OnConnError(LConn);
+      LConn.Release;  // #43: drop send-op ref (AddRef was in _ResubmitSend)
       Exit;
     end;
 
@@ -616,32 +683,37 @@ begin
 
     if LConn.SentBytes < LTotal then
     begin
-      // Partial send — re-submit for the remaining bytes
+      // Partial send — re-submit for the remaining bytes.
+      // _ResubmitSend does its own AddRef; we Release the current send-op ref.
       _ResubmitSend(LConn);
+      LConn.Release;  // #43: drop this send-op ref; _ResubmitSend owns the next one
     end
     else
     begin
-      // All bytes delivered to the kernel send buffer
+      // All bytes delivered — return buffer, notify server, then drop our ref.
       TBufferPool.Release(LConn.PendingSend);
       LConn.PendingSendActual := 0;
-      FCallbacks.OnSendComplete(LConn);
+      FCallbacks.OnSendComplete(LConn);  // may call PostRecv (which AddRefs)
+      LConn.Release;  // #43: drop send-op ref last, after OnSendComplete
     end;
   end
   else
   begin
     // --- Recv completion ---
-    LCtx := PRecvCtx(Pointer(AUserData));
+    LCtx      := PRecvCtx(Pointer(AUserData));
+    LRecvConn := LCtx^.Conn;  // save before Dispose(LCtx) frees the context
     try
       if ARes > 0 then
-        FCallbacks.OnRecv(LCtx^.Conn, @LCtx^.Buf[0], Cardinal(ARes))
+        FCallbacks.OnRecv(LRecvConn, @LCtx^.Buf[0], Cardinal(ARes))
       else if ARes = 0 then
-        FCallbacks.OnConnError(LCtx^.Conn)    // graceful FIN from peer
+        FCallbacks.OnConnError(LRecvConn)    // graceful FIN from peer
       else if ARes = -EAGAIN then
-        PostRecv(LCtx^.Conn)                  // spurious wakeup — re-arm
+        PostRecv(LRecvConn)                  // spurious wakeup — re-arm (PostRecv AddRefs)
       else
-        FCallbacks.OnConnError(LCtx^.Conn);   // real error
+        FCallbacks.OnConnError(LRecvConn);   // real error
     finally
       Dispose(LCtx);
+      LRecvConn.Release;  // #43: drop recv-op ref (AddRef was in PostRecv)
     end;
   end;
 end;

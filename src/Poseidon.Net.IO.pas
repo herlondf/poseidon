@@ -52,7 +52,8 @@ type
 
     // --- Per-connection ---
 
-    // Registers a new connection with the IO subsystem and arms the first recv.
+    // Registers a new connection with the IO subsystem. Does NOT arm recv —
+    // the server calls PostRecv explicitly in _OnNewSocket after this returns.
     // Called from server's _OnNewSocket after TNativeConn is created.
     procedure RegisterConn(AConn: Pointer);
 

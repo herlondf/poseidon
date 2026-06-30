@@ -37,6 +37,7 @@ type
     [Test] procedure ContentType_JSON_UsesPreencoded;
     [Test] procedure ContentType_TextPlain_UsesPreencoded;
     [Test] procedure ContentType_Custom_UsedVerbatim;
+    [Test] procedure ContentType_Empty_HeaderOmitted;
     [Test] procedure KeepAlive_True_ContainsKeepAliveHeader;
     [Test] procedure KeepAlive_False_ContainsCloseHeader;
     [Test] procedure ContentLength_Zero_WrittenCorrectly;
@@ -153,6 +154,18 @@ begin
   LResp := ResponseToString(
     BuildHTTPResponse(200, 'text/csv; charset=utf-8', [], False, [], False, ''));
   Assert.IsTrue(HasHeader(LResp, 'Content-Type', 'text/csv; charset=utf-8'));
+end;
+
+procedure TResponseBuilderTests.ContentType_Empty_HeaderOmitted;
+// When AContentType is empty, no Content-Type header must appear in the response.
+// This allows the client to sniff the content type (e.g. browser renders HTML).
+var
+  LResp: string;
+begin
+  LResp := ResponseToString(
+    BuildHTTPResponse(200, '', [], False, [], False, ''));
+  Assert.IsFalse(Pos('Content-Type:', LResp) > 0,
+    'Content-Type header must be absent when AContentType is empty string');
 end;
 
 procedure TResponseBuilderTests.KeepAlive_True_ContainsKeepAliveHeader;

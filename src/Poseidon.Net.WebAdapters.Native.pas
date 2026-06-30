@@ -95,6 +95,20 @@ procedure TNativeWebRequest.Reset(const AReq: TPoseidonNativeRequest);
 begin
   FReq := AReq;
   UpdateMethodType;  // FMethodType must reflect the new request — pool reuse retains stale value otherwise
+
+  // TWebRequest has three lazy-cached TStrings (FQueryFields, FCookieFields) and one
+  // lazy-cached parser (FContentParser) that are NEVER cleared between pool reuses.
+  // The RTL's Extract* methods (ExtractQueryFields, ExtractCookieFields) APPEND to
+  // TStrings without calling .Clear first, so on pool reuse entries accumulate across
+  // requests. We must clear each cache before re-populating from the new FReq.
+  //
+  // FContentParser (private in TWebRequest, holds FContentFields for multipart/form
+  // bodies) cannot be cleared here — but for JSON REST APIs it is never populated
+  // because CanLoadContentFields returns False for non-form content types.
+  QueryFields.Clear;
+  ExtractQueryFields(QueryFields);
+  CookieFields.Clear;
+  ExtractCookieFields(CookieFields);
 end;
 
 function TNativeWebRequest._Header(const AName: string): string;
@@ -320,7 +334,7 @@ var
   LExtra:      TArray<TPair<string,string>>;
   LExtraCount: Integer;
 begin
-  LCT         := 'text/plain';
+  LCT         := '';
   LExtraCount := 0;
   SetLength(LExtra, FCustomHeaders.Count);
 

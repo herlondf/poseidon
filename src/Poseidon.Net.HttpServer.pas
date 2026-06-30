@@ -793,9 +793,31 @@ procedure TPoseidonNativeServer._DispatchAccumBuf(AConn: Pointer);
 // worker pool. IO workers return immediately to process more I/O events.
 // TNativeConn.AddRef/Release guards the connection lifetime across the async
 // boundary: the connection stays alive until the pool worker's finally runs.
+//
+// R-5 backpressure: FInFlightCount is incremented HERE (queue time) and
+// decremented in the pool worker's finally — so it counts queued + executing
+// tasks, not just executing ones.  This prevents the elastic pool's task queue
+// from growing unboundedly when all workers are blocked on DB acquisition.
 var
-  LCfg: TDispatchConfig;
+  LCfg:  TDispatchConfig;
+  LResp: TBytes;
 begin
+  // R-5: pre-queue backpressure — reject with 503 before queuing when the
+  // number of in-flight (queued + executing) tasks reaches MaxQueueDepth.
+  // Force-close the connection (KeepAlive := False) so the client does not
+  // immediately retry on the same socket and worsen the overload.
+  if (FMaxQueueDepth > 0) and
+     (TInterlocked.Read(FInFlightCount) >= Int64(FMaxQueueDepth)) then
+  begin
+    LResp := BuildHTTPResponse(503, 'text/plain',
+      TEncoding.ASCII.GetBytes('Service Unavailable'),
+      TNativeConn(AConn).KeepAlive, [],
+      FSecureHeadersEnabled, FServerBanner);
+    _EncryptAndSend(AConn, LResp);
+    // OnSendComplete re-arma recv (keep-alive) ou fecha — não forçar close aqui
+    Exit;
+  end;
+
   LCfg.ProxyProtocol        := FProxyProtocol;
   LCfg.MaxRequestSize       := FMaxRequestSize;
   LCfg.MaxHeaderSize        := FMaxHeaderSize;
@@ -803,8 +825,8 @@ begin
   LCfg.H2Enabled            := FH2Enabled;
   LCfg.SecureHeadersEnabled := FSecureHeadersEnabled;
   LCfg.ServerBanner         := FServerBanner;
-  LCfg.MaxQueueDepth        := FMaxQueueDepth;
-  LCfg.InFlightCount        := @FInFlightCount;
+  LCfg.MaxQueueDepth        := 0;           // consumed here; Dispatcher needs no copy
+  LCfg.InFlightCount        := nil;         // ditto
   LCfg.RateLimitResponse    := FRateLimitResponse;
   LCfg.CompressionEnabled   := FCompressionEnabled;
   LCfg.Compression          := FCompression;
@@ -814,16 +836,31 @@ begin
   LCfg.MetricsPath          := FMetricsPath;
   LCfg.MetricsAllowedCIDR   := FMetricsAllowedCIDR;
 
+  // Count this task as in-flight from queue time.  The finally in the pool
+  // worker decrements it after Dispatch returns, ensuring the counter always
+  // reflects queued + executing work — making the pre-queue check above
+  // accurate across all concurrent _DispatchAccumBuf callers.
+  TInterlocked.Increment(FInFlightCount);
+  if Assigned(FMetrics) then FMetrics.AdjustInflight(1);
+
   // AddRef before posting: pool worker holds this ref until Dispatch returns.
-  // Prevents the connection from being freed if _CloseConn runs concurrently
-  // (e.g. idle-sweep timeout) while the pool worker is in a blocking handler.
+  // InFlightPool is an atomic counter (not a bool): pipelining can result in
+  // lambda N+1 being posted while lambda N is still in its finally block.
+  // Using a counter ensures the idle-sweep skips the connection as long as ANY
+  // pool lambda is live.  LastActivity is refreshed when the worker actually
+  // starts — prevents queue-wait time from counting toward the idle timeout.
+  TInterlocked.Increment(TNativeConn(AConn).InFlightPool);
   TNativeConn(AConn).AddRef;
   FRequestPool.Post(
     procedure
     begin
       try
+        TNativeConn(AConn).LastActivity := Now;  // reset idle-clock at dequeue time
         FDispatcher.Dispatch(AConn, LCfg);
       finally
+        TInterlocked.Decrement(FInFlightCount);
+        if Assigned(FMetrics) then FMetrics.AdjustInflight(-1);
+        TInterlocked.Decrement(TNativeConn(AConn).InFlightPool);
         TNativeConn(AConn).Release;
       end;
     end);
@@ -1380,7 +1417,11 @@ begin
     FConnLock.Enter;
     try
       SetLength(LSnap, FConnList.Count);
-      for I := 0 to FConnList.Count - 1 do LSnap[I] := FConnList[I];
+      for I := 0 to FConnList.Count - 1 do
+      begin
+        LSnap[I] := FConnList[I];
+        TNativeConn(LSnap[I]).AddRef;  // hold ref so conn cannot be destroyed
+      end;                             // between snapshot and processing below
     finally
       FConnLock.Leave;
     end;
@@ -1389,9 +1430,22 @@ begin
     for I := 0 to High(LSnap) do
     begin
       LConn := TNativeConn(LSnap[I]);
-      LIdle := MilliSecondsBetween(LNow, LConn.LastActivity);
-      if LIdle > FIdleTimeoutMs then
-        FIOBackend.ShutdownConn(LSnap[I]);
+      try
+        // Skip connections currently being handled by the elastic pool — their
+        // LastActivity reflects when the request arrived, not when processing
+        // started.  Closing a socket while a pool worker holds a blocking DB
+        // call would cause the subsequent WSASend to fail and lose the response.
+        if TInterlocked.Add(LConn.InFlightPool, 0) > 0 then Continue;
+        LIdle := MilliSecondsBetween(LNow, LConn.LastActivity);
+        if LIdle > FIdleTimeoutMs then
+        begin
+          _Log(llError, '[sweep] idle close: ' + LConn.RemoteAddr +
+            ' idle=' + IntToStr(LIdle) + 'ms');
+          FIOBackend.ShutdownConn(LSnap[I]);
+        end;
+      finally
+        LConn.Release;  // drop sweep ref acquired in snapshot loop
+      end;
     end;
   end;
 end;
@@ -1556,8 +1610,10 @@ begin
   if Assigned(FMetrics) then FMetrics.AdjustConnections(1);
   try
     FIOBackend.RegisterConn(LConn);
+    FIOBackend.PostRecv(LConn);  // arm the first recv (io_uring/epoll need this here;
+                                 // IOCP no longer calls PostRecv inside RegisterConn)
   except
-    // RegisterConn failure (e.g. IOCP associate) — undo admission and close
+    // RegisterConn/PostRecv failure — undo admission and close
     FConnLock.Enter;
     try
       FConnList.Remove(LConn);
@@ -1567,7 +1623,7 @@ begin
     end;
     if Assigned(FMetrics) then FMetrics.AdjustConnections(-1);
     if LConn.SSLHandle <> nil then FSSLProvider.FreeSSL(LConn.SSLHandle);
-    LConn.Release;  // #43: IOCP associate failed before PostRecv — drop server ref
+    LConn.Release;  // #43: associate/PostRecv failed — drop server ref
   end;
 end;
 

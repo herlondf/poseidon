@@ -60,8 +60,10 @@ type
     class var FWorkerCount:     Integer;
     class var FMinWorkerCount:  Integer;
     class var FMaxConns:        Integer;
+    class var FMaxQueueDepth:   Integer;
     class var FKeepAlive:       Boolean;
     class var FListenQueue:     Integer;
+    class var FSSLEnabled:      Boolean;
 
     class function  GetDefaultEvent: TEvent; static;
     class function  GetDefaultServer: TPoseidonNativeServer; static;
@@ -75,7 +77,9 @@ type
     // Standard Horse provider properties (compatible with Console provider API)
     class property Port:                Integer read FPort        write FPort;
     class property Host:                string  read FHost        write FHost;
-    class property MaxConnections:      Integer read FMaxConns    write FMaxConns;
+    class property MaxConnections:      Integer read FMaxConns       write FMaxConns;
+    // R-5 backpressure: max queued+executing tasks before 503. 0 = unlimited.
+    class property MaxQueueDepth:       Integer read FMaxQueueDepth  write FMaxQueueDepth;
     class property ListenQueue:         Integer read FListenQueue write FListenQueue;
     class property KeepConnectionAlive: Boolean read FKeepAlive   write FKeepAlive;
     // Poseidon-specific: max request-handler threads (elastic pool ceiling).
@@ -86,6 +90,9 @@ type
     // 0 = auto (same as IO workers: max(4, ProcessorCount*2) capped at 16).
     class property MinWorkerCount: Integer read FMinWorkerCount write FMinWorkerCount;
     class property IsRunning:   Boolean read FRunning;
+    // Set to True when Poseidon is behind HTTPS/TLS so Swagger UI shows https first.
+    // Default False (plain HTTP). Must be set before Listen.
+    class property SSLEnabled:  Boolean read FSSLEnabled write FSSLEnabled;
 
     class procedure Listen; overload; override;
     class procedure Listen(const APort: Integer; const AHost: string;
@@ -104,7 +111,8 @@ implementation
 
 uses
   Horse.Core.RouterTree,
-  Web.HTTPApp;
+  Web.HTTPApp,
+  System.RegularExpressions;
 
 { THorseProviderPoseidonNative }
 
@@ -129,15 +137,19 @@ class procedure THorseProviderPoseidonNative.HandleRequest(
   out   ABody:         TBytes;
   out   AExtraHeaders: TArray<TPair<string,string>>);
 var
-  LWebReq:  TNativeWebRequest;
-  LWebRes:  TNativeWebResponse;
-  LReq:     THorseRequest;
-  LRes:     THorseResponse;
-  LStatus:  Integer;
-  LCT:      string;
-  LBody:    TBytes;
-  LEHdrs:   TArray<TPair<string,string>>;
-  LFlushed: Boolean;
+  LWebReq:          TNativeWebRequest;
+  LWebRes:          TNativeWebResponse;
+  LReq:             THorseRequest;
+  LRes:             THorseResponse;
+  LStatus:          Integer;
+  LCT:              string;
+  LBody:            TBytes;
+  LEHdrs:           TArray<TPair<string,string>>;
+  LFlushed:         Boolean;
+  LJson:            string;
+  LForwardedProto:  string;
+  LClientIsHTTPS:   Boolean;
+  LIdx:             Integer;
 begin
   LStatus  := 500;
   LCT      := 'application/json';
@@ -192,6 +204,35 @@ begin
   AContentType  := LCT;
   ABody         := LBody;
   AExtraHeaders := LEHdrs;
+
+  // Swagger UI picks the first scheme from the spec 'schemes' array.
+  // Detect the client-facing scheme automatically:
+  //   - FSSLEnabled = True  → Poseidon terminates TLS directly → HTTPS
+  //   - X-Forwarded-Proto: https → sitting behind an HTTPS reverse proxy → HTTPS
+  //   - otherwise → plain HTTP
+  // When HTTP, put http first so Swagger UI defaults to the correct scheme with
+  // no manual configuration. GBSwagger serialises via TJSONValue.Format
+  // (pretty-printed), so the array may span lines — regex handles any whitespace.
+  if SameText(AContentType, 'application/json') and
+     AReq.Path.EndsWith('swagger/doc/json') then
+  begin
+    LForwardedProto := '';
+    for LIdx := 0 to High(AReq.Headers) do
+      if SameText(AReq.Headers[LIdx].Key, 'X-Forwarded-Proto') then
+      begin
+        LForwardedProto := AReq.Headers[LIdx].Value;
+        Break;
+      end;
+    LClientIsHTTPS := FSSLEnabled or SameText(LForwardedProto, 'https');
+    if not LClientIsHTTPS then
+    begin
+      LJson := TEncoding.UTF8.GetString(ABody);
+      LJson := TRegEx.Replace(LJson,
+        '"schemes"\s*:\s*\[\s*"https"\s*,\s*"http"\s*\]',
+        '"schemes":["http","https"]');
+      ABody := TEncoding.UTF8.GetBytes(LJson);
+    end;
+  end;
 end;
 
 class procedure THorseProviderPoseidonNative.Listen;
@@ -214,6 +255,10 @@ begin
   // MaxConnections at TCP level — 0 means unlimited (Poseidon backpressure via worker pool)
   if FMaxConns > 0 then
     LServer.MaxConnections := FMaxConns;
+
+  // R-5 backpressure: limit queued+executing tasks; 0 = unlimited
+  if FMaxQueueDepth > 0 then
+    LServer.MaxQueueDepth := FMaxQueueDepth;
 
   // Idle keep-alive timeout: 30s matches nginx default
   LServer.IdleTimeoutMs := 30000;
@@ -294,10 +339,12 @@ initialization
   THorseProviderPoseidonNative.FWorkerCount    := THorseProviderPoseidonNative.DEFAULT_WORKER_COUNT;
   THorseProviderPoseidonNative.FMinWorkerCount := THorseProviderPoseidonNative.DEFAULT_MIN_WORKER_COUNT;
   THorseProviderPoseidonNative.FMaxConns       := 0;
+  THorseProviderPoseidonNative.FMaxQueueDepth  := 0;
   THorseProviderPoseidonNative.FKeepAlive      := True;
   THorseProviderPoseidonNative.FListenQueue    := 0;
   THorseProviderPoseidonNative.FRunning        := False;
   THorseProviderPoseidonNative.FServer         := nil;
   THorseProviderPoseidonNative.FEvent          := nil;
+  THorseProviderPoseidonNative.FSSLEnabled     := False;
 
 end.

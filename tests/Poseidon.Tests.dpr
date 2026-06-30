@@ -21,6 +21,7 @@ uses
   Poseidon.Tests.HPACK,
   Poseidon.Tests.Metrics,
   Poseidon.Tests.Dispatcher,
+  Poseidon.Tests.WebAdapters,
   Poseidon.Mock.SSLProvider;
 
 var

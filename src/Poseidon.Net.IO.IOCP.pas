@@ -233,7 +233,8 @@ begin
     // Association failed — caller (_OnNewSocket) will close the conn
     raise Exception.Create('IOCP associate failed');
   end;
-  PostRecv(AConn);
+  // PostRecv is now called explicitly by _OnNewSocket after RegisterConn,
+  // keeping the responsibility at the server level (same contract as io_uring/epoll).
 end;
 
 procedure TIOCPBackend.PostRecv(AConn: Pointer);
@@ -298,6 +299,8 @@ begin
 
   if (LRes = SOCKET_ERROR) and (WSAGetLastError <> WSA_IO_PENDING) then
   begin
+    Writeln(ErrOutput, '[iocp] WSASend failed: WSAError=', WSAGetLastError,
+      ' conn=', NativeUInt(AConn));
     LConn.Release;  // #43: op never posted — drop the ref we just took
     TBufferPool.Release(LCtx^.SendBuf);
     Dispose(LCtx);
