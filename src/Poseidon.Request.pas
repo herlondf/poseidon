@@ -68,6 +68,13 @@ type
     function PathInfo: string;
 
     function RawWebRequest: TWebRequest;
+
+    // --- Horse compatibility aliases ---
+    // These methods allow Horse middlewares and handlers to work without changes.
+    // Req.Body → Req.RawBody; Req.Body<T> → Req.GetBody<T>
+    function Body: string; overload;
+    function Body<T: class>: T; overload;
+    function Body(const ABody: TObject): TPoseidonRequest; overload;
   end;
 
 implementation
@@ -339,6 +346,23 @@ begin
   LRaw := Cookie.Get(AName);
   if LRaw = '' then Exit;
   Result := TCookieFormat.VerifySigned(LRaw, ASecret, AValue);
+end;
+
+// --- Horse compatibility aliases ---
+
+function TPoseidonRequest.Body: string;
+begin
+  Result := RawBody;
+end;
+
+function TPoseidonRequest.Body<T>: T;
+begin
+  Result := GetBody<T>;
+end;
+
+function TPoseidonRequest.Body(const ABody: TObject): TPoseidonRequest;
+begin
+  Result := SetBody(ABody);
 end;
 
 end.

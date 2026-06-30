@@ -26,7 +26,7 @@ type
     destructor Destroy; override;
 
     // Send a plain string body
-    function Send(const AContent: string): TPoseidonResponse;
+    function Send(const AContent: string): TPoseidonResponse; overload;
 
     // Serialize AObject to JSON, set Content-Type: application/json, optionally free AObject
     function Json(AObject: TObject; AOwns: Boolean = True): TPoseidonResponse; overload;
@@ -86,6 +86,14 @@ type
       const AOptions: TCookieOptions): TPoseidonResponse; overload;
     function SetSignedCookie(const AName, AValue, ASecret: string): TPoseidonResponse; overload;
     function ClearCookie(const AName: string; const APath: string = '/'): TPoseidonResponse;
+
+    // --- Horse compatibility aliases ---
+    function AddHeader(const AName, AValue: string): TPoseidonResponse;
+    function RedirectTo(const ALocation: string): TPoseidonResponse; overload;
+    function RedirectTo(const ALocation: string; AStatus: THTTPStatus): TPoseidonResponse; overload;
+    function Send<T: class>(AContent: T): TPoseidonResponse; overload;
+    function Content: TObject; overload;
+    function Content(const AContent: TObject): TPoseidonResponse; overload;
 
     // Reset for pool reuse — reassigns the underlying web response and resets status
     procedure Reinitialize(AWebResponse: TWebResponse);
@@ -395,6 +403,46 @@ begin
   // Max-Age=0 (or in the past) tells the browser to evict immediately.
   LOpts := TCookieOptions.Default.WithPath(APath).WithMaxAge(-1);
   Result := SetCookie(AName, '', LOpts);
+end;
+
+// --- Horse compatibility aliases ---
+
+function TPoseidonResponse.AddHeader(const AName, AValue: string): TPoseidonResponse;
+begin
+  Result := Header(AName, AValue);
+end;
+
+function TPoseidonResponse.RedirectTo(const ALocation: string): TPoseidonResponse;
+begin
+  Result := Redirect(ALocation);
+end;
+
+function TPoseidonResponse.RedirectTo(const ALocation: string; AStatus: THTTPStatus): TPoseidonResponse;
+begin
+  Result := Redirect(ALocation, AStatus);
+end;
+
+function TPoseidonResponse.Send<T>(AContent: T): TPoseidonResponse;
+begin
+  // Horse's Send<T> serializes the object to JSON and frees it.
+  // Detect TJSONValue subclasses (TJSONArray, TJSONObject) and use the
+  // TJSONValue overload to avoid RTTI serialization (which causes stack overflow).
+  if TObject(AContent) is TJSONValue then
+    Result := Json(TJSONValue(TObject(AContent)))
+  else
+    Result := Json(TObject(AContent));
+end;
+
+function TPoseidonResponse.Content: TObject;
+begin
+  Result := nil;  // Poseidon doesn't store content object; return nil for compat
+end;
+
+function TPoseidonResponse.Content(const AContent: TObject): TPoseidonResponse;
+begin
+  // Horse stores the content object for later retrieval. Poseidon doesn't need
+  // this pattern but we accept the call silently for compatibility.
+  Result := Self;
 end;
 
 end.
