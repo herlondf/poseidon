@@ -20,7 +20,7 @@
     <SanitizedProjectName>PoseidonTests</SanitizedProjectName>
     <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;$(DCC_Namespace)</DCC_Namespace>
     <VerInfo_Locale>1046</VerInfo_Locale>
-    <DCC_UnitSearchPath>.\;.\mocks;..\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+    <DCC_UnitSearchPath>.\;.\mocks;..\src;..\src\providers;..\middlewares;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
     <DCC_DcuOutput>.\dcu\$(Config)</DCC_DcuOutput>
     <DCC_ExeOutput>.\bin\$(Config)</DCC_ExeOutput>
   </PropertyGroup>
@@ -63,7 +63,17 @@
     <DCCReference Include="Poseidon.Tests.Connection.pas"/>
     <DCCReference Include="Poseidon.Tests.Workers.pas"/>
     <DCCReference Include="Poseidon.Tests.PoolNative.pas"/>
+    <DCCReference Include="Poseidon.Tests.Router.pas"/>
+    <DCCReference Include="Poseidon.Tests.Validation.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.pas"/>
+    <DCCReference Include="Poseidon.Tests.OpenAPI.pas"/>
+    <DCCReference Include="Poseidon.Tests.Problem.pas"/>
+    <DCCReference Include="Poseidon.Tests.SerializerCookies.pas"/>
+    <DCCReference Include="Poseidon.Tests.StabilityMiddleware.pas"/>
+    <DCCReference Include="Poseidon.Tests.StaticMetrics.pas"/>
     <DCCReference Include="mocks\Poseidon.Mock.SSLProvider.pas"/>
+    <DCCReference Include="mocks\Poseidon.Mock.WebRequest.pas"/>
+    <DCCReference Include="mocks\Poseidon.Mock.WebResponse.pas"/>
   </ItemGroup>
   <ProjectExtensions>
     <Borland.Personality>Delphi.Personality.12</Borland.Personality>

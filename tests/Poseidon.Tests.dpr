@@ -25,7 +25,19 @@ uses
   Poseidon.Tests.Connection,
   Poseidon.Tests.Workers,
   Poseidon.Tests.PoolNative,
-  Poseidon.Mock.SSLProvider;
+  // Framework tests (ex-Pegasus)
+  Poseidon.Tests.Router,
+  Poseidon.Tests.Validation,
+  Poseidon.Tests.Middleware,
+  Poseidon.Tests.OpenAPI,
+  Poseidon.Tests.Problem,
+  Poseidon.Tests.SerializerCookies,
+  Poseidon.Tests.StabilityMiddleware,
+  Poseidon.Tests.StaticMetrics,
+  // Mocks
+  Poseidon.Mock.SSLProvider,
+  Poseidon.Mock.WebRequest,
+  Poseidon.Mock.WebResponse;
 
 var
   LRunner:  ITestRunner;
