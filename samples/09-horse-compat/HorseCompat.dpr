@@ -4,6 +4,7 @@ program HorseCompat;
 // This should compile and run identically to a Horse application.
 
 {$APPTYPE CONSOLE}
+{$DEFINE POSEIDON_HORSE_COMPAT}
 
 uses
   System.SysUtils,

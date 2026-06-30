@@ -75,16 +75,14 @@ type
   end;
 
   // Tests Horse type aliases compile and work
+  // Tests compat methods: Send<T>, RedirectTo, AddHeader, Exception
   [TestFixture]
-  THorseCompatTypeTests = class
+  THorseCompatMethodTests = class
   public
-    [Test] procedure TypeAlias_THorseRequest_IsTPoseidonRequest;
-    [Test] procedure TypeAlias_THorseResponse_IsTPoseidonResponse;
-    [Test] procedure TypeAlias_EHorseException_HasStatus;
-    [Test] procedure TypeAlias_THorseCallback_Callable;
-    [Test] procedure TypeAlias_SendGeneric_WithJSONArray;
-    [Test] procedure TypeAlias_SendGeneric_WithJSONObject;
-    [Test] procedure TypeAlias_RedirectTo_Works;
+    [Test] procedure SendGeneric_WithJSONArray;
+    [Test] procedure SendGeneric_WithJSONObject;
+    [Test] procedure RedirectTo_Works;
+    [Test] procedure Exception_HasStatus;
   end;
 
   {$M-}
@@ -168,13 +166,13 @@ end;
 
 procedure THorseCompatCORSTests.CORS_InterruptsWithException;
 begin
-  // CORS middleware raises EHorseCallbackInterrupted after preflight
+  // CORS middleware raises EPoseidonCallbackInterrupted after preflight
   Assert.WillRaise(
     procedure begin
-      raise EHorseCallbackInterrupted.Create;
+      raise EPoseidonCallbackInterrupted.Create;
     end,
     EPoseidonCallbackInterrupted,
-    'EHorseCallbackInterrupted must be EPoseidonCallbackInterrupted');
+    'EPoseidonCallbackInterrupted must be EPoseidonCallbackInterrupted');
 end;
 
 // ---------------------------------------------------------------------------
@@ -532,7 +530,7 @@ begin
   LCaught := False;
   LStatus := 0;
   try
-    raise EHorseException.Create('not found', THTTPStatus.NotFound);
+    raise EPoseidonException.Create('not found', THTTPStatus.NotFound);
   except
     on E: EPoseidonException do
     begin
@@ -540,81 +538,24 @@ begin
       LStatus := E.Status.ToInteger;
     end;
   end;
-  Assert.IsTrue(LCaught, 'EHorseException must be caught as EPoseidonException');
+  Assert.IsTrue(LCaught, 'EPoseidonException must be caught as EPoseidonException');
   Assert.AreEqual(404, LStatus, 'Exception status must be 404');
 end;
 
 // ---------------------------------------------------------------------------
-// Type Alias Tests
+// Compat Method Tests (Send<T>, RedirectTo, Exception)
 // ---------------------------------------------------------------------------
 
-procedure THorseCompatTypeTests.TypeAlias_THorseRequest_IsTPoseidonRequest;
+procedure THorseCompatMethodTests.SendGeneric_WithJSONArray;
 var
-  LReq: THorseRequest;
-  LMockReq: TMockWebRequest;
-begin
-  LMockReq := MakeMockReq;
-  LReq := THorseRequest.Create(LMockReq);
-  try
-    Assert.IsTrue(LReq is TPoseidonRequest,
-      'THorseRequest must be TPoseidonRequest');
-  finally
-    LReq.Free; LMockReq.Free;
-  end;
-end;
-
-procedure THorseCompatTypeTests.TypeAlias_THorseResponse_IsTPoseidonResponse;
-var
-  LRes: THorseResponse;
-  LMockReq: TMockWebRequest;
-  LMockRes: TMockWebResponse;
-begin
-  LMockReq := MakeMockReq;
-  LMockRes := TMockWebResponse.Create(LMockReq);
-  LRes := THorseResponse.Create(LMockRes);
-  try
-    Assert.IsTrue(LRes is TPoseidonResponse,
-      'THorseResponse must be TPoseidonResponse');
-  finally
-    LRes.Free; LMockRes.Free; LMockReq.Free;
-  end;
-end;
-
-procedure THorseCompatTypeTests.TypeAlias_EHorseException_HasStatus;
-var
-  E: EHorseException;
-begin
-  E := EHorseException.Create('test', THTTPStatus.BadRequest);
-  try
-    Assert.AreEqual(400, E.Status.ToInteger,
-      'EHorseException.Status must work via alias');
-  finally
-    E.Free;
-  end;
-end;
-
-procedure THorseCompatTypeTests.TypeAlias_THorseCallback_Callable;
-var
-  LCalled: Boolean;
-  LCb: THorseCallback;
-begin
-  LCalled := False;
-  LCb := procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
-         begin LCalled := True; end;
-  LCb(nil, nil, nil);
-  Assert.IsTrue(LCalled, 'THorseCallback must be callable');
-end;
-
-procedure THorseCompatTypeTests.TypeAlias_SendGeneric_WithJSONArray;
-var
-  LRes: THorseResponse;
+  LRes: TPoseidonResponse;
   LMockReq: TMockWebRequest;
   LMockRes: TMockWebResponse;
   LArr: TJSONArray;
 begin
   LMockReq := MakeMockReq;
   LMockRes := TMockWebResponse.Create(LMockReq);
-  LRes := THorseResponse.Create(LMockRes);
+  LRes := TPoseidonResponse.Create(LMockRes);
   try
     LArr := TJSONArray.Create;
     LArr.Add(TJSONObject.Create.AddPair('id', TJSONNumber.Create(1)));
@@ -626,15 +567,15 @@ begin
   end;
 end;
 
-procedure THorseCompatTypeTests.TypeAlias_SendGeneric_WithJSONObject;
+procedure THorseCompatMethodTests.SendGeneric_WithJSONObject;
 var
-  LRes: THorseResponse;
+  LRes: TPoseidonResponse;
   LMockReq: TMockWebRequest;
   LMockRes: TMockWebResponse;
 begin
   LMockReq := MakeMockReq;
   LMockRes := TMockWebResponse.Create(LMockReq);
-  LRes := THorseResponse.Create(LMockRes);
+  LRes := TPoseidonResponse.Create(LMockRes);
   try
     LRes.Send<TJSONObject>(TJSONObject.Create.AddPair('ok', TJSONBool.Create(True)));
     Assert.IsTrue(Pos('ok', LMockRes.SentContent) > 0,
@@ -644,21 +585,34 @@ begin
   end;
 end;
 
-procedure THorseCompatTypeTests.TypeAlias_RedirectTo_Works;
+procedure THorseCompatMethodTests.RedirectTo_Works;
 var
-  LRes: THorseResponse;
+  LRes: TPoseidonResponse;
   LMockReq: TMockWebRequest;
   LMockRes: TMockWebResponse;
 begin
   LMockReq := MakeMockReq;
   LMockRes := TMockWebResponse.Create(LMockReq);
-  LRes := THorseResponse.Create(LMockRes);
+  LRes := TPoseidonResponse.Create(LMockRes);
   try
     LRes.RedirectTo('/new-location');
     Assert.AreEqual(303, LMockRes.SentStatusCode,
       'RedirectTo must set status 303');
   finally
     LRes.Free; LMockRes.Free; LMockReq.Free;
+  end;
+end;
+
+procedure THorseCompatMethodTests.Exception_HasStatus;
+var
+  E: EPoseidonException;
+begin
+  E := EPoseidonException.Create('test', THTTPStatus.BadRequest);
+  try
+    Assert.AreEqual(400, E.Status.ToInteger,
+      'EPoseidonException.Status must return correct code');
+  finally
+    E.Free;
   end;
 end;
 
@@ -670,6 +624,6 @@ initialization
   TDUnitX.RegisterTestFixture(THorseCompatCompressionTests);
   TDUnitX.RegisterTestFixture(THorseCompatPaginationTests);
   TDUnitX.RegisterTestFixture(THorseCompatPipelineTests);
-  TDUnitX.RegisterTestFixture(THorseCompatTypeTests);
+  TDUnitX.RegisterTestFixture(THorseCompatMethodTests);
 
 end.

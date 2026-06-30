@@ -77,18 +77,6 @@ type
   TPoseidonIndy       = class(TPoseidonProviderIndy);
   TPoseidonIndyDirect = class(TPoseidonProviderIndyDirect);
 
-  // --- Horse compatibility aliases ---
-  // Drop-in replacement: change "uses Horse" to "uses Poseidon" and all
-  // THorse* references continue to compile without modification.
-  THorseRequest              = TPoseidonRequest;
-  THorseResponse             = TPoseidonResponse;
-  THorseCallback             = TPoseidonCallback;
-  THorseCallbackRequestResponse = TPoseidonCallbackReqRes;
-  THorseCallbackRequest      = TPoseidonCallbackReq;
-  EHorseException            = EPoseidonException;
-  EHorseCallbackInterrupted  = EPoseidonCallbackInterrupted;
-  THorse                     = TPoseidon;
-
 implementation
 
 end.
