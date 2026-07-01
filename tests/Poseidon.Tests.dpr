@@ -36,6 +36,8 @@ uses
   Poseidon.Tests.StaticMetrics,
   // Horse compatibility tests
   Poseidon.Tests.HorseCompat,
+  // Real middleware integration tests (execute actual Horse middlewares)
+  Poseidon.Tests.MiddlewareIntegration in 'compat\Poseidon.Tests.MiddlewareIntegration.pas',
   // Mocks
   Poseidon.Mock.SSLProvider,
   Poseidon.Mock.WebRequest,
