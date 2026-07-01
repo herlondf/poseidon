@@ -1,152 +1,209 @@
 # Poseidon
 
-> *God of the seas — raw transport, the force of the waves.*
+> *God of the seas — raw power, unmatched speed.*
 
 <p align="center">
   <img src="docs/logo.png" alt="Poseidon" width="320"/>
 </p>
 
 <p align="center">
-  High-performance async HTTP server for Delphi — IOCP on Windows, io_uring/epoll on Linux.<br/>
-  Zero external dependencies. Single WSASend per response. WebSocket, SSL/TLS and HTTP/2 built-in.
+  High-performance REST framework for Delphi — IOCP on Windows, io_uring/epoll on Linux.<br/>
+  29k RPS with router &amp; middleware. Zero erros under 200 concurrent users. Drop-in Horse replacement.
 </p>
 
 ---
 
-## Overview
+## Quick Start
 
-Poseidon is a standalone Delphi library that provides a native async I/O HTTP server.
-It is used as the transport layer for [Pegasus](https://github.com/herlondf/pegasus) and
-[Horse](https://github.com/HashLoad/horse) when the `HORSE_ASYNCIO` define is active.
+```pascal
+uses Poseidon;
 
+begin
+  TPoseidon.Get('/ping',
+    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse)
+    begin
+      Res.Send('pong');
+    end);
+
+  TPoseidon.Get('/users/:id',
+    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse)
+    begin
+      Res.Json(TJSONObject.Create.AddPair('id', Req.Params.Get('id')));
+    end);
+
+  TPoseidon.Listen(9000);
+end.
+```
+
+## Why Poseidon
+
+| | Poseidon | Horse + Indy |
+|---|---|---|
+| **Throughput** (200 VUs, 2min) | 28,885 RPS | 2,091 RPS |
+| **Latency p95** | 22ms | 156ms |
+| **Errors** | 0% | 5-80% |
+| **HTTP/2** | Built-in | No |
+| **WebSocket** | Built-in | No |
+| **SSL/TLS** | Native OpenSSL (SNI, mTLS, ALPN) | Via Indy |
+| **Middlewares** | 15 built-in | Community |
+| **Validation** | `[Required]`, `[Email]`, `[Range]` | Manual |
+| **OpenAPI** | Built-in Swagger UI | Community |
+
+## Features
+
+### Framework
+| Feature | Status |
+|---------|--------|
+| Radix-tree router with `:param` support | ✅ |
+| Middleware pipeline (Use, Group, GroupBlock) | ✅ |
+| Request: Body, Query, Params, Headers, Cookie, Session | ✅ |
+| Response: Send, Json, Status, Header, Redirect, SendFile | ✅ |
+| DTO binding with validation attributes | ✅ |
+| OpenAPI 3.x + Swagger UI | ✅ |
+| RFC 7807 Problem Details | ✅ |
+| Signed cookies (HMAC-SHA256) | ✅ |
+| Horse API compatibility (opt-in shim) | ✅ |
+
+### Engine
 | Feature | Status |
 |---------|--------|
 | HTTP/1.1 keep-alive | ✅ |
-| HTTPS (OpenSSL) | ✅ |
-| SNI multi-cert | ✅ |
-| mTLS (client certificates) | ✅ |
-| WebSocket | ✅ |
-| HTTP/2 (h2 via ALPN) | ✅ |
-| HTTP/2 cleartext (h2c upgrade) | ✅ |
-| HTTP/2 flow control (RFC 7540 §6.9) | ✅ |
-| HTTP/2 server push (RFC 7540 §8.2) | ✅ |
-| WebSocket permessage-deflate (RFC 7692) | ✅ |
-| TLS session resumption | ✅ |
-| gzip compression | ✅ |
-| Rate limiting (per-IP and global) | ✅ |
-| Prometheus metrics endpoint | ✅ |
+| HTTPS (OpenSSL), SNI, mTLS | ✅ |
+| HTTP/2 (ALPN h2, h2c, server push, flow control) | ✅ |
+| WebSocket (RFC 6455, permessage-deflate) | ✅ |
+| gzip + Brotli compression | ✅ |
+| Rate limiting (per-IP, global) | ✅ |
+| Prometheus metrics | ✅ |
 | Proxy Protocol v1/v2 | ✅ |
-| Security headers (opt-in) | ✅ |
-| Path traversal & request smuggling protection | ✅ |
-| Linux 64-bit (io_uring, kernel ≥ 5.1) | ✅ |
-| Linux 64-bit (epoll fallback, kernel < 5.1) | ✅ |
+| Security headers, path traversal & smuggling protection | ✅ |
 | Windows 64-bit (IOCP) | ✅ |
+| Linux 64-bit (io_uring ≥ 5.6, epoll fallback) | ✅ |
+
+### Built-in Middlewares
+
+| Middleware | Description |
+|-----------|-------------|
+| `Poseidon.Middleware.CORS` | CORS headers |
+| `Poseidon.Middleware.JWT` | HMAC-SHA256 Bearer token validation |
+| `Poseidon.Middleware.Logger` | Request logging |
+| `Poseidon.Middleware.RateLimit` | Fixed-window IP rate limiter |
+| `Poseidon.Middleware.Compression` | gzip/deflate response compression |
+| `Poseidon.Middleware.Timeout` | Per-request timeout → 503 |
+| `Poseidon.Middleware.BodyLimit` | Content-Length guard → 413 |
+| `Poseidon.Middleware.RequestID` | X-Request-ID echo/generate |
+| `Poseidon.Middleware.CircuitBreaker` | Sliding-window circuit breaker → 503 |
+| `Poseidon.Middleware.Metrics` | Prometheus /metrics endpoint |
+| `Poseidon.Middleware.Static` | Static file server (ETag, gzip, 304) |
+| `Poseidon.Middleware.HealthCheck` | /health endpoint |
+| `Poseidon.Middleware.Security` | Security headers |
+| `Poseidon.Middleware.Proxy` | HTTP proxy |
+| `Poseidon.Middleware.Digest` | Digest authentication |
 
 ## Requirements
 
 - Delphi 11 Alexandria or later
-- Linux 64-bit or Windows 64-bit target
-- OpenSSL (`libssl` / `libcrypto`) in PATH — only for HTTPS/HTTP2
+- Windows 64-bit or Linux 64-bit
+- OpenSSL in PATH (only for HTTPS/HTTP2)
 
 ## Installation
 
-Clone the repository and add the `src/` directory to your project's search path.
-No package install needed.
+Add `src/`, `src/providers/` and `middlewares/` to your project search path:
 
 ```
-{search path}
-<path-to-poseidon>\src\
+<poseidon>\src
+<poseidon>\src\providers
+<poseidon>\middlewares
 ```
 
-## Quick Start
+## Usage Examples
+
+### Middleware
 
 ```pascal
-uses Poseidon.Net.HttpServer;
+uses Poseidon, Poseidon.Middleware.CORS, Poseidon.Middleware.JWT;
 
-var
-  LServer: TPoseidonNativeServer;
-begin
-  LServer := TPoseidonNativeServer.Create;
-  LServer.Listen('0.0.0.0', 9000,
-    procedure(const AReq: TPoseidonNativeRequest;
-              out AStatus: Integer;
-              out AContentType: string;
-              out ABody: TBytes;
-              out AExtraHeaders: TArray<TPair<string,string>>)
-    begin
-      AStatus      := 200;
-      AContentType := 'text/plain';
-      ABody        := TEncoding.UTF8.GetBytes('Hello, world!');
-    end,
-    procedure begin Writeln('Listening on :9000'); end);
-end;
+TPoseidon.Use(TPoseidonMiddlewareCORS.New);
+TPoseidon.Use('/api', TPoseidonMiddlewareJWT.New('my-secret'));
+
+TPoseidon.Get('/api/data',
+  procedure(Req: TPoseidonRequest; Res: TPoseidonResponse)
+  begin
+    Res.Json(TJSONObject.Create.AddPair('user', Req.Session<TMySession>.Name));
+  end);
+
+TPoseidon.Listen(9000);
 ```
 
-See [`samples/`](samples/) for runnable examples.
-
-## Configuration at a Glance
-
-### Security
-
-| Property / Method | Default | Description |
-|-------------------|---------|-------------|
-| `AllowedMethods` | `[]` (all) | Allowlist of HTTP verbs — unlisted verbs return 405 |
-| `MinTLSVersion` | `$0303` (TLS 1.2) | Minimum TLS version; `0` = library default |
-| `ConfigureMTLS(CAFile)` | — | Require client certificates signed by the given CA bundle |
-| `SecureHeadersEnabled` | `False` | Inject `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` |
-| `ServerBanner` | `'Poseidon/1.0'` | `Server:` header value; `''` suppresses the header entirely |
-
-### Limits & Reliability
-
-| Property | Default | Description |
-|----------|---------|-------------|
-| `MaxRequestSize` | 8 MB | Maximum accumulated request size — returns 413 when exceeded |
-| `MaxHeaderSize` | 64 KB | Maximum header section size — returns 400 when exceeded |
-| `MaxWSFrameSize` | 0 (unlimited) | Maximum WebSocket frame payload — closes with 1009 when exceeded |
-| `MaxQueueDepth` | 0 (unlimited) | Max concurrent in-flight requests — returns 503 when exceeded |
-| `MaxConnections` | 0 (unlimited) | Maximum total concurrent connections |
-| `MaxConnectionsPerIP` | 0 (unlimited) | Maximum connections from a single IP |
-| `DrainTimeoutMs` | 30 000 ms | Maximum wait for in-flight requests during `Stop()` |
-| `IdleTimeoutMs` | 10 000 ms | Idle connection timeout; `0` disables |
-
-### Performance & HTTP/2
-
-| Property | Default | Description |
-|----------|---------|-------------|
-| `WorkerCount` | 200 | **Elastic pool ceiling** — max concurrent request-handler threads. Pool starts at `MinWorkerCount` and grows here under load. Startup is always fast regardless of this value. `0` = auto (200) |
-| `MinWorkerCount` | auto | Elastic pool floor — threads kept alive at all times. `0` = auto (same as IO workers: `CPU × 2` capped at 16) |
-| `CompressionEnabled` | `False` | Enable inline gzip for text responses > 1 KB |
-| `HTTP2Enabled` | `False` | Enable HTTP/2 via ALPN (requires SSL) |
-| `H2MaxConcurrentStreams` | 100 | `SETTINGS_MAX_CONCURRENT_STREAMS` sent to clients |
-| `H2InitialWindowSize` | 65535 | `SETTINGS_INITIAL_WINDOW_SIZE` sent to clients |
-| `OnH2Push` | `nil` | Server push callback — populate `APushResources` to proactively push assets before the response |
-| `TCPFastOpen` | `False` | Enable TCP Fast Open (RFC 7413); silently ignored if unsupported |
-
-### Observability
-
-| Property | Default | Description |
-|----------|---------|-------------|
-| `MetricsEnabled` | `False` | Expose Prometheus metrics at `MetricsPath` |
-| `MetricsPath` | `'/metrics'` | Endpoint path for Prometheus scraping |
-| `MetricsAllowedCIDR` | `''` (all) | Restrict scraping to this CIDR (e.g. `'10.0.0.0/8'`) |
-| `RateLimitPerIP` | 0 (off) | Max requests/second from a single IP — returns 429 |
-| `RateLimitGlobal` | 0 (off) | Max requests/second across all clients — returns 429 |
-| `ProxyProtocol` | `ppDisabled` | Proxy Protocol mode: `ppDisabled`, `ppV1`, `ppV2`, `ppAuto` |
-| `OnLog` | `nil` | Error log callback; `nil` writes to `ErrOutput` |
-| `OnRequestLog` | `nil` | Access log callback (method, path, status, latency, bytes) |
-
-### Dependency Injection (R-6)
-
-The constructor accepts optional interfaces for unit-testing and customization:
+### DTO Validation
 
 ```pascal
-constructor Create(
-  ABufferPool:  IBufferPool          = nil;   // nil → built-in multi-tier pool
-  ASSLProvider: ISSLProvider         = nil;   // nil → real OpenSSL
-  ACompression: ICompressionProvider = nil);  // nil → ZLib gzip
+type
+  [Required]
+  TCreateUserDTO = class
+    [Required] [MinLength(3)]
+    Name: string;
+    [Required] [Email]
+    Email: string;
+    [Range(1, 150)]
+    Age: Integer;
+  end;
+
+TPoseidon.Post('/users',
+  procedure(Req: TPoseidonRequest; Res: TPoseidonResponse)
+  var DTO: TCreateUserDTO;
+  begin
+    DTO := Req.BodyAs<TCreateUserDTO>;  // validates automatically, 422 on failure
+    try
+      Res.Status(201).Json(DTO, False);
+    finally
+      DTO.Free;
+    end;
+  end);
 ```
 
-Pass a spy or stub in tests; pass `nil` in production for the real defaults.
+### Horse Migration
+
+For gradual migration from Horse, create a `Horse.pas` shim in your project:
+
+```pascal
+unit Horse;
+interface
+uses Poseidon;
+type
+  THorse = TPoseidon;
+  THorseRequest = TPoseidonRequest;
+  THorseResponse = TPoseidonResponse;
+  THorseCallback = TPoseidonCallback;
+  EHorseException = EPoseidonException;
+  EHorseCallbackInterrupted = EPoseidonCallbackInterrupted;
+implementation
+end.
+```
+
+Existing Horse code compiles without changes. Remove the shim once migration is complete.
+
+## Source Layout
+
+```
+src/
+  Poseidon.pas                     ← entry point (TPoseidon = TPoseidonProviderNative)
+  Poseidon.Core.pas                ← radix router + middleware pipeline
+  Poseidon.Request.pas             ← TPoseidonRequest
+  Poseidon.Response.pas            ← TPoseidonResponse
+  Poseidon.Validation.pas          ← [Required], [Email], [Range], [Pattern]
+  Poseidon.OpenAPI.pas             ← Swagger UI
+  Poseidon.Net.HttpServer.pas      ← async HTTP server (IOCP / io_uring / epoll)
+  Poseidon.Net.HTTP2.pas           ← HTTP/2 + HPACK
+  Poseidon.Net.WebSocket.pas       ← WebSocket + permessage-deflate
+  Poseidon.Net.SSL.pas             ← OpenSSL (SNI, ALPN, mTLS)
+  providers/
+    Poseidon.Provider.Native.pas   ← default (IOCP/epoll)
+    Poseidon.Provider.Indy.pas     ← fallback (WebBroker)
+middlewares/
+  Poseidon.Middleware.*.pas        ← 15 production-ready middlewares
+tests/
+  515 DUnitX tests                 ← engine + framework + middleware integration
+```
 
 ## Documentation
 
@@ -155,42 +212,13 @@ Pass a spy or stub in tests; pass `nil` in production for the real defaults.
 - [Contributing](docs/CONTRIBUTING.md)
 - [Como contribuir (pt-BR)](docs/CONTRIBUTING_pt-br.md)
 
-## Source layout
-
-```
-src/
-  Poseidon.Net.HttpServer.pas        ← core server (IOCP / io_uring / epoll)
-  Poseidon.Net.Connection.pas        ← connection object (ref-counted)
-  Poseidon.Net.Dispatcher.pas        ← protocol dispatcher (HTTP/WS/H2)
-  Poseidon.Net.HTTP1.Parser.pas      ← HTTP/1.1 request parser
-  Poseidon.Net.HTTP2.pas             ← HTTP/2 (HPACK + flow control)
-  Poseidon.Net.WebSocket.pas         ← WebSocket frame handling (zero-copy)
-  Poseidon.Net.SSL.pas               ← OpenSSL bindings + SNI + mTLS
-  Poseidon.Net.Security.pas          ← pure validation (IsPathSafe, StripCRLF …)
-  Poseidon.Net.Pool.Buffer.pas       ← multi-tier buffer pool (8 / 64 / 512 KB)
-  Poseidon.Net.ResponseBuilder.pas   ← pooled HTTP response builder
-  Poseidon.Net.Interfaces.pas        ← IBufferPool, ISSLProvider, ICompressionProvider
-  Poseidon.Net.Metrics.pas           ← Prometheus exposition format
-  Poseidon.Net.ProxyProtocol.pas     ← Proxy Protocol v1/v2 parser
-  Poseidon.Net.IO.pas                ← IO backend interface (IIOBackend)
-  Poseidon.Net.IO.IOCP.pas           ← Windows IOCP backend
-  Poseidon.Net.IO.IOUring.pas        ← Linux io_uring backend (kernel ≥ 5.1)
-  Poseidon.Net.IO.Epoll.pas          ← Linux epoll backend (fallback)
-```
-
 ## The Olympian Family
 
-> *Poseidon commands the seas — raw transport, the force of the waves.*
-> *Triton guards his father's waters — manages what flows, holds what must not be lost.*
-> *Pegasus flies through the skies — born from Medusa's blood, by the sword Hermes gave to Perseus.*
-> *Hermes runs between all realms — carries messages between gods, mortals and monsters, faster than any wave.*
-
-| Project | Myth | Role |
-|---------|------|------|
-| **Poseidon** (this lib) | God of the seas | Async transport layer — IOCP/io_uring/epoll, raw I/O |
-| [**Triton**](https://github.com/herlondf/triton) | Son of Poseidon, guardian of the depths | Generic resource pool — connections, clients, SMTP |
-| [**Pegasus**](https://github.com/herlondf/pegasus) | Born from Poseidon's blood, ridden by heroes | HTTP framework — routing, middleware, providers |
-| **Hermes** *(Redis4D)* | Messenger of the gods, guide between realms | Redis client — fast key-value, pub/sub, messaging |
+| Project | Role |
+|---------|------|
+| **Poseidon** (this) | REST framework + async HTTP engine |
+| [**Triton**](https://github.com/herlondf/triton) | Generic resource pool (connections, clients) |
+| **Hermes** *(Redis4D)* | Redis client (key-value, pub/sub) |
 
 ---
 
