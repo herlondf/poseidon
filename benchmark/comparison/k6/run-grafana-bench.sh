@@ -85,6 +85,7 @@ run_server() {
 
 run_server "poseidon-framework" "BenchServer.PoseidonFramework" 9801
 run_server "poseidon-native" "BenchServer.Poseidon" 9801
+run_server "horse-3.2-indy" "BenchServer.HorseIndy320" 9802
 
 echo ""
 echo "============================================================"
