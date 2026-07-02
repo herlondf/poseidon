@@ -1,0 +1,12 @@
+Embarcadero Delphi for Linux 64 bit compiler version 35.0
+Copyright (c) 1983,2022 Embarcadero Technologies, Inc.
+BenchServer.dpr(35) Hint: H2164 Variable 'GStartedAt' is declared but never used in 'BenchServer'
+Linker command line: "C:\Program Files (x86)\Embarcadero\Studio\22.0\bin\ld-linux.exe" -o D:\\IA\\Projetos\\Delphi\\Poseidon\\benchmark\\linux\\assets\\BenchServer -e _ZN11Benchserver14initializationEv --gc-sections --dynamic-list D:\\IA\\Projetos\\Delphi\\Poseidon\\benchmark\\linux\\assets\\BenchServer.exp -z relro --build-id --eh-frame-hdr -m elf_x86_64 --dynamic-linker /lib64/ld-linux-x86-64.so.2 -s --sysroot D:\\IA\\Projetos\\WSL-Manager\\tools\\linux-sysroot -L D:\\IA\\Projetos\\Delphi\\Poseidon\\benchmark\\src -L D:\\IA\\Projetos\\WSL-Manager\\tools\\linux-sysroot\\lib\\x86_64-linux-gnu -L D:\\IA\\Projetos\\WSL-Manager\\tools\\linux-sysroot\\usr\\lib\\x86_64-linux-gnu -L D:\\IA\\Projetos\\WSL-Manager\\tools\\linux-sysroot\\lib\\gcc\\x86_64-linux-gnu\\13 @D:\\IA\\Projetos\\Delphi\\Poseidon\\benchmark\\linux\\assets\\BenchServer.lnk -lgcc_s -lrtlhelper_PIC -lc -ldl -lpthread -lm -lrtlhelper -rpath $ORIGIN
+Error: E2597 C:\Program Files (x86)\Embarcadero\Studio\22.0\bin\ld-linux.exe: error: cannot find -lrtlhelper_PIC
+ C:\Program Files (x86)\Embarcadero\Studio\22.0\bin\ld-linux.exe: error: cannot find -lrtlhelper
+ D:\Emb\lib\linux64\release\System.o:System:function System::fpu_init(): error: undefined reference to 'fpu_init'
+ D:\Emb\lib\linux64\release\System.o:System:function System::_GetCPUID(unsigned int, unsigned int): error: undefined reference to '_system_GetCPUID'
+ D:\Emb\lib\linux64\release\System.Internal.ExcUtils.o:System.Internal.ExcUtils:function System::Internal::Excutils::SignalConverterUnAligned(NativeUInt, NativeUInt, NativeUInt): error: undefined reference to 'SignalConverterUnAligned'
+ D:\Emb\lib\linux64\release\System.Rtti.o:System.Rtti:function System::Rtti::RawInvoke(void*, System::Rtti::TParamBlock*): error: undefined reference to 'rtti_raw_invoke'
+ D:\Emb\lib\linux64\release\System.Rtti.o:System.Rtti:function System::Rtti::RawIntercept(): error: undefined reference to 'rtti_raw_intercept'
+Fatal: F2588 Linker error code: 1 ($00000001)

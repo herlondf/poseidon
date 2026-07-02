@@ -1,0 +1,77 @@
+{
+  "timestamp": "2026-06-01T15:06:14Z",
+  "run_secs": 60,
+  "scenarios": {
+    "ping": {
+      "poseidon": {"spec":{"numberOfConnections":500,"testType":"timed","testDurationSeconds":60,"method":"GET","url":"http://localhost:18080/ping","body":"","stream":false,"timeoutSeconds":2,"client":"fasthttp"},"result":{"bytesRead":287078528,"bytesWritten":150267667,"timeTakenSeconds":60.014835967,"req1xx":0,"req2xx":2242801,"req3xx":0,"req4xx":0,"req5xx":0,"others":0,"latency":{"mean":13365.209879521188,"stddev":5547.86838770194,"max":206998,"percentiles":{"50":9916,"75":18259,"90":28824,"95":36514,"99":53889}},"rps":{"mean":37428.60830040711,"stddev":4301.702778819079,"max":59315.925922481096,"percentiles":{"50":37541.256951,"75":39970.686839,"90":42226.747841,"95":43861.390892,"99":47007.256032}}}},
+      "horse":    null
+    },
+    "payload_1kb": {
+      "poseidon": {"spec":{"numberOfConnections":100,"testType":"timed","testDurationSeconds":60,"method":"GET","url":"http://localhost:18080/medium","body":"","stream":false,"timeoutSeconds":2,"client":"fasthttp"},"result":{"bytesRead":1184561394,"bytesWritten":163143186,"timeTakenSeconds":60.002494249,"req1xx":0,"req2xx":2364394,"req3xx":0,"req4xx":0,"req5xx":0,"others":0,"latency":{"mean":2533.6506656673973,"stddev":739.0559712572376,"max":55418,"percentiles":{"50":1923,"75":3225,"90":5079,"95":6522,"99":9942}},"rps":{"mean":39422.64896748823,"stddev":4151.587005767287,"max":49349.03948093847,"percentiles":{"50":40055.079740,"75":42064.394112,"90":43652.714294,"95":44651.217742,"99":46192.542658}}}},
+      "horse":    null
+    },
+    "alb_saturation": {
+      "poseidon": {
+  "spec": {
+    "numberOfConnections": 5,
+    "testType": "timed",
+    "testDurationSeconds": 60,
+    "method": "GET",
+    "url": "http://localhost:18091/ping",
+    "body": "",
+    "stream": false,
+    "timeoutSeconds": 2,
+    "client": "fasthttp"
+  },
+  "result": {
+    "bytesRead": 0,
+    "bytesWritten": 0,
+    "timeTakenSeconds": 59.999732179,
+    "req1xx": 0,
+    "req2xx": 0,
+    "req3xx": 0,
+    "req4xx": 0,
+    "req5xx": 0,
+    "others": 1153170,
+    "errors": [
+      {
+        "description": "dial tcp 127.0.0.1:18091: connect: connection refused",
+        "count": 1153170
+      }
+    ],
+    "latency": {
+      "mean": 251.9803983801174,
+      "stddev": 1875.788217987516,
+      "max": 1005841,
+      "percentiles": {
+        "50": 181,
+        "75": 277,
+        "90": 455,
+        "95": 621,
+        "99": 1111
+      }
+    },
+    "rps": {
+      "mean": 19222.01661039378,
+      "stddev": 2296.8756220206055,
+      "max": 25757.20795319268,
+      "percentiles": {
+        "50": 19768.537384,
+        "75": 21028.674135,
+        "90": 22073.519335,
+        "95": 22752.764921,
+        "99": 23789.943638
+      }
+    }
+  },
+  "haproxy": {
+    "chkfail": 0,
+    "chkdown": 0,
+    "downtime_sec": 0,
+    "avail_pct": "100.00"
+  }
+},
+      "horse":    null
+    }
+  }
+}

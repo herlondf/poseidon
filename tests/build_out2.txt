@@ -1,0 +1,15 @@
+Embarcadero Delphi for Win64 compiler version 35.0
+Copyright (c) 1983,2022 Embarcadero Technologies, Inc.
+D:\IA\Projetos\Delphi\Poseidon\src\Poseidon.Net.HTTP2.pas(916) Hint: H2077 Value assigned to 'LPadLen' never used
+D:\IA\Projetos\Delphi\Poseidon\src\Poseidon.Net.Dispatcher.pas(115) Warning: W1010 Method 'Dispatch' hides virtual method of base type 'TObject'
+D:\IA\Projetos\Delphi\Poseidon\src\Poseidon.Net.Dispatcher.pas(176) Hint: H2164 Variable 'LBad' is declared but never used in 'TProtocolDispatcher.Dispatch'
+D:\IA\Projetos\Delphi\Poseidon\src\Poseidon.Net.HttpServer.pas(1485) Hint: H2443 Inline function 'TList.Remove' has not been expanded because unit 'System.Types' is not specified in USES list
+D:\IA\Projetos\Delphi\Poseidon\src\Poseidon.Net.HttpServer.pas(107) Hint: H2219 Private symbol '_TryParseRequest' declared but never used
+Poseidon.Tests.HTTP2.pas(556) Hint: H2077 Value assigned to 'LFoundSettings' never used
+Poseidon.Tests.HTTP2.pas(546) Hint: H2077 Value assigned to 'LFoundSettings' never used
+Poseidon.Tests.BufferPool.pas(276) Hint: H2443 Inline function 'TTask.Run' has not been expanded because unit 'System.Classes' is not specified in USES list
+Poseidon.Tests.BufferPool.pas(327) Hint: H2443 Inline function 'TTask.Run' has not been expanded because unit 'System.Classes' is not specified in USES list
+Poseidon.Tests.ProxyProtocol.pas(138) Hint: H2164 Variable 'I' is declared but never used in 'TProxyProtocolV2Tests.V2_IPv6_ProxyCmd_ParsesAddrAndPort'
+46841 lines, 1.81 seconds, 3697172 bytes code, 472976 bytes data.
+
+ERRORLEVEL=0

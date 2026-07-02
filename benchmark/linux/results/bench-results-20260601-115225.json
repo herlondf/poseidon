@@ -1,0 +1,89 @@
+{
+  "timestamp": "2026-06-01T14:55:47Z",
+  "run_secs": 60,
+  "scenarios": {
+    "ping": {
+      "poseidon": [11:52:25] Cenário PING — Poseidon (500 clientes, 60s)
+[11:52:25]   Warmup 8s...
+[11:52:33]   Run...
+{"spec":{"numberOfConnections":500,"testType":"timed","testDurationSeconds":60,"method":"GET","url":"http://localhost:18080/ping","body":"","stream":false,"timeoutSeconds":2,"client":"fasthttp"},"result":{"bytesRead":288579968,"bytesWritten":151053577,"timeTakenSeconds":60.014543672,"req1xx":0,"req2xx":2254531,"req3xx":0,"req4xx":0,"req5xx":0,"others":0,"latency":{"mean":13299.355361713811,"stddev":5565.836071179378,"max":160002,"percentiles":{"50":9798,"75":18151,"90":28762,"95":36560,"99":54212}},"rps":{"mean":37593.03907251782,"stddev":4371.44416561593,"max":53737.88355289761,"percentiles":{"50":37624.718565,"75":40318.781384,"90":42812.096147,"95":44456.892820,"99":47453.703830}}}},
+      "horse":    null
+    },
+    "payload_1kb": {
+      "poseidon": [11:53:34] Cenário PAYLOAD (1KB) — Poseidon (100 clientes, 60s)
+[11:53:34]   Warmup 8s...
+[11:53:42]   Run...
+{"spec":{"numberOfConnections":100,"testType":"timed","testDurationSeconds":60,"method":"GET","url":"http://localhost:18080/medium","body":"","stream":false,"timeoutSeconds":2,"client":"fasthttp"},"result":{"bytesRead":1165785417,"bytesWritten":160557273,"timeTakenSeconds":60.002541774,"req1xx":0,"req2xx":2326917,"req3xx":0,"req4xx":0,"req5xx":0,"others":0,"latency":{"mean":2574.3105783317583,"stddev":849.5958560743759,"max":53963,"percentiles":{"50":1938,"75":3265,"90":5170,"95":6676,"99":10322}},"rps":{"mean":38798.17662334716,"stddev":5171.414770290255,"max":53071.032588654,"percentiles":{"50":39669.740698,"75":42288.607514,"90":44164.892611,"95":45320.462986,"99":47203.463179}}}},
+      "horse":    null
+    },
+    "alb_saturation": {
+      "poseidon": [11:54:42] Cenário ALB SATURATION — Poseidon
+[11:54:42]   Parâmetros: flood=90 clientes x 30000ms DAO
+[11:54:42]               healthcheck=5 clientes x 60s
+[11:54:42]   Iniciando flood em background...
+[11:54:44]   Medindo /ping via HAProxy (5 clientes, 60s)...
+{
+  "spec": {
+    "numberOfConnections": 5,
+    "testType": "timed",
+    "testDurationSeconds": 60,
+    "method": "GET",
+    "url": "http://localhost:18091/ping",
+    "body": "",
+    "stream": false,
+    "timeoutSeconds": 2,
+    "client": "fasthttp"
+  },
+  "result": {
+    "bytesRead": 0,
+    "bytesWritten": 0,
+    "timeTakenSeconds": 60.000116568,
+    "req1xx": 0,
+    "req2xx": 0,
+    "req3xx": 0,
+    "req4xx": 0,
+    "req5xx": 0,
+    "others": 1146715,
+    "errors": [
+      {
+        "description": "dial tcp 127.0.0.1:18091: connect: connection refused",
+        "count": 1146715
+      }
+    ],
+    "latency": {
+      "mean": 253.39023035366242,
+      "stddev": 2131.5457472909034,
+      "max": 1.01982E+6,
+      "percentiles": {
+        "50": 180,
+        "75": 277,
+        "90": 460,
+        "95": 631,
+        "99": 1147
+      }
+    },
+    "rps": {
+      "mean": 19112.964300120337,
+      "stddev": 2588.5855423667576,
+      "max": 25331.795202748734,
+      "percentiles": {
+        "50": 19714.696735,
+        "75": 21134.621226,
+        "90": 22229.917022,
+        "95": 22860.493032,
+        "99": 24066.355235
+      }
+    }
+  },
+  "haproxy": {
+    "chkfail": 0,
+    "chkdown": 0,
+    "downtime_sec": 0,
+    "avail_pct": "100.00"
+  }
+}
+{"spec":{"numberOfConnections":90,"testType":"timed","testDurationSeconds":65,"method":"GET","url":"http://localhost:18080/dao/slow","body":"","stream":false,"timeoutSeconds":2,"client":"fasthttp"},"result":{"bytesRead":278798750,"bytesWritten":136515250,"timeTakenSeconds":65.002640712,"req1xx":0,"req2xx":0,"req3xx":0,"req4xx":1922750,"req5xx":0,"others":0,"latency":{"mean":3038.197311662983,"stddev":1012.5739107598671,"max":43171,"percentiles":{"50":2305,"75":3867,"90":6094,"95":7841,"99":12062}},"rps":{"mean":29593.003336874706,"stddev":3749.4184800886806,"max":41553.85906979015,"percentiles":{"50":29943.114613,"75":31878.320451,"90":33747.803959,"95":35024.473226,"99":37589.622972}}}},
+      "horse":    null
+    }
+  }
+}

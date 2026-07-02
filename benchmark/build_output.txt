@@ -1,0 +1,4 @@
+Microsoft Windows [versÆo 10.0.26200.8524]
+(c) Microsoft Corporation. Todos os direitos reservados.
+
+D:\IA\Projetos\Delphi\Poseidon\benchmark>

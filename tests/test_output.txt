@@ -1,0 +1,2428 @@
+  Fixture : Poseidon
+  -------------------------------------------------
+     Fixture : Poseidon.Tests
+     -------------------------------------------------
+        Fixture : Poseidon.Tests.Metrics
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.Metrics.TMetricsCounterTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Metrics.TMetricsCounterTests.RecordRequest_200_Increments2xxCounter
+             -------------------------------------------------
+             Running Setup for : RecordRequest_200_Increments2xxCounter
+             
+             Executing Test : RecordRequest_200_Increments2xxCounter
+             
+             
+              Running Teardown for Test : RecordRequest_200_Increments2xxCounter
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsCounterTests.RecordRequest_404_Increments4xxCounter
+             -------------------------------------------------
+             Running Setup for : RecordRequest_404_Increments4xxCounter
+             
+             Executing Test : RecordRequest_404_Increments4xxCounter
+             
+             
+              Running Teardown for Test : RecordRequest_404_Increments4xxCounter
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsCounterTests.RecordRequest_500_Increments5xxCounter
+             -------------------------------------------------
+             Running Setup for : RecordRequest_500_Increments5xxCounter
+             
+             Executing Test : RecordRequest_500_Increments5xxCounter
+             
+             
+              Running Teardown for Test : RecordRequest_500_Increments5xxCounter
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsCounterTests.RecordRequest_301_Increments3xxCounter
+             -------------------------------------------------
+             Running Setup for : RecordRequest_301_Increments3xxCounter
+             
+             Executing Test : RecordRequest_301_Increments3xxCounter
+             
+             
+              Running Teardown for Test : RecordRequest_301_Increments3xxCounter
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsCounterTests.RecordRequest_101_Increments1xxCounter
+             -------------------------------------------------
+             Running Setup for : RecordRequest_101_Increments1xxCounter
+             
+             Executing Test : RecordRequest_101_Increments1xxCounter
+             
+             
+              Running Teardown for Test : RecordRequest_101_Increments1xxCounter
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsCounterTests.RecordRequest_AccumulatesMultipleCalls
+             -------------------------------------------------
+             Running Setup for : RecordRequest_AccumulatesMultipleCalls
+             
+             Executing Test : RecordRequest_AccumulatesMultipleCalls
+             
+             
+              Running Teardown for Test : RecordRequest_AccumulatesMultipleCalls
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsCounterTests.RecordRequest_UpdatesBytesRx
+             -------------------------------------------------
+             Running Setup for : RecordRequest_UpdatesBytesRx
+             
+             Executing Test : RecordRequest_UpdatesBytesRx
+             
+             
+              Running Teardown for Test : RecordRequest_UpdatesBytesRx
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsCounterTests.RecordRequest_UpdatesBytesTx
+             -------------------------------------------------
+             Running Setup for : RecordRequest_UpdatesBytesTx
+             
+             Executing Test : RecordRequest_UpdatesBytesTx
+             
+             
+              Running Teardown for Test : RecordRequest_UpdatesBytesTx
+              
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Metrics.TMetricsGaugeTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Metrics.TMetricsGaugeTests.AdjustConnections_PlusOne_RendersOne
+             -------------------------------------------------
+             Running Setup for : AdjustConnections_PlusOne_RendersOne
+             
+             Executing Test : AdjustConnections_PlusOne_RendersOne
+             
+             
+              Running Teardown for Test : AdjustConnections_PlusOne_RendersOne
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsGaugeTests.AdjustConnections_PlusThenMinus_RendersZero
+             -------------------------------------------------
+             Running Setup for : AdjustConnections_PlusThenMinus_RendersZero
+             
+             Executing Test : AdjustConnections_PlusThenMinus_RendersZero
+             
+             
+              Running Teardown for Test : AdjustConnections_PlusThenMinus_RendersZero
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsGaugeTests.AdjustInflight_PlusTwo_RendersTwo
+             -------------------------------------------------
+             Running Setup for : AdjustInflight_PlusTwo_RendersTwo
+             
+             Executing Test : AdjustInflight_PlusTwo_RendersTwo
+             
+             
+              Running Teardown for Test : AdjustInflight_PlusTwo_RendersTwo
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsGaugeTests.UptimeSeconds_PresentInRender
+             -------------------------------------------------
+             Running Setup for : UptimeSeconds_PresentInRender
+             
+             Executing Test : UptimeSeconds_PresentInRender
+             
+             
+              Running Teardown for Test : UptimeSeconds_PresentInRender
+              
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Metrics.TMetricsHistogramTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Metrics.TMetricsHistogramTests.Histogram_BucketCountsAreCumulative
+             -------------------------------------------------
+             Running Setup for : Histogram_BucketCountsAreCumulative
+             
+             Executing Test : Histogram_BucketCountsAreCumulative
+             
+             
+              Running Teardown for Test : Histogram_BucketCountsAreCumulative
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsHistogramTests.Histogram_InfBucketEqualsTotal
+             -------------------------------------------------
+             Running Setup for : Histogram_InfBucketEqualsTotal
+             
+             Executing Test : Histogram_InfBucketEqualsTotal
+             
+             
+              Running Teardown for Test : Histogram_InfBucketEqualsTotal
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsHistogramTests.Histogram_SumAccumulates
+             -------------------------------------------------
+             Running Setup for : Histogram_SumAccumulates
+             
+             Executing Test : Histogram_SumAccumulates
+             
+             
+              Running Teardown for Test : Histogram_SumAccumulates
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsHistogramTests.Histogram_CountEqualsRequests
+             -------------------------------------------------
+             Running Setup for : Histogram_CountEqualsRequests
+             
+             Executing Test : Histogram_CountEqualsRequests
+             
+             
+              Running Teardown for Test : Histogram_CountEqualsRequests
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsHistogramTests.Histogram_ZeroMs_FallsInSmallestBucket
+             -------------------------------------------------
+             Running Setup for : Histogram_ZeroMs_FallsInSmallestBucket
+             
+             Executing Test : Histogram_ZeroMs_FallsInSmallestBucket
+             
+             
+              Running Teardown for Test : Histogram_ZeroMs_FallsInSmallestBucket
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsHistogramTests.Histogram_OverLargestBound_OnlyInInf
+             -------------------------------------------------
+             Running Setup for : Histogram_OverLargestBound_OnlyInInf
+             
+             Executing Test : Histogram_OverLargestBound_OnlyInInf
+             
+             
+              Running Teardown for Test : Histogram_OverLargestBound_OnlyInInf
+              
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Metrics.TMetricsThreadSafetyTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Metrics.TMetricsThreadSafetyTests.ConcurrentRecordRequest_NoDataRace
+             -------------------------------------------------
+             Running Setup for : ConcurrentRecordRequest_NoDataRace
+             
+             Executing Test : ConcurrentRecordRequest_NoDataRace
+             
+             
+              Running Teardown for Test : ConcurrentRecordRequest_NoDataRace
+              
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Metrics.TMetricsFormatTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Metrics.TMetricsFormatTests.Render_ContainsHelpAndTypeForRequestsTotal
+             -------------------------------------------------
+             Running Setup for : Render_ContainsHelpAndTypeForRequestsTotal
+             
+             Executing Test : Render_ContainsHelpAndTypeForRequestsTotal
+             
+             
+              Running Teardown for Test : Render_ContainsHelpAndTypeForRequestsTotal
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsFormatTests.Render_ContainsHelpAndTypeForBytesReceived
+             -------------------------------------------------
+             Running Setup for : Render_ContainsHelpAndTypeForBytesReceived
+             
+             Executing Test : Render_ContainsHelpAndTypeForBytesReceived
+             
+             
+              Running Teardown for Test : Render_ContainsHelpAndTypeForBytesReceived
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsFormatTests.Render_ContainsHelpAndTypeForBytesSent
+             -------------------------------------------------
+             Running Setup for : Render_ContainsHelpAndTypeForBytesSent
+             
+             Executing Test : Render_ContainsHelpAndTypeForBytesSent
+             
+             
+              Running Teardown for Test : Render_ContainsHelpAndTypeForBytesSent
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsFormatTests.Render_ContainsHelpAndTypeForConnectionsActive
+             -------------------------------------------------
+             Running Setup for : Render_ContainsHelpAndTypeForConnectionsActive
+             
+             Executing Test : Render_ContainsHelpAndTypeForConnectionsActive
+             
+             
+              Running Teardown for Test : Render_ContainsHelpAndTypeForConnectionsActive
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsFormatTests.Render_ContainsHelpAndTypeForInflight
+             -------------------------------------------------
+             Running Setup for : Render_ContainsHelpAndTypeForInflight
+             
+             Executing Test : Render_ContainsHelpAndTypeForInflight
+             
+             
+              Running Teardown for Test : Render_ContainsHelpAndTypeForInflight
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsFormatTests.Render_ContainsHelpAndTypeForHistogram
+             -------------------------------------------------
+             Running Setup for : Render_ContainsHelpAndTypeForHistogram
+             
+             Executing Test : Render_ContainsHelpAndTypeForHistogram
+             
+             
+              Running Teardown for Test : Render_ContainsHelpAndTypeForHistogram
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsFormatTests.Render_AllStatusLabelsPresent
+             -------------------------------------------------
+             Running Setup for : Render_AllStatusLabelsPresent
+             
+             Executing Test : Render_AllStatusLabelsPresent
+             
+             
+              Running Teardown for Test : Render_AllStatusLabelsPresent
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsFormatTests.Render_HistogramLeLabels
+             -------------------------------------------------
+             Running Setup for : Render_HistogramLeLabels
+             
+             Executing Test : Render_HistogramLeLabels
+             
+             
+              Running Teardown for Test : Render_HistogramLeLabels
+              
+               Success.
+            
+             Test : Poseidon.Tests.Metrics.TMetricsFormatTests.Render_HistogramPlusInfPresent
+             -------------------------------------------------
+             Running Setup for : Render_HistogramPlusInfPresent
+             
+             Executing Test : Render_HistogramPlusInfPresent
+             
+             
+              Running Teardown for Test : Render_HistogramPlusInfPresent
+              
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.Dispatcher
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.Dispatcher.TDispatcherPathTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Dispatcher.TDispatcherPathTests.SafePath_Root_Dispatched
+             -------------------------------------------------
+             Executing Test : SafePath_Root_Dispatched
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherPathTests.DotDotSegment_Returns400
+             -------------------------------------------------
+             Executing Test : DotDotSegment_Returns400
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherPathTests.PercentEncodedDotDot_Returns400
+             -------------------------------------------------
+             Executing Test : PercentEncodedDotDot_Returns400
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherPathTests.NullByte_Returns400
+             -------------------------------------------------
+             Executing Test : NullByte_Returns400
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Dispatcher.TDispatcherMethodTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Dispatcher.TDispatcherMethodTests.AllowedMethod_GET_InvokesHandler
+             -------------------------------------------------
+             Executing Test : AllowedMethod_GET_InvokesHandler
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherMethodTests.DisallowedMethod_DELETE_Returns405
+             -------------------------------------------------
+             Executing Test : DisallowedMethod_DELETE_Returns405
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherMethodTests.DisallowedMethod_DoesNotInvokeHandler
+             -------------------------------------------------
+             Executing Test : DisallowedMethod_DoesNotInvokeHandler
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherMethodTests.EmptyAllowlist_AllowsAllMethods
+             -------------------------------------------------
+             Executing Test : EmptyAllowlist_AllowsAllMethods
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Dispatcher.TDispatcherRateLimitTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Dispatcher.TDispatcherRateLimitTests.RateLimitAllowed_HandlerInvoked
+             -------------------------------------------------
+             Executing Test : RateLimitAllowed_HandlerInvoked
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherRateLimitTests.RateLimitDenied_ReturnsRateLimitStatus
+             -------------------------------------------------
+             Executing Test : RateLimitDenied_ReturnsRateLimitStatus
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherRateLimitTests.RateLimitDenied_HandlerNotInvoked
+             -------------------------------------------------
+             Executing Test : RateLimitDenied_HandlerNotInvoked
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Dispatcher.TDispatcherMetricsTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Dispatcher.TDispatcherMetricsTests.MetricsDisabled_HandlerInvoked
+             -------------------------------------------------
+             Executing Test : MetricsDisabled_HandlerInvoked
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherMetricsTests.MetricsEnabled_CorrectPath_GetMetricsBodyCalled
+             -------------------------------------------------
+             Executing Test : MetricsEnabled_CorrectPath_GetMetricsBodyCalled
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherMetricsTests.MetricsEnabled_CorrectPath_Returns200
+             -------------------------------------------------
+             Executing Test : MetricsEnabled_CorrectPath_Returns200
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherMetricsTests.MetricsEnabled_DifferentPath_HandlerInvoked
+             -------------------------------------------------
+             Executing Test : MetricsEnabled_DifferentPath_HandlerInvoked
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherMetricsTests.MetricsEnabled_BlockedCIDR_Returns403
+             -------------------------------------------------
+             Executing Test : MetricsEnabled_BlockedCIDR_Returns403
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Dispatcher.TDispatcherBackpressureTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Dispatcher.TDispatcherBackpressureTests.QueueNotFull_HandlerInvoked
+             -------------------------------------------------
+             Executing Test : QueueNotFull_HandlerInvoked
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherBackpressureTests.QueueFull_Returns503
+             -------------------------------------------------
+             Executing Test : QueueFull_Returns503
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherBackpressureTests.QueueFull_HandlerNotInvoked
+             -------------------------------------------------
+             Executing Test : QueueFull_HandlerNotInvoked
+             
+               Success.
+            
+             Test : Poseidon.Tests.Dispatcher.TDispatcherBackpressureTests.MaxQueueDepthZero_NoBackpressure
+             -------------------------------------------------
+             Executing Test : MaxQueueDepthZero_NoBackpressure
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.Security
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.ExactMatch_Slash32_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : ExactMatch_Slash32_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.ExactMatch_Slash32_WrongIP_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : ExactMatch_Slash32_WrongIP_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.PrivateRange_Slash8_IPInRange_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : PrivateRange_Slash8_IPInRange_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.PrivateRange_Slash8_IPOutsideRange_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : PrivateRange_Slash8_IPOutsideRange_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.Slash24_HostInSubnet_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : Slash24_HostInSubnet_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.Slash24_HostOutsideSubnet_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : Slash24_HostOutsideSubnet_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.Slash0_MatchesEverything_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : Slash0_MatchesEverything_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.Slash16_BoundaryIP_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : Slash16_BoundaryIP_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.Slash1_FirstHalfOfInternet_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : Slash1_FirstHalfOfInternet_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.Slash1_SecondHalfOfInternet_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : Slash1_SecondHalfOfInternet_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.RemoteAddrWithPort_Stripped_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : RemoteAddrWithPort_Stripped_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.RemoteAddrWithPort_Stripped_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : RemoteAddrWithPort_Stripped_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.InvalidCIDR_NoPrefixLen_FailOpen
+             -------------------------------------------------
+             Executing Test : InvalidCIDR_NoPrefixLen_FailOpen
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.InvalidCIDR_PrefixOutOfRange_FailOpen
+             -------------------------------------------------
+             Executing Test : InvalidCIDR_PrefixOutOfRange_FailOpen
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.InvalidCIDR_NotIPv4_FailOpen
+             -------------------------------------------------
+             Executing Test : InvalidCIDR_NotIPv4_FailOpen
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.InvalidRemoteAddr_FailOpen
+             -------------------------------------------------
+             Executing Test : InvalidRemoteAddr_FailOpen
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsIPInCIDRTests.IPv6RemoteAddr_FailOpen
+             -------------------------------------------------
+             Executing Test : IPv6RemoteAddr_FailOpen
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Security.TSecurityIsMethodAllowedTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Security.TSecurityIsMethodAllowedTests.EmptyList_AnyMethod_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : EmptyList_AnyMethod_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsMethodAllowedTests.AllowedList_MatchingMethod_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : AllowedList_MatchingMethod_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsMethodAllowedTests.AllowedList_MatchingMethod_CaseInsensitive
+             -------------------------------------------------
+             Executing Test : AllowedList_MatchingMethod_CaseInsensitive
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsMethodAllowedTests.AllowedList_UnknownMethod_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : AllowedList_UnknownMethod_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsMethodAllowedTests.AllowedList_MultipleEntries_MatchesSecond
+             -------------------------------------------------
+             Executing Test : AllowedList_MultipleEntries_MatchesSecond
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsMethodAllowedTests.AllowedList_EmptyString_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : AllowedList_EmptyString_ReturnsFalse
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Security.TSecurityHasRequestSmugglingTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Security.TSecurityHasRequestSmugglingTests.BothPresent_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : BothPresent_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityHasRequestSmugglingTests.OnlyCL_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : OnlyCL_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityHasRequestSmugglingTests.OnlyChunked_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : OnlyChunked_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityHasRequestSmugglingTests.NeitherPresent_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : NeitherPresent_ReturnsFalse
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Security.TSecurityIsPathSafeTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.RootPath_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : RootPath_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.NormalPath_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : NormalPath_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.PathWithQueryString_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : PathWithQueryString_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.NulByte_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : NulByte_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.Backslash_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : Backslash_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.PercentEncodedDotDot_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : PercentEncodedDotDot_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.PercentEncodedDotDotUpperCase_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : PercentEncodedDotDotUpperCase_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.TraversalInMiddle_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : TraversalInMiddle_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.TraversalAtEnd_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : TraversalAtEnd_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.TraversalAtStart_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : TraversalAtStart_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.BareDoubleDot_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : BareDoubleDot_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.SingleDot_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : SingleDot_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.PathWithDotFile_ReturnsTrue
+             -------------------------------------------------
+             Executing Test : PathWithDotFile_ReturnsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityIsPathSafeTests.DoubleSlash_StillSafe
+             -------------------------------------------------
+             Executing Test : DoubleSlash_StillSafe
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Security.TSecurityStripCRLFTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Security.TSecurityStripCRLFTests.NoCRLF_Unchanged
+             -------------------------------------------------
+             Executing Test : NoCRLF_Unchanged
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityStripCRLFTests.CarriageReturn_Removed
+             -------------------------------------------------
+             Executing Test : CarriageReturn_Removed
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityStripCRLFTests.LineFeed_Removed
+             -------------------------------------------------
+             Executing Test : LineFeed_Removed
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityStripCRLFTests.NulByte_Removed
+             -------------------------------------------------
+             Executing Test : NulByte_Removed
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityStripCRLFTests.AllThreeMixed_Removed
+             -------------------------------------------------
+             Executing Test : AllThreeMixed_Removed
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityStripCRLFTests.EmptyString_ReturnsEmpty
+             -------------------------------------------------
+             Executing Test : EmptyString_ReturnsEmpty
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityStripCRLFTests.MultipleOccurrences_AllRemoved
+             -------------------------------------------------
+             Executing Test : MultipleOccurrences_AllRemoved
+             
+               Success.
+            
+             Test : Poseidon.Tests.Security.TSecurityStripCRLFTests.OnlySpecialChars_ReturnsEmpty
+             -------------------------------------------------
+             Executing Test : OnlySpecialChars_ReturnsEmpty
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.HTTP2
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.HTTP2.TH2ConnUnitTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.Preface_ValidClientPreface_SendsSettingsAndACK
+             -------------------------------------------------
+             Executing Test : Preface_ValidClientPreface_SendsSettingsAndACK
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.Ping_ClientSendsPing_ServerRepliesWithPong
+             -------------------------------------------------
+             Executing Test : Ping_ClientSendsPing_ServerRepliesWithPong
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.WindowUpdate_ConnectionLevel_DoesNotClose
+             -------------------------------------------------
+             Executing Test : WindowUpdate_ConnectionLevel_DoesNotClose
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.WindowUpdate_StreamLevel_DoesNotClose
+             -------------------------------------------------
+             Executing Test : WindowUpdate_StreamLevel_DoesNotClose
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.RstStream_ClientSendsRst_StreamDropped
+             -------------------------------------------------
+             Executing Test : RstStream_ClientSendsRst_StreamDropped
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.GoAway_ServerInitiated_SetsGoAwaySent
+             -------------------------------------------------
+             Executing Test : GoAway_ServerInitiated_SetsGoAwaySent
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.GoAway_ClientSendsGoAway_ConnectionAccepted
+             -------------------------------------------------
+             Executing Test : GoAway_ClientSendsGoAway_ConnectionAccepted
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.Settings_ClientSendsACK_ProcessedWithoutError
+             -------------------------------------------------
+             Executing Test : Settings_ClientSendsACK_ProcessedWithoutError
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.SendInitialSettings_WritesBytesThatStartWithSettingsFrame
+             -------------------------------------------------
+             Executing Test : SendInitialSettings_WritesBytesThatStartWithSettingsFrame
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.Settings_MaxConcurrentStreams_CustomValue_EncodedInFrame
+             -------------------------------------------------
+             Executing Test : Settings_MaxConcurrentStreams_CustomValue_EncodedInFrame
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.Settings_InitialWindowSize_CustomValue_EncodedInFrame
+             -------------------------------------------------
+             Executing Test : Settings_InitialWindowSize_CustomValue_EncodedInFrame
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.Preface_InvalidMagic_SendsGoAway
+             -------------------------------------------------
+             Executing Test : Preface_InvalidMagic_SendsGoAway
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.Settings_WithParameters_NoError
+             -------------------------------------------------
+             Executing Test : Settings_WithParameters_NoError
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.Headers_GetRequest_DispatchesFOnRequest
+             -------------------------------------------------
+             Executing Test : Headers_GetRequest_DispatchesFOnRequest
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.Headers_Post_WithDataBody_BodyAccumulated
+             -------------------------------------------------
+             Executing Test : Headers_Post_WithDataBody_BodyAccumulated
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.Continuation_WithoutPriorHeaders_GoAway
+             -------------------------------------------------
+             Executing Test : Continuation_WithoutPriorHeaders_GoAway
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.GoAway_NoStreams_CloseProcCalledImmediately
+             -------------------------------------------------
+             Executing Test : GoAway_NoStreams_CloseProcCalledImmediately
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.RstStream_NonExistentStream_DoesNotClose
+             -------------------------------------------------
+             Executing Test : RstStream_NonExistentStream_DoesNotClose
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP2.TH2ConnUnitTests.ServerPush_OnePushResource_SendsPushPromiseThenResponse
+             -------------------------------------------------
+             Executing Test : ServerPush_OnePushResource_SendsPushPromiseThenResponse
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.WebSocket
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.HandshakeAccept_RFC6455TestVector_ReturnsExpectedBase64
+             -------------------------------------------------
+             Executing Test : HandshakeAccept_RFC6455TestVector_ReturnsExpectedBase64
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildFrame_TextOpcode_FirstByteIs81Hex
+             -------------------------------------------------
+             Executing Test : BuildFrame_TextOpcode_FirstByteIs81Hex
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildFrame_BinaryOpcode_FirstByteIs82Hex
+             -------------------------------------------------
+             Executing Test : BuildFrame_BinaryOpcode_FirstByteIs82Hex
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildFrame_CloseOpcode_FirstByteIs88Hex
+             -------------------------------------------------
+             Executing Test : BuildFrame_CloseOpcode_FirstByteIs88Hex
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildFrame_PayloadUnder126_UsesOneByteLengthField
+             -------------------------------------------------
+             Executing Test : BuildFrame_PayloadUnder126_UsesOneByteLengthField
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildFrame_Payload126Bytes_Uses16BitLengthEncoding
+             -------------------------------------------------
+             Executing Test : BuildFrame_Payload126Bytes_Uses16BitLengthEncoding
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.TextFrame_EncodesTextAsUTF8WithOpcodeText
+             -------------------------------------------------
+             Executing Test : TextFrame_EncodesTextAsUTF8WithOpcodeText
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BinaryFrame_PreservesPayloadWithOpcodeBinary
+             -------------------------------------------------
+             Executing Test : BinaryFrame_PreservesPayloadWithOpcodeBinary
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.CloseFrame_Code1000_PayloadContainsBigEndianCode
+             -------------------------------------------------
+             Executing Test : CloseFrame_Code1000_PayloadContainsBigEndianCode
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.ParseFrame_UnmaskedTextFrame_RoundTripMatchesOriginal
+             -------------------------------------------------
+             Executing Test : ParseFrame_UnmaskedTextFrame_RoundTripMatchesOriginal
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.ParseFrame_MaskedFrame_UnmasksPayloadCorrectly
+             -------------------------------------------------
+             Executing Test : ParseFrame_MaskedFrame_UnmasksPayloadCorrectly
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.ParseFrame_InsufficientBytes_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : ParseFrame_InsufficientBytes_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildFrame_Payload65536Bytes_Uses64BitLengthEncoding
+             -------------------------------------------------
+             Executing Test : BuildFrame_Payload65536Bytes_Uses64BitLengthEncoding
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildFrame_FinFalse_FirstByteHasNoFinBit
+             -------------------------------------------------
+             Executing Test : BuildFrame_FinFalse_FirstByteHasNoFinBit
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.ParseFrame_PingFrame_OpcodeParsedCorrectly
+             -------------------------------------------------
+             Executing Test : ParseFrame_PingFrame_OpcodeParsedCorrectly
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.ParseFrame_PongFrame_OpcodeParsedCorrectly
+             -------------------------------------------------
+             Executing Test : ParseFrame_PongFrame_OpcodeParsedCorrectly
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.ParseFrame_16BitLength_RoundTripMatchesOriginal
+             -------------------------------------------------
+             Executing Test : ParseFrame_16BitLength_RoundTripMatchesOriginal
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildFrame_ReservedOpcode_RaisesArgumentException
+             -------------------------------------------------
+             Executing Test : BuildFrame_ReservedOpcode_RaisesArgumentException
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildFrame_ReservedOpcode0B_RaisesArgumentException
+             -------------------------------------------------
+             Executing Test : BuildFrame_ReservedOpcode0B_RaisesArgumentException
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.DeflateUtils_CompressDecompress_RoundTrip
+             -------------------------------------------------
+             Executing Test : DeflateUtils_CompressDecompress_RoundTrip
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildFrame_DeflateTrue_SetsRSV1Bit
+             -------------------------------------------------
+             Executing Test : BuildFrame_DeflateTrue_SetsRSV1Bit
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.ParseFrame_FrameWithRSV1_RSV1IsTrue
+             -------------------------------------------------
+             Executing Test : ParseFrame_FrameWithRSV1_RSV1IsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.ParseFrame_FrameWithoutRSV1_RSV1IsFalse
+             -------------------------------------------------
+             Executing Test : ParseFrame_FrameWithoutRSV1_RSV1IsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildHandshakeResponse_DeflateEnabled_ContainsExtensionHeader
+             -------------------------------------------------
+             Executing Test : BuildHandshakeResponse_DeflateEnabled_ContainsExtensionHeader
+             
+               Success.
+            
+             Test : Poseidon.Tests.WebSocket.TPoseidonWebSocketTests.BuildHandshakeResponse_DeflateDisabled_NoExtensionHeader
+             -------------------------------------------------
+             Executing Test : BuildHandshakeResponse_DeflateDisabled_NoExtensionHeader
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.ProxyProtocol
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.ProxyProtocol.TProxyProtocolV1Tests
+           -------------------------------------------------
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV1Tests.V1_TCP4_ParsesAddrAndPort
+             -------------------------------------------------
+             Executing Test : V1_TCP4_ParsesAddrAndPort
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV1Tests.V1_TCP6_ParsesAddrAndPort
+             -------------------------------------------------
+             Executing Test : V1_TCP6_ParsesAddrAndPort
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV1Tests.V1_UNKNOWN_ConsumesHeader
+             -------------------------------------------------
+             Executing Test : V1_UNKNOWN_ConsumesHeader
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV1Tests.V1_NoCRLF_Short_Incomplete
+             -------------------------------------------------
+             Executing Test : V1_NoCRLF_Short_Incomplete
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV1Tests.V1_NoCRLF_TooLong_Invalid
+             -------------------------------------------------
+             Executing Test : V1_NoCRLF_TooLong_Invalid
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV1Tests.V1_TooFewParts_Invalid
+             -------------------------------------------------
+             Executing Test : V1_TooFewParts_Invalid
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV1Tests.V1_NoSignature_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : V1_NoSignature_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV1Tests.V1_TruncatedSignature_Incomplete
+             -------------------------------------------------
+             Executing Test : V1_TruncatedSignature_Incomplete
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV1Tests.V1_ConsumedBytesIncludesCRLF
+             -------------------------------------------------
+             Executing Test : V1_ConsumedBytesIncludesCRLF
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.ProxyProtocol.TProxyProtocolAutoTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolAutoTests.Auto_V2Signature_ParsesAsV2
+             -------------------------------------------------
+             Executing Test : Auto_V2Signature_ParsesAsV2
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolAutoTests.Auto_V1Signature_ParsesAsV1
+             -------------------------------------------------
+             Executing Test : Auto_V1Signature_ParsesAsV1
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolAutoTests.Auto_NoSignature_SetsNoSignatureFlag
+             -------------------------------------------------
+             Executing Test : Auto_NoSignature_SetsNoSignatureFlag
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolAutoTests.Auto_Incomplete_SetsIncompleteFlag
+             -------------------------------------------------
+             Executing Test : Auto_Incomplete_SetsIncompleteFlag
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolAutoTests.ModeV1_V2Data_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : ModeV1_V2Data_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolAutoTests.ModeV2_V1Data_ReturnsFalse
+             -------------------------------------------------
+             Executing Test : ModeV2_V1Data_ReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolAutoTests.ModeDisabled_SetsNoSignature
+             -------------------------------------------------
+             Executing Test : ModeDisabled_SetsNoSignature
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.ProxyProtocol.TProxyProtocolV2Tests
+           -------------------------------------------------
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV2Tests.V2_IPv4_ProxyCmd_ParsesAddrAndPort
+             -------------------------------------------------
+             Executing Test : V2_IPv4_ProxyCmd_ParsesAddrAndPort
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV2Tests.V2_IPv6_ProxyCmd_ParsesAddrAndPort
+             -------------------------------------------------
+             Executing Test : V2_IPv6_ProxyCmd_ParsesAddrAndPort
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV2Tests.V2_LocalCmd_ConsumesHeaderNoAddr
+             -------------------------------------------------
+             Executing Test : V2_LocalCmd_ConsumesHeaderNoAddr
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV2Tests.V2_TooShort_Incomplete
+             -------------------------------------------------
+             Executing Test : V2_TooShort_Incomplete
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV2Tests.V2_SignatureMismatch_ReturnsFalseNotIncomplete
+             -------------------------------------------------
+             Executing Test : V2_SignatureMismatch_ReturnsFalseNotIncomplete
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV2Tests.V2_InvalidVersion_Invalid
+             -------------------------------------------------
+             Executing Test : V2_InvalidVersion_Invalid
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV2Tests.V2_IncompleteAddrBlock_Incomplete
+             -------------------------------------------------
+             Executing Test : V2_IncompleteAddrBlock_Incomplete
+             
+               Success.
+            
+             Test : Poseidon.Tests.ProxyProtocol.TProxyProtocolV2Tests.V2_AF_UNSPEC_ConsumesHeader
+             -------------------------------------------------
+             Executing Test : V2_AF_UNSPEC_ConsumesHeader
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.HPACK
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.HPACK.THPackEncodeResponseTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.HPACK.THPackEncodeResponseTests.Status200_FirstByteIsIndexedByte88
+             -------------------------------------------------
+             Executing Test : Status200_FirstByteIsIndexedByte88
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeResponseTests.Status204_FirstByteIsIndexedByte89
+             -------------------------------------------------
+             Executing Test : Status204_FirstByteIsIndexedByte89
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeResponseTests.Status404_FirstByteIsIndexedByte8D
+             -------------------------------------------------
+             Executing Test : Status404_FirstByteIsIndexedByte8D
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeResponseTests.Status201_FirstByteIsLiteralByte08
+             -------------------------------------------------
+             Executing Test : Status201_FirstByteIsLiteralByte08
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeResponseTests.ContentType_PresentInOutput
+             -------------------------------------------------
+             Executing Test : ContentType_PresentInOutput
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeResponseTests.ContentLength_PresentInOutput
+             -------------------------------------------------
+             Executing Test : ContentLength_PresentInOutput
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeResponseTests.BodyLenMinusOne_NoContentLengthHeader
+             -------------------------------------------------
+             Executing Test : BodyLenMinusOne_NoContentLengthHeader
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeResponseTests.ExtraHeaders_PresentInOutput
+             -------------------------------------------------
+             Executing Test : ExtraHeaders_PresentInOutput
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeResponseTests.EmptyContentType_Omitted
+             -------------------------------------------------
+             Executing Test : EmptyContentType_Omitted
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.HPACK.THPackEncodeRequestTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.HPACK.THPackEncodeRequestTests.GetMethod_FirstByteIs82
+             -------------------------------------------------
+             Executing Test : GetMethod_FirstByteIs82
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeRequestTests.PostMethod_FirstByteIs83
+             -------------------------------------------------
+             Executing Test : PostMethod_FirstByteIs83
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeRequestTests.CustomMethod_OutputNonEmpty
+             -------------------------------------------------
+             Executing Test : CustomMethod_OutputNonEmpty
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeRequestTests.PathSlash_ContainsByte84
+             -------------------------------------------------
+             Executing Test : PathSlash_ContainsByte84
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeRequestTests.CustomPath_OutputNonEmpty
+             -------------------------------------------------
+             Executing Test : CustomPath_OutputNonEmpty
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeRequestTests.SchemeHttp_ContainsByte86
+             -------------------------------------------------
+             Executing Test : SchemeHttp_ContainsByte86
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeRequestTests.SchemeHttps_OutputNonEmpty
+             -------------------------------------------------
+             Executing Test : SchemeHttps_OutputNonEmpty
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackEncodeRequestTests.EmptyAuthority_Shorter
+             -------------------------------------------------
+             Executing Test : EmptyAuthority_Shorter
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.HPACK.THPackRFC7541VectorTests
+           -------------------------------------------------
+             Running Fixture Setup Method : SetupFixture
+            
+             Test : Poseidon.Tests.HPACK.THPackRFC7541VectorTests.C31_FirstRequest_WithoutHuffman
+             -------------------------------------------------
+             Executing Test : C31_FirstRequest_WithoutHuffman
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRFC7541VectorTests.C32_SecondRequest_UsesDynTableIdx62
+             -------------------------------------------------
+             Executing Test : C32_SecondRequest_UsesDynTableIdx62
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRFC7541VectorTests.C33_ThirdRequest_CustomKeyValue
+             -------------------------------------------------
+             Executing Test : C33_ThirdRequest_CustomKeyValue
+             
+               Success.
+            
+            Running Fixture Teardown Method : TeardownFixture
+            
+         
+           Fixture : Poseidon.Tests.HPACK.THPackDynTableTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.HPACK.THPackDynTableTests.SingleEntry_IndexedAt62_Retrievable
+             -------------------------------------------------
+             Executing Test : SingleEntry_IndexedAt62_Retrievable
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDynTableTests.TwoEntries_NewerAt62_OlderAt63
+             -------------------------------------------------
+             Executing Test : TwoEntries_NewerAt62_OlderAt63
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDynTableTests.EvictOldest_WhenSizeLimitExceeded
+             -------------------------------------------------
+             Executing Test : EvictOldest_WhenSizeLimitExceeded
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDynTableTests.SetMaxSize0_EvictsAllEntries
+             -------------------------------------------------
+             Executing Test : SetMaxSize0_EvictsAllEntries
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDynTableTests.SetMaxSize_ReducesTable
+             -------------------------------------------------
+             Executing Test : SetMaxSize_ReducesTable
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDynTableTests.EntryTooLarge_NotAdded_TableEmptied
+             -------------------------------------------------
+             Executing Test : EntryTooLarge_NotAdded_TableEmptied
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.HPACK.THPackDecodeTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.IndexedStatic_GetMethod_DecodesMethod
+             -------------------------------------------------
+             Executing Test : IndexedStatic_GetMethod_DecodesMethod
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.IndexedStatic_HttpScheme_DecodesScheme
+             -------------------------------------------------
+             Executing Test : IndexedStatic_HttpScheme_DecodesScheme
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.IndexedStatic_RootPath_DecodesPath
+             -------------------------------------------------
+             Executing Test : IndexedStatic_RootPath_DecodesPath
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.LiteralIncrementalIndex_StaticName_AddsToTable
+             -------------------------------------------------
+             Executing Test : LiteralIncrementalIndex_StaticName_AddsToTable
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.LiteralWithoutIndexing_StaticName_DoesNotAddToTable
+             -------------------------------------------------
+             Executing Test : LiteralWithoutIndexing_StaticName_DoesNotAddToTable
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.LiteralNeverIndexed_NewName_Decodes
+             -------------------------------------------------
+             Executing Test : LiteralNeverIndexed_NewName_Decodes
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.DynTableSizeUpdate_BelowMax_Accepted
+             -------------------------------------------------
+             Executing Test : DynTableSizeUpdate_BelowMax_Accepted
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.DynTableSizeUpdate_ExceedsMax_CallsGoAwayReturnsFalse
+             -------------------------------------------------
+             Executing Test : DynTableSizeUpdate_ExceedsMax_CallsGoAwayReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.IndexZero_CallsGoAwayAndReturnsFalse
+             -------------------------------------------------
+             Executing Test : IndexZero_CallsGoAwayAndReturnsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.EmptyBlock_ReturnsTrue_NoHeaders
+             -------------------------------------------------
+             Executing Test : EmptyBlock_ReturnsTrue_NoHeaders
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.MultipleHeaders_AllDecoded
+             -------------------------------------------------
+             Executing Test : MultipleHeaders_AllDecoded
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackDecodeTests.CustomHeader_AppearsInHeadersArray
+             -------------------------------------------------
+             Executing Test : CustomHeader_AppearsInHeadersArray
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.HPACK.THPackRoundTripTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.HPACK.THPackRoundTripTests.EncodeResponse200_DecodeYieldsStatus200
+             -------------------------------------------------
+             Executing Test : EncodeResponse200_DecodeYieldsStatus200
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRoundTripTests.EncodeResponse404_DecodeYieldsStatus404
+             -------------------------------------------------
+             Executing Test : EncodeResponse404_DecodeYieldsStatus404
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRoundTripTests.EncodeResponse201_DecodeYieldsStatus201
+             -------------------------------------------------
+             Executing Test : EncodeResponse201_DecodeYieldsStatus201
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRoundTripTests.EncodeResponseWithContentType_DecodeYieldsContentType
+             -------------------------------------------------
+             Executing Test : EncodeResponseWithContentType_DecodeYieldsContentType
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRoundTripTests.EncodeResponseWithContentLength_DecodeYieldsContentLength
+             -------------------------------------------------
+             Executing Test : EncodeResponseWithContentLength_DecodeYieldsContentLength
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRoundTripTests.EncodeResponseWithExtra_DecodeYieldsExtraHeader
+             -------------------------------------------------
+             Executing Test : EncodeResponseWithExtra_DecodeYieldsExtraHeader
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRoundTripTests.EncodeRequestGet_DecodeYieldsMethod
+             -------------------------------------------------
+             Executing Test : EncodeRequestGet_DecodeYieldsMethod
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRoundTripTests.EncodeRequestPost_DecodeYieldsMethod
+             -------------------------------------------------
+             Executing Test : EncodeRequestPost_DecodeYieldsMethod
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRoundTripTests.EncodeRequestCustomPath_DecodeYieldsPath
+             -------------------------------------------------
+             Executing Test : EncodeRequestCustomPath_DecodeYieldsPath
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackRoundTripTests.EncodeRequestAuthority_DecodeYieldsAuthority
+             -------------------------------------------------
+             Executing Test : EncodeRequestAuthority_DecodeYieldsAuthority
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.HPACK.THPackHuffmanTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.HPACK.THPackHuffmanTests.HuffmanEncoded_Authority_DecodesCorrectly
+             -------------------------------------------------
+             Executing Test : HuffmanEncoded_Authority_DecodesCorrectly
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackHuffmanTests.HuffmanEncoded_CustomValue_DecodesCorrectly
+             -------------------------------------------------
+             Executing Test : HuffmanEncoded_CustomValue_DecodesCorrectly
+             
+               Success.
+            
+             Test : Poseidon.Tests.HPACK.THPackHuffmanTests.HuffmanEncoded_EmptyString_DecodesEmpty
+             -------------------------------------------------
+             Executing Test : HuffmanEncoded_EmptyString_DecodesEmpty
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.Brotli
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.Brotli.TBrotliUnitTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Brotli.TBrotliUnitTests.IsAvailable_DoesNotRaise
+             -------------------------------------------------
+             Executing Test : IsAvailable_DoesNotRaise
+             
+               Success.
+            
+             Test : Poseidon.Tests.Brotli.TBrotliUnitTests.Compress_WhenUnavailable_Raises
+             -------------------------------------------------
+             Executing Test : Compress_WhenUnavailable_Raises
+             
+               Success.
+            
+             Test : Poseidon.Tests.Brotli.TBrotliUnitTests.Decompress_WhenUnavailable_Raises
+             -------------------------------------------------
+             Executing Test : Decompress_WhenUnavailable_Raises
+             
+               Success.
+            
+             Test : Poseidon.Tests.Brotli.TBrotliUnitTests.CompressDecompress_RoundTrip_Quality6
+             -------------------------------------------------
+             Executing Test : CompressDecompress_RoundTrip_Quality6
+             
+               Success.
+            
+             Test : Poseidon.Tests.Brotli.TBrotliUnitTests.CompressDecompress_RoundTrip_Quality0
+             -------------------------------------------------
+             Executing Test : CompressDecompress_RoundTrip_Quality0
+             
+               Success.
+            
+             Test : Poseidon.Tests.Brotli.TBrotliUnitTests.CompressDecompress_RoundTrip_Quality11
+             -------------------------------------------------
+             Executing Test : CompressDecompress_RoundTrip_Quality11
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.Brotli.TBrotliServerTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.Brotli.TBrotliServerTests.BrotliEnabled_AcceptBr_Returns_ContentEncodingBr
+             -------------------------------------------------
+             Executing Test : BrotliEnabled_AcceptBr_Returns_ContentEncodingBr
+             
+               Success.
+            
+             Test : Poseidon.Tests.Brotli.TBrotliServerTests.BrotliEnabled_AcceptGzip_Returns_ContentEncodingGzip
+             -------------------------------------------------
+             Executing Test : BrotliEnabled_AcceptGzip_Returns_ContentEncodingGzip
+             
+               Success.
+            
+             Test : Poseidon.Tests.Brotli.TBrotliServerTests.BrotliDisabled_AcceptBr_Returns_ContentEncodingGzip
+             -------------------------------------------------
+             Executing Test : BrotliDisabled_AcceptBr_Returns_ContentEncodingGzip
+             
+               Success.
+            
+             Test : Poseidon.Tests.Brotli.TBrotliServerTests.QValue_GzipHigher_Returns_ContentEncodingGzip
+             -------------------------------------------------
+             Executing Test : QValue_GzipHigher_Returns_ContentEncodingGzip
+             
+               Success.
+            
+             Test : Poseidon.Tests.Brotli.TBrotliServerTests.BrotliQuality_Default_Is6
+             -------------------------------------------------
+             Executing Test : BrotliQuality_Default_Is6
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.HttpServer
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests
+           -------------------------------------------------
+             Running Fixture Setup Method : SetupFixture
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.AllowedMethods_DisallowedVerb_Returns405
+             -------------------------------------------------
+             Executing Test : AllowedMethods_DisallowedVerb_Returns405
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.AllowedMethods_AllowedVerb_Returns200
+             -------------------------------------------------
+             Executing Test : AllowedMethods_AllowedVerb_Returns200
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.PathTraversal_DotDotSegment_Returns400
+             -------------------------------------------------
+             Executing Test : PathTraversal_DotDotSegment_Returns400
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.PathTraversal_PercentEncodedDotDot_Returns400
+             -------------------------------------------------
+             Executing Test : PathTraversal_PercentEncodedDotDot_Returns400
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.Smuggling_CLAndChunked_Returns400
+             -------------------------------------------------
+             Executing Test : Smuggling_CLAndChunked_Returns400
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.MaxRequestSize_OversizedBody_Returns413
+             -------------------------------------------------
+             Executing Test : MaxRequestSize_OversizedBody_Returns413
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.MaxQueueDepth_QueueFull_Returns503
+             -------------------------------------------------
+             Executing Test : MaxQueueDepth_QueueFull_Returns503
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.SecureHeaders_Enabled_ResponseContainsXContentTypeOptions
+             -------------------------------------------------
+             Executing Test : SecureHeaders_Enabled_ResponseContainsXContentTypeOptions
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.SecureHeaders_Disabled_ResponseLacksXContentTypeOptions
+             -------------------------------------------------
+             Executing Test : SecureHeaders_Disabled_ResponseLacksXContentTypeOptions
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.ServerBanner_Custom_AppearsInResponseHeader
+             -------------------------------------------------
+             Executing Test : ServerBanner_Custom_AppearsInResponseHeader
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.ServerBanner_Empty_ServerHeaderAbsent
+             -------------------------------------------------
+             Executing Test : ServerBanner_Empty_ServerHeaderAbsent
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.RateLimit_PerIP_ExceededReturns429
+             -------------------------------------------------
+             Executing Test : RateLimit_PerIP_ExceededReturns429
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerAdvTests.RateLimit_Global_ExceededReturns429
+             -------------------------------------------------
+             Executing Test : RateLimit_Global_ExceededReturns429
+             
+               Success.
+            
+            Running Fixture Teardown Method : TeardownFixture
+            
+         
+           Fixture : Poseidon.Tests.HttpServer.TPoseidonHttpServerWSTests
+           -------------------------------------------------
+             Running Fixture Setup Method : SetupFixture
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerWSTests.MaxWSFrameSize_OversizedFrame_ConnectionClosed
+             -------------------------------------------------
+             Executing Test : MaxWSFrameSize_OversizedFrame_ConnectionClosed
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerWSTests.MaxWSFrameSize_FrameWithinLimit_Accepted
+             -------------------------------------------------
+             Executing Test : MaxWSFrameSize_FrameWithinLimit_Accepted
+             
+               Success.
+            
+            Running Fixture Teardown Method : TeardownFixture
+            
+         
+           Fixture : Poseidon.Tests.HttpServer.TPoseidonHttpServerH2CTests
+           -------------------------------------------------
+             Running Fixture Setup Method : SetupFixture
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerH2CTests.H2CUpgrade_ValidRequest_Returns101
+             -------------------------------------------------
+             Executing Test : H2CUpgrade_ValidRequest_Returns101
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerH2CTests.H2CUpgrade_NoUpgradeHeader_ReturnsNormal200
+             -------------------------------------------------
+             Executing Test : H2CUpgrade_NoUpgradeHeader_ReturnsNormal200
+             
+               Success.
+            
+            Running Fixture Teardown Method : TeardownFixture
+            
+         
+           Fixture : Poseidon.Tests.HttpServer.TPoseidonHttpServerTests
+           -------------------------------------------------
+             Running Fixture Setup Method : SetupFixture
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerTests.Get_RootPath_Returns200
+             -------------------------------------------------
+             Executing Test : Get_RootPath_Returns200
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerTests.Get_RouteWithParam_ReturnsParamValue
+             -------------------------------------------------
+             Executing Test : Get_RouteWithParam_ReturnsParamValue
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerTests.Post_WithJsonBody_Returns201
+             -------------------------------------------------
+             Executing Test : Post_WithJsonBody_Returns201
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerTests.Get_UnknownRoute_Returns404
+             -------------------------------------------------
+             Executing Test : Get_UnknownRoute_Returns404
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerTests.Get_HandlerSetsStatus_ReturnsOverriddenStatus
+             -------------------------------------------------
+             Executing Test : Get_HandlerSetsStatus_ReturnsOverriddenStatus
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerTests.Post_Echo_ReflectsBody
+             -------------------------------------------------
+             Executing Test : Post_Echo_ReflectsBody
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerTests.KeepAlive_MultipleRequests_ReuseConnection
+             -------------------------------------------------
+             Executing Test : KeepAlive_MultipleRequests_ReuseConnection
+             
+               Success.
+            
+            Running Fixture Teardown Method : TeardownFixture
+            
+         
+           Fixture : Poseidon.Tests.HttpServer.TPoseidonHttpServerDrainTests
+           -------------------------------------------------
+             Running Fixture Setup Method : SetupFixture
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerDrainTests.Stop_NoInFlight_ReturnsQuickly
+             -------------------------------------------------
+             Executing Test : Stop_NoInFlight_ReturnsQuickly
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerDrainTests.Stop_WithInFlightHandler_WaitsForCompletion
+             -------------------------------------------------
+             Executing Test : Stop_WithInFlightHandler_WaitsForCompletion
+             
+               Success.
+            
+            Running Fixture Teardown Method : TeardownFixture
+            
+         
+           Fixture : Poseidon.Tests.HttpServer.TPoseidonHttpServerIdleTests
+           -------------------------------------------------
+             Running Fixture Setup Method : SetupFixture
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerIdleTests.IdleTimeout_InactiveConnection_ClosedByServer
+             -------------------------------------------------
+             Executing Test : IdleTimeout_InactiveConnection_ClosedByServer
+             
+               Success.
+            
+             Test : Poseidon.Tests.HttpServer.TPoseidonHttpServerIdleTests.IdleTimeout_ActiveConnection_NotClosed
+             -------------------------------------------------
+             Executing Test : IdleTimeout_ActiveConnection_NotClosed
+             
+               Success.
+            
+            Running Fixture Teardown Method : TeardownFixture
+            
+         
+      
+        Fixture : Poseidon.Tests.HTTP1Parser
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.Get_Root_ParsesCorrectly
+             -------------------------------------------------
+             Executing Test : Get_Root_ParsesCorrectly
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.Post_WithJsonBody_ParsesBodyAndHeaders
+             -------------------------------------------------
+             Executing Test : Post_WithJsonBody_ParsesBodyAndHeaders
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.Get_WithQueryString_ParsesQueryString
+             -------------------------------------------------
+             Executing Test : Get_WithQueryString_ParsesQueryString
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.HTTP10_KeepAliveIsFalse
+             -------------------------------------------------
+             Executing Test : HTTP10_KeepAliveIsFalse
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.HTTP11_KeepAliveIsTrue
+             -------------------------------------------------
+             Executing Test : HTTP11_KeepAliveIsTrue
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.ConnectionClose_OverridesHTTP11KeepAlive
+             -------------------------------------------------
+             Executing Test : ConnectionClose_OverridesHTTP11KeepAlive
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.ConnectionKeepAlive_SetsKeepAlive
+             -------------------------------------------------
+             Executing Test : ConnectionKeepAlive_SetsKeepAlive
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.IncompleteHeaders_ReturnsFalseNotBad
+             -------------------------------------------------
+             Executing Test : IncompleteHeaders_ReturnsFalseNotBad
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.IncompleteBody_ReturnsFalseNotBad
+             -------------------------------------------------
+             Executing Test : IncompleteBody_ReturnsFalseNotBad
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.MalformedRequestLine_ReturnsBadRequest
+             -------------------------------------------------
+             Executing Test : MalformedRequestLine_ReturnsBadRequest
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.HeaderMaxSizeExceeded_ReturnsBadRequest
+             -------------------------------------------------
+             Executing Test : HeaderMaxSizeExceeded_ReturnsBadRequest
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.MultipleHeaders_AllParsed
+             -------------------------------------------------
+             Executing Test : MultipleHeaders_AllParsed
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.ContentLength_BodyConsumed
+             -------------------------------------------------
+             Executing Test : ContentLength_BodyConsumed
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.Smuggling_CLAndChunked_ReturnsBadRequest
+             -------------------------------------------------
+             Executing Test : Smuggling_CLAndChunked_ReturnsBadRequest
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.AccumBufShifted_AfterParse
+             -------------------------------------------------
+             Executing Test : AccumBufShifted_AfterParse
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.THTTP1ParseRequestTests.PipelinedRequests_OnlyFirstConsumed
+             -------------------------------------------------
+             Executing Test : PipelinedRequests_OnlyFirstConsumed
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+           Fixture : Poseidon.Tests.HTTP1Parser.TDecodeHTTP1ChunkedTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.HTTP1Parser.TDecodeHTTP1ChunkedTests.SingleChunk_DecodesCorrectly
+             -------------------------------------------------
+             Executing Test : SingleChunk_DecodesCorrectly
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.TDecodeHTTP1ChunkedTests.MultipleChunks_Concatenated
+             -------------------------------------------------
+             Executing Test : MultipleChunks_Concatenated
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.TDecodeHTTP1ChunkedTests.LastChunkZero_SignalsEnd
+             -------------------------------------------------
+             Executing Test : LastChunkZero_SignalsEnd
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.TDecodeHTTP1ChunkedTests.Incomplete_ReturnsFalseNotMalformed
+             -------------------------------------------------
+             Executing Test : Incomplete_ReturnsFalseNotMalformed
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.TDecodeHTTP1ChunkedTests.MalformedHex_ReturnsMalformed
+             -------------------------------------------------
+             Executing Test : MalformedHex_ReturnsMalformed
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.TDecodeHTTP1ChunkedTests.ChunkSizeLineTooLong_ReturnsMalformed
+             -------------------------------------------------
+             Executing Test : ChunkSizeLineTooLong_ReturnsMalformed
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.TDecodeHTTP1ChunkedTests.OversizedChunk_ReturnsMalformed
+             -------------------------------------------------
+             Executing Test : OversizedChunk_ReturnsMalformed
+             
+               Success.
+            
+             Test : Poseidon.Tests.HTTP1Parser.TDecodeHTTP1ChunkedTests.ChunkWithExtension_ExtensionIgnored
+             -------------------------------------------------
+             Executing Test : ChunkWithExtension_ExtensionIgnored
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.SSL
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.SSL.TSSLInjectionTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureSSL_CallsEnsureLoaded
+             -------------------------------------------------
+             Executing Test : ConfigureSSL_CallsEnsureLoaded
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureSSL_CallsNewContext
+             -------------------------------------------------
+             Executing Test : ConfigureSSL_CallsNewContext
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureSSL_CallsLoadCertAndLoadKey
+             -------------------------------------------------
+             Executing Test : ConfigureSSL_CallsLoadCertAndLoadKey
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureSSL_CallsVerifyKey
+             -------------------------------------------------
+             Executing Test : ConfigureSSL_CallsVerifyKey
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureSSL_CallsSetMinVersion
+             -------------------------------------------------
+             Executing Test : ConfigureSSL_CallsSetMinVersion
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureSSL_CallsEnableSessionCache
+             -------------------------------------------------
+             Executing Test : ConfigureSSL_CallsEnableSessionCache
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureSSL_CallsSetSNICallback
+             -------------------------------------------------
+             Executing Test : ConfigureSSL_CallsSetSNICallback
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureSSL_WithH2_CallsSetALPN
+             -------------------------------------------------
+             Executing Test : ConfigureSSL_WithH2_CallsSetALPN
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.MinTLSVersion_Default_Is0x0303
+             -------------------------------------------------
+             Executing Test : MinTLSVersion_Default_Is0x0303
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.MinTLSVersion_CustomValue_ForwardedToProvider
+             -------------------------------------------------
+             Executing Test : MinTLSVersion_CustomValue_ForwardedToProvider
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureMTLS_AfterConfigureSSL_CallsProvider
+             -------------------------------------------------
+             Executing Test : ConfigureMTLS_AfterConfigureSSL_CallsProvider
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureMTLS_BeforeConfigureSSL_Raises
+             -------------------------------------------------
+             Executing Test : ConfigureMTLS_BeforeConfigureSSL_Raises
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.ConfigureSSL_WhenNotAvailable_Raises
+             -------------------------------------------------
+             Executing Test : ConfigureSSL_WhenNotAvailable_Raises
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.AddSNICert_AfterConfigureSSL_CallsProviderMethods
+             -------------------------------------------------
+             Executing Test : AddSNICert_AfterConfigureSSL_CallsProviderMethods
+             
+               Success.
+            
+             Test : Poseidon.Tests.SSL.TSSLInjectionTests.Destroy_FreesSslCtx
+             -------------------------------------------------
+             Executing Test : Destroy_FreesSslCtx
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.ResponseBuilder
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.Status200_ContainsOKStatusLine
+             -------------------------------------------------
+             Executing Test : Status200_ContainsOKStatusLine
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.Status404_ContainsNotFoundStatusLine
+             -------------------------------------------------
+             Executing Test : Status404_ContainsNotFoundStatusLine
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.Status201_ContainsCreatedStatusLine
+             -------------------------------------------------
+             Executing Test : Status201_ContainsCreatedStatusLine
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.CustomStatus_ContainsUnknownStatusLine
+             -------------------------------------------------
+             Executing Test : CustomStatus_ContainsUnknownStatusLine
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.ContentType_JSON_UsesPreencoded
+             -------------------------------------------------
+             Executing Test : ContentType_JSON_UsesPreencoded
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.ContentType_TextPlain_UsesPreencoded
+             -------------------------------------------------
+             Executing Test : ContentType_TextPlain_UsesPreencoded
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.ContentType_Custom_UsedVerbatim
+             -------------------------------------------------
+             Executing Test : ContentType_Custom_UsedVerbatim
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.KeepAlive_True_ContainsKeepAliveHeader
+             -------------------------------------------------
+             Executing Test : KeepAlive_True_ContainsKeepAliveHeader
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.KeepAlive_False_ContainsCloseHeader
+             -------------------------------------------------
+             Executing Test : KeepAlive_False_ContainsCloseHeader
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.ContentLength_Zero_WrittenCorrectly
+             -------------------------------------------------
+             Executing Test : ContentLength_Zero_WrittenCorrectly
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.ContentLength_Large_WrittenCorrectly
+             -------------------------------------------------
+             Executing Test : ContentLength_Large_WrittenCorrectly
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.ExtraHeader_Appended
+             -------------------------------------------------
+             Executing Test : ExtraHeader_Appended
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.ExtraHeader_CRLFStripped
+             -------------------------------------------------
+             Executing Test : ExtraHeader_CRLFStripped
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.SecureHeaders_Disabled_NotPresent
+             -------------------------------------------------
+             Executing Test : SecureHeaders_Disabled_NotPresent
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.SecureHeaders_Enabled_AllPresent
+             -------------------------------------------------
+             Executing Test : SecureHeaders_Enabled_AllPresent
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.ServerBanner_Empty_HeaderOmitted
+             -------------------------------------------------
+             Executing Test : ServerBanner_Empty_HeaderOmitted
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.ServerBanner_NonEmpty_HeaderPresent
+             -------------------------------------------------
+             Executing Test : ServerBanner_NonEmpty_HeaderPresent
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.Body_PresentInResponse
+             -------------------------------------------------
+             Executing Test : Body_PresentInResponse
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.Body_Empty_NoBodyBytes
+             -------------------------------------------------
+             Executing Test : Body_Empty_NoBodyBytes
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.DefaultErrorBody_IsValidJSON
+             -------------------------------------------------
+             Executing Test : DefaultErrorBody_IsValidJSON
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.Response_EndsWithDoubleCRLF_BeforeBody
+             -------------------------------------------------
+             Executing Test : Response_EndsWithDoubleCRLF_BeforeBody
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.Pooled_ContentMatchesNonPooled
+             -------------------------------------------------
+             Executing Test : Pooled_ContentMatchesNonPooled
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.Pooled_ActualLen_EqualsNonPooledLength
+             -------------------------------------------------
+             Executing Test : Pooled_ActualLen_EqualsNonPooledLength
+             
+               Success.
+            
+             Test : Poseidon.Tests.ResponseBuilder.TResponseBuilderTests.Pooled_Release_DoesNotCrash
+             -------------------------------------------------
+             Executing Test : Pooled_Release_DoesNotCrash
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+        Fixture : Poseidon.Tests.BufferPool
+        -------------------------------------------------
+           Fixture : Poseidon.Tests.BufferPool.TBufferPoolTests
+           -------------------------------------------------
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Acquire_ZeroSize_ReturnsTier0
+             -------------------------------------------------
+             Executing Test : Acquire_ZeroSize_ReturnsTier0
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Acquire_Tier0Boundary_ReturnsTier0
+             -------------------------------------------------
+             Executing Test : Acquire_Tier0Boundary_ReturnsTier0
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Acquire_OneByteBeyondTier0_ReturnsTier1
+             -------------------------------------------------
+             Executing Test : Acquire_OneByteBeyondTier0_ReturnsTier1
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Acquire_Tier1Boundary_ReturnsTier1
+             -------------------------------------------------
+             Executing Test : Acquire_Tier1Boundary_ReturnsTier1
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Acquire_OneByteBeyondTier1_ReturnsTier2
+             -------------------------------------------------
+             Executing Test : Acquire_OneByteBeyondTier1_ReturnsTier2
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Acquire_Tier2Boundary_ReturnsTier2
+             -------------------------------------------------
+             Executing Test : Acquire_Tier2Boundary_ReturnsTier2
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Acquire_OversizedBypass_ReturnsExactSize
+             -------------------------------------------------
+             Executing Test : Acquire_OversizedBypass_ReturnsExactSize
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Release_Tier0_BufBecomesNil
+             -------------------------------------------------
+             Executing Test : Release_Tier0_BufBecomesNil
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Release_Tier1_BufBecomesNil
+             -------------------------------------------------
+             Executing Test : Release_Tier1_BufBecomesNil
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Release_Tier2_BufBecomesNil
+             -------------------------------------------------
+             Executing Test : Release_Tier2_BufBecomesNil
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Release_Oversized_BufBecomesNil
+             -------------------------------------------------
+             Executing Test : Release_Oversized_BufBecomesNil
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.ReleaseAndAcquire_Tier0_BufferReused
+             -------------------------------------------------
+             Executing Test : ReleaseAndAcquire_Tier0_BufferReused
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.ReleaseAndAcquire_Tier1_BufferReused
+             -------------------------------------------------
+             Executing Test : ReleaseAndAcquire_Tier1_BufferReused
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.ReleaseAndAcquire_Tier2_BufferReused
+             -------------------------------------------------
+             Executing Test : ReleaseAndAcquire_Tier2_BufferReused
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Acquire_SmallRequest_ReturnsTier0
+             -------------------------------------------------
+             Executing Test : Acquire_SmallRequest_ReturnsTier0
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Acquire_1_ReturnsTier0
+             -------------------------------------------------
+             Executing Test : Acquire_1_ReturnsTier0
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.ConcurrentAcquireRelease_NoDeadlock
+             -------------------------------------------------
+             Executing Test : ConcurrentAcquireRelease_NoDeadlock
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.Release_NilBuffer_DoesNotCrash
+             -------------------------------------------------
+             Executing Test : Release_NilBuffer_DoesNotCrash
+             
+               Success.
+            
+             Test : Poseidon.Tests.BufferPool.TBufferPoolTests.ConcurrentAcquireRelease_MultiTier_NoDeadlock
+             -------------------------------------------------
+             Executing Test : ConcurrentAcquireRelease_MultiTier_NoDeadlock
+             
+               Success.
+            
+            Running Fixture Teardown Method : Destroy
+            
+         
+      
+   
+
+Done testing.
+Tests Found   : 337
+Tests Ignored : 0
+Tests Passed  : 337
+Tests Leaked  : 0
+Tests Failed  : 0
+Tests Errored : 0
