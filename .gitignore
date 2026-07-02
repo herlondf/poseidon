@@ -39,6 +39,25 @@ __recovery/
 CLAUDE.md
 AGENTS.md
 
+# ─── Build / test logs ────────────────────────────────────────────────────────
+*_err.txt
+*_out.txt
+*_out2.txt
+*_output.txt
+*.log
+
+# ─── Benchmark artifacts ─────────────────────────────────────────────────────
+benchmark/bench_*.txt
+benchmark/bout.txt
+benchmark/build_output.txt
+benchmark/build*.bat
+benchmark/linux/*.err
+benchmark/linux/*.out
+benchmark/linux/*.ps1
+benchmark/linux/assets/
+benchmark/linux/results/
+benchmark/comparison/sysroot/
+
 # ─── OS noise ─────────────────────────────────────────────────────────────────
 Thumbs.db
 Desktop.ini
