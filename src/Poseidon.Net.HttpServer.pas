@@ -26,7 +26,6 @@ uses
   Poseidon.Net.Dispatcher,
   Poseidon.Net.WebSocket,
   Poseidon.Net.HTTP2,
-  Poseidon.Net.Metrics,
   Poseidon.Net.ProxyProtocol,
   Poseidon.Net.IO,
   Poseidon.Net.Interfaces,
@@ -47,9 +46,6 @@ type
     FInFlightCount:   Int64;
     FIdleTimeoutMs:   Integer;     // 0 = disabled; default 10_000
     FIdleSweepThread: TThread;
-    FCompressionEnabled: Boolean;  // inline gzip negotiation; default False
-    FBrotliEnabled:  Boolean;      // Brotli compression; default False; requires libbrotlienc
-    FBrotliQuality:  Integer;      // Brotli quality 0-11; default 6
     FMaxConnections:      Integer; // 0 = unlimited; default 0
     FMaxConnectionsPerIP: Integer; // 0 = unlimited; default 0
     FPerIPCount:          TDictionary<string, Integer>;
@@ -64,7 +60,6 @@ type
     FRequestPool:     TElasticWorkerPool; // elastic request-handler pool
     FOnLog:           TOnPoseidonLog;
     FOnRequestLog:    TOnPoseidonRequestLog;  // access log callback; nil = silent
-    FAllowedMethods:  TArray<string>;  // S-1: empty = accept all (default)
     FMinTLSVersion:   Integer;         // S-6: 0 = library default; $0303 = TLS 1.2
     FMaxRequestSize:  Integer;         // R-4: max accumulated request bytes (default 8MB)
     FMaxHeaderSize:   Integer;         // R-4: max header section bytes (default 64KB)
@@ -78,18 +73,7 @@ type
     FSecureHeadersEnabled:   Boolean;  // A-1: inject X-Content-Type-Options etc.
     FServerBanner:    string;          // A-2: Server: header value; '' = omit
     FTCPFastOpen:     Boolean;         // feat: TCP_FASTOPEN — opt-in; graceful no-op on unsupported OS
-    FMetrics:         TPoseidonMetrics; // Prometheus metrics; nil when disabled
-    FMetricsEnabled:  Boolean;
-    FMetricsPath:     string;
-    FMetricsAllowedCIDR: string;
     FProxyProtocol:     TProxyProtocolMode; // PP v1/v2/auto; default ppDisabled
-    FRateLimitPerIP:    Integer;   // max req/s per IP; 0 = unlimited
-    FRateLimitGlobal:   Integer;   // max req/s global; 0 = unlimited
-    FRateLimitResponse: Integer;   // HTTP status on limit (default 429)
-    FRateLock:          TCriticalSection;
-    FRateBuckets:       TDictionary<string, Int64>; // IP → packed (count|window)
-    FRateGlobalCount:   Int64;     // global req count in current window
-    FRateGlobalWindow:  Int64;     // current global window (tick64 div 1000)
     FOnH2Push:          TOnH2Push; // HTTP/2 server push callback; nil = no push
     // R-1: platform IO backend — holds IOCP/epoll fd, listen socket, workers.
     FIOBackend:       IIOBackend;
@@ -131,8 +115,6 @@ type
       var AExtra: TArray<TPair<string,string>>;
       var APushResources: TArray<TPoseidonPushResource>);
     procedure _Log(ALevel: TLogLevel; const AMessage: string);
-    // Returns True when the request should proceed; False = rate-limited.
-    function  _CheckRateLimit(const ARemoteAddr: string): Boolean;
   public
     // ABufferPool, ASSLProvider, ACompression: nil selects the built-in default
     // (backward-compatible — existing code that calls Create without args unchanged).
@@ -156,18 +138,6 @@ type
     // Connections with no _ProcessRecv activity for IdleTimeoutMs are shut down.
     // Default 10000 (10s). Set to 0 to disable. Applies during SSL handshake too.
     property IdleTimeoutMs: Integer read FIdleTimeoutMs write FIdleTimeoutMs;
-    // Inline gzip compression: when True, responses > 1KB with text-like
-    // Content-Type are compressed if the client sent Accept-Encoding: gzip.
-    // Default False (gzip is CPU-expensive — opt-in).
-    property CompressionEnabled: Boolean read FCompressionEnabled write FCompressionEnabled;
-    // Brotli compression: when True and libbrotlienc is available at runtime,
-    // responses > 1KB are compressed with Brotli when the client sends
-    // Accept-Encoding: br. Falls back to gzip when libbrotlienc is absent.
-    // Default False (opt-in). Requires CompressionEnabled = True.
-    property BrotliEnabled: Boolean read FBrotliEnabled write FBrotliEnabled;
-    // Brotli compression quality: 0 (fastest/worst) to 11 (slowest/best).
-    // Default 6 (good balance for APIs). BrotliEnabled must be True.
-    property BrotliQuality: Integer read FBrotliQuality write FBrotliQuality;
     // Maximum concurrent connections. 0 = unlimited. Defends against DoS
     // by sheer connection flood (each conn reserves 8KB AccumBuf). When
     // reached, _OnNewSocket closes the incoming socket immediately.
@@ -195,10 +165,6 @@ type
     // and byte counts. nil (default) = no access logging.
     property OnRequestLog: TOnPoseidonRequestLog
       read FOnRequestLog write FOnRequestLog;
-    // S-1: Allowed HTTP methods. When non-empty, any request with a method not in
-    // this list is rejected with 405. Empty (default) accepts all methods.
-    // Example: Server.AllowedMethods := ['GET', 'POST', 'HEAD'];
-    property AllowedMethods: TArray<string> read FAllowedMethods write FAllowedMethods;
     // S-6: Minimum TLS protocol version. Applied at ConfigureSSL time.
     // Use Poseidon.Net.SSL constants: TLS1_2_VERSION ($0303), TLS1_3_VERSION ($0304).
     // Default TLS1_2_VERSION ($0303). Set to 0 to use the OpenSSL library default.
@@ -234,23 +200,6 @@ type
     // Requires Windows 10 1607+ or Linux kernel 3.7+ with tcp_fastopen enabled.
     // Silently ignored when the OS does not support it.
     property TCPFastOpen: Boolean read FTCPFastOpen write FTCPFastOpen;
-    // Prometheus metrics endpoint. When MetricsEnabled = True, GET MetricsPath
-    // returns metrics in Prometheus exposition format 0.0.4.
-    // MetricsEnabled must be set before Listen(). Default False.
-    property MetricsEnabled:     Boolean read FMetricsEnabled  write FMetricsEnabled;
-    // Path for the metrics endpoint. Default '/metrics'.
-    property MetricsPath:        string  read FMetricsPath     write FMetricsPath;
-    // Optional CIDR to restrict scraping (e.g. '10.0.0.0/8'). '' = no restriction.
-    property MetricsAllowedCIDR: string  read FMetricsAllowedCIDR write FMetricsAllowedCIDR;
-    // Read-only access to the metrics object (for custom instrumentation).
-    property Metrics: TPoseidonMetrics read FMetrics;
-    // Rate limiting (fixed-window counter, 1-second window).
-    // RateLimitPerIP: maximum requests per second from a single IP. 0 = unlimited.
-    // RateLimitGlobal: maximum requests per second across all clients. 0 = unlimited.
-    // RateLimitResponse: HTTP status returned when the limit is exceeded. Default 429.
-    property RateLimitPerIP:    Integer read FRateLimitPerIP    write FRateLimitPerIP;
-    property RateLimitGlobal:   Integer read FRateLimitGlobal   write FRateLimitGlobal;
-    property RateLimitResponse: Integer read FRateLimitResponse write FRateLimitResponse;
     // Proxy Protocol: ppDisabled (default) disables PP processing.
     // ppV1/ppV2: enforce a specific version. ppAuto: detect by signature.
     // Enable only when the server receives connections exclusively from a
@@ -405,15 +354,11 @@ type
     procedure UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     procedure UpgradeToH2C(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     function  DispatchWSFrames(AConn: Pointer): Boolean;
-    function  CheckRateLimit(const ARemoteAddr: string): Boolean;
     procedure InvokeRequest(const AReq: TPoseidonNativeRequest;
       out AStatus: Integer; out AContentType: string;
       out ABody: TBytes; out AExtra: TArray<TPair<string,string>>);
-    function  GetMetricsBody(const APath, ARemoteAddr: string;
-      out ABody: TBytes): Boolean;
     procedure LogRequest(const AEvent: TPoseidonRequestLogEvent);
     procedure AdjustInflight(ADelta: Integer);
-    procedure RecordRequest(AStatus: Integer; ADurationMs, ARxBytes, ATxBytes: Int64);
   end;
 
 constructor TServerDispatchAdapter.Create(AServer: TPoseidonNativeServer);
@@ -455,11 +400,6 @@ begin
   Result := FServer._DispatchWSFrames(AConn);
 end;
 
-function TServerDispatchAdapter.CheckRateLimit(const ARemoteAddr: string): Boolean;
-begin
-  Result := FServer._CheckRateLimit(ARemoteAddr);
-end;
-
 procedure TServerDispatchAdapter.InvokeRequest(const AReq: TPoseidonNativeRequest;
   out AStatus: Integer; out AContentType: string;
   out ABody: TBytes; out AExtra: TArray<TPair<string,string>>);
@@ -483,15 +423,6 @@ begin
   end;
 end;
 
-function TServerDispatchAdapter.GetMetricsBody(const APath, ARemoteAddr: string;
-  out ABody: TBytes): Boolean;
-begin
-  Result := False;
-  if not Assigned(FServer.FMetrics) then Exit;
-  ABody  := TEncoding.UTF8.GetBytes(FServer.FMetrics.Render);
-  Result := True;
-end;
-
 procedure TServerDispatchAdapter.LogRequest(const AEvent: TPoseidonRequestLogEvent);
 begin
   if Assigned(FServer.FOnRequestLog) then
@@ -504,14 +435,6 @@ begin
     TInterlocked.Increment(FServer.FInFlightCount)
   else
     TInterlocked.Decrement(FServer.FInFlightCount);
-  if Assigned(FServer.FMetrics) then FServer.FMetrics.AdjustInflight(ADelta);
-end;
-
-procedure TServerDispatchAdapter.RecordRequest(AStatus: Integer;
-  ADurationMs, ARxBytes, ATxBytes: Int64);
-begin
-  if Assigned(FServer.FMetrics) then
-    FServer.FMetrics.RecordRequest(AStatus, ADurationMs, ARxBytes, ATxBytes);
 end;
 
 // ===========================================================================
@@ -821,27 +744,17 @@ begin
   LCfg.ProxyProtocol        := FProxyProtocol;
   LCfg.MaxRequestSize       := FMaxRequestSize;
   LCfg.MaxHeaderSize        := FMaxHeaderSize;
-  LCfg.AllowedMethods       := FAllowedMethods;
   LCfg.H2Enabled            := FH2Enabled;
   LCfg.SecureHeadersEnabled := FSecureHeadersEnabled;
   LCfg.ServerBanner         := FServerBanner;
   LCfg.MaxQueueDepth        := 0;           // consumed here; Dispatcher needs no copy
   LCfg.InFlightCount        := nil;         // ditto
-  LCfg.RateLimitResponse    := FRateLimitResponse;
-  LCfg.CompressionEnabled   := FCompressionEnabled;
-  LCfg.Compression          := FCompression;
-  LCfg.BrotliEnabled        := FBrotliEnabled;
-  LCfg.BrotliQuality        := FBrotliQuality;
-  LCfg.MetricsEnabled       := FMetricsEnabled;
-  LCfg.MetricsPath          := FMetricsPath;
-  LCfg.MetricsAllowedCIDR   := FMetricsAllowedCIDR;
 
   // Count this task as in-flight from queue time.  The finally in the pool
   // worker decrements it after Dispatch returns, ensuring the counter always
   // reflects queued + executing work — making the pre-queue check above
   // accurate across all concurrent _DispatchAccumBuf callers.
   TInterlocked.Increment(FInFlightCount);
-  if Assigned(FMetrics) then FMetrics.AdjustInflight(1);
 
   // AddRef before posting: pool worker holds this ref until Dispatch returns.
   // InFlightPool is an atomic counter (not a bool): pipelining can result in
@@ -859,7 +772,6 @@ begin
         FDispatcher.Dispatch(AConn, LCfg);
       finally
         TInterlocked.Decrement(FInFlightCount);
-        if Assigned(FMetrics) then FMetrics.AdjustInflight(-1);
         TInterlocked.Decrement(TNativeConn(AConn).InFlightPool);
         TNativeConn(AConn).Release;
       end;
@@ -949,74 +861,6 @@ begin
 end;
 
 // ===========================================================================
-// Shared: rate limiting — fixed-window counter, 1-second window
-// ===========================================================================
-
-function TPoseidonNativeServer._CheckRateLimit(const ARemoteAddr: string): Boolean;
-var
-  LNow:    Int64;
-  LIP:     string;
-  LPacked: Int64;
-  LWindow: Int64;
-  LCount:  Integer;
-begin
-  Result := True;  // proceed by default
-  if (FRateLimitPerIP <= 0) and (FRateLimitGlobal <= 0) then Exit;
-
-  LNow := Int64(TThread.GetTickCount64) div 1000;  // current 1-second window
-  LIP  := ExtractIP(ARemoteAddr);
-
-  FRateLock.Enter;
-  try
-    // --- Global rate check ---
-    if FRateLimitGlobal > 0 then
-    begin
-      if LNow <> FRateGlobalWindow then
-      begin
-        FRateGlobalWindow := LNow;
-        FRateGlobalCount  := 0;
-      end;
-      Inc(FRateGlobalCount);
-      if FRateGlobalCount > FRateLimitGlobal then
-      begin
-        Result := False;
-        Exit;
-      end;
-    end;
-
-    // --- Per-IP rate check ---
-    if FRateLimitPerIP > 0 then
-    begin
-      // Pack window (high 32 bits) + count (low 32 bits) into one Int64
-      if FRateBuckets.TryGetValue(LIP, LPacked) then
-      begin
-        LWindow := LPacked shr 32;
-        LCount  := Integer(LPacked and $FFFFFFFF);
-        if LNow <> LWindow then
-        begin
-          LWindow := LNow;
-          LCount  := 0;
-        end;
-      end
-      else
-      begin
-        LWindow := LNow;
-        LCount  := 0;
-      end;
-      Inc(LCount);
-      FRateBuckets.AddOrSetValue(LIP, (LWindow shl 32) or Int64(LCount));
-      if LCount > FRateLimitPerIP then
-      begin
-        Result := False;
-        Exit;
-      end;
-    end;
-  finally
-    FRateLock.Leave;
-  end;
-end;
-
-// ===========================================================================
 // Shared: lifecycle (constructor/destructor) — must precede any Listen path
 // ===========================================================================
 
@@ -1046,22 +890,10 @@ begin
   FMaxWSFrameSize          := 16 * 1024 * 1024;    // R-3: 16MB
   FH2MaxConcurrentStreams  := 100;                 // P-1
   FH2InitialWindowSize     := 65535;               // P-1
-  FBrotliEnabled           := False;               // Brotli: opt-in
-  FBrotliQuality           := 6;                   // Brotli: balanced default
   FSecureHeadersEnabled    := False;               // A-1: opt-in
   FServerBanner            := 'Poseidon/1.0';      // A-2
   FTCPFastOpen             := False;               // TCP_FASTOPEN: opt-in
-  FMetricsEnabled          := False;
-  FMetricsPath             := '/metrics';
-  FMetricsAllowedCIDR      := '';
   FProxyProtocol           := ppDisabled;
-  FRateLimitPerIP          := 0;
-  FRateLimitGlobal         := 0;
-  FRateLimitResponse       := 429;
-  FRateLock                := TCriticalSection.Create;
-  FRateBuckets             := TDictionary<string, Int64>.Create;
-  FRateGlobalCount         := 0;
-  FRateGlobalWindow        := 0;
   FPerIPCount              := TDictionary<string, Integer>.Create;
   FWSHandlers              := TDictionary<string, TWSMessageCallback>.Create;
   FWSLock                  := TCriticalSection.Create;
@@ -1104,9 +936,6 @@ begin
     FSSLProvider.FreeContext(FSSLCtx);
     FSSLCtx := nil;
   end;
-  FreeAndNil(FMetrics);
-  FreeAndNil(FRateLock);
-  FreeAndNil(FRateBuckets);
   FreeAndNil(FPerIPCount);
   FreeAndNil(FWSHandlers);
   FreeAndNil(FWSLock);
@@ -1487,9 +1316,6 @@ begin
   FRequestPool := TElasticWorkerPool.Create(LMinReq, LMaxReq,
                     WORKER_IDLE_TIMEOUT_MS);
 
-  if FMetricsEnabled then
-    FMetrics := TPoseidonMetrics.Create;
-
   // AOnListen fires here — server is functional (workers + accept running).
   // Sweep is intentionally started after: if AOnListen blocks (e.g. Readln),
   // sweep still starts when Listen() resumes instead of never starting.
@@ -1607,7 +1433,6 @@ begin
     LConn.Release;  // #43: never registered — drop server ref directly
     Exit;
   end;
-  if Assigned(FMetrics) then FMetrics.AdjustConnections(1);
   try
     FIOBackend.RegisterConn(LConn);
     FIOBackend.PostRecv(LConn);  // arm the first recv (io_uring/epoll need this here;
@@ -1621,7 +1446,6 @@ begin
     finally
       FConnLock.Leave;
     end;
-    if Assigned(FMetrics) then FMetrics.AdjustConnections(-1);
     if LConn.SSLHandle <> nil then FSSLProvider.FreeSSL(LConn.SSLHandle);
     LConn.Release;  // #43: associate/PostRecv failed — drop server ref
   end;
@@ -1655,7 +1479,6 @@ begin
     FConnLock.Leave;
   end;
   if LIdx < 0 then Exit;  // already closed by Stop()
-  if Assigned(FMetrics) then FMetrics.AdjustConnections(-1);
   if LConn.WSMode = CM_WEBSOCKET then
   begin
     if LConn.WSConn <> nil then

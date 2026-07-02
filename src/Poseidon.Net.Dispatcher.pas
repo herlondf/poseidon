@@ -27,10 +27,8 @@ uses
   Poseidon.Net.Connection,
   Poseidon.Net.HTTP2,
   Poseidon.Net.ProxyProtocol,
-  Poseidon.Net.Security,
   Poseidon.Net.ResponseBuilder,
-  Poseidon.Net.Interfaces,
-  Poseidon.Net.Brotli;
+  Poseidon.Net.Interfaces;
 
 type
   // --------------------------------------------------------------------------
@@ -41,20 +39,11 @@ type
     ProxyProtocol:        TProxyProtocolMode;
     MaxRequestSize:       Integer;
     MaxHeaderSize:        Integer;
-    AllowedMethods:       TArray<string>;
     H2Enabled:            Boolean;
     SecureHeadersEnabled: Boolean;
     ServerBanner:         string;
     MaxQueueDepth:        Integer;
     InFlightCount:        PInt64;   // pointer to server's FInFlightCount (atomic)
-    RateLimitResponse:    Integer;
-    CompressionEnabled:   Boolean;
-    Compression:          ICompressionProvider;
-    BrotliEnabled:        Boolean;
-    BrotliQuality:        Integer;   // 0-11; default 6
-    MetricsEnabled:       Boolean;
-    MetricsPath:          string;
-    MetricsAllowedCIDR:   string;
   end;
 
   // --------------------------------------------------------------------------
@@ -76,24 +65,13 @@ type
     // WebSocket
     function DispatchWSFrames(AConn: Pointer): Boolean;
 
-    // Rate limiting
-    function CheckRateLimit(const ARemoteAddr: string): Boolean;
-
     // Application handler (includes exception handling and inflight tracking)
     procedure InvokeRequest(const AReq: TPoseidonNativeRequest;
       out AStatus: Integer; out AContentType: string;
       out ABody: TBytes; out AExtra: TArray<TPair<string,string>>);
 
-    // Metrics endpoint — returns True and fills ABody if this is a metrics request
-    function GetMetricsBody(const APath, ARemoteAddr: string;
-      out ABody: TBytes): Boolean;
-
     // Access log
     procedure LogRequest(const AEvent: TPoseidonRequestLogEvent);
-
-    // Inflight / metrics accounting
-    procedure AdjustInflight(ADelta: Integer);
-    procedure RecordRequest(AStatus: Integer; ADurationMs, ARxBytes, ATxBytes: Int64);
   end;
 
   // --------------------------------------------------------------------------
@@ -103,13 +81,6 @@ type
   TProtocolDispatcher = class
   private
     FCallbacks: IDispatchCallbacks;
-
-    // Content-encoding negotiation — gzip and/or Brotli, with q-value priority.
-    // Runs after the user handler, before response build.
-    procedure _TryCompressResponse(const AReq: TPoseidonNativeRequest;
-      const AConfig: TDispatchConfig;
-      const AContentType: string; var ABody: TBytes;
-      var AExtra: TArray<TPair<string,string>>);
   public
     constructor Create(ACallbacks: IDispatchCallbacks);
 
@@ -129,117 +100,6 @@ begin
   FCallbacks := ACallbacks;
 end;
 
-// Parse a single q-value token like "gzip;q=0.9" → name="gzip", q=0.9
-// Returns True when the token is a valid encoding with q > 0.
-function _ParseEncToken(const AToken: string;
-  out AName: string; out AQ: Double): Boolean;
-var
-  LSemi: Integer;
-  LQStr: string;
-begin
-  LSemi := Pos(';', AToken);
-  if LSemi = 0 then
-  begin
-    AName := Trim(LowerCase(AToken));
-    AQ    := 1.0;
-  end
-  else
-  begin
-    AName := Trim(LowerCase(Copy(AToken, 1, LSemi - 1)));
-    LQStr := Trim(LowerCase(Copy(AToken, LSemi + 1, MaxInt)));
-    if LQStr.StartsWith('q=') then
-    begin
-      if not TryStrToFloat(Copy(LQStr, 3, MaxInt), AQ) then AQ := 1.0;
-    end
-    else
-      AQ := 1.0;
-  end;
-  Result := (AName <> '') and (AQ > 0.0);
-end;
-
-// Parse Accept-Encoding header; returns q-value for a named encoding (0 if absent/q=0).
-function _AcceptQ(const AAccept, AEnc: string): Double;
-var
-  LParts: TArray<string>;
-  LPart:  string;
-  LName:  string;
-  LQ:     Double;
-begin
-  Result := 0.0;
-  LParts := LowerCase(AAccept).Split([',']);
-  for LPart in LParts do
-    if _ParseEncToken(Trim(LPart), LName, LQ) and (LName = LowerCase(AEnc)) then
-    begin
-      Result := LQ;
-      Exit;
-    end;
-end;
-
-procedure TProtocolDispatcher._TryCompressResponse(const AReq: TPoseidonNativeRequest;
-  const AConfig: TDispatchConfig;
-  const AContentType: string; var ABody: TBytes;
-  var AExtra: TArray<TPair<string,string>>);
-const
-  MIN_SIZE = 1024;
-var
-  I:        Integer;
-  LAccept:  string;
-  LCTLower: string;
-  LOut:     TBytes;
-  LEnc:     string;
-  LQBr:     Double;
-  LQGzip:   Double;
-  LUseBr:   Boolean;
-begin
-  if not AConfig.CompressionEnabled then Exit;
-  if Length(ABody) < MIN_SIZE then Exit;
-
-  LCTLower := LowerCase(AContentType);
-  if LCTLower.StartsWith('image/') or LCTLower.StartsWith('video/') or
-     LCTLower.StartsWith('audio/') or (LCTLower = 'application/zip') or
-     (LCTLower = 'application/gzip') or (LCTLower = 'application/octet-stream') then
-    Exit;
-
-  LAccept := '';
-  for I := 0 to High(AReq.Headers) do
-    if SameText(AReq.Headers[I].Key, 'Accept-Encoding') then
-    begin
-      LAccept := AReq.Headers[I].Value;
-      Break;
-    end;
-
-  // Determine preferred encoding respecting RFC 7231 §5.3.4 q-values.
-  // When q-values tie, prefer Brotli (better compression ratio).
-  LUseBr := False;
-  if AConfig.BrotliEnabled and TPoseidonBrotli.IsAvailable then
-  begin
-    LQBr   := _AcceptQ(LAccept, 'br');
-    LQGzip := _AcceptQ(LAccept, 'gzip');
-    LUseBr := (LQBr > 0.0) and (LQBr >= LQGzip);
-  end;
-
-  if LUseBr then
-  begin
-    try
-      LOut := TPoseidonBrotli.Compress(ABody, AConfig.BrotliQuality);
-      ABody := LOut;
-      SetLength(AExtra, Length(AExtra) + 1);
-      AExtra[High(AExtra)] := TPair<string,string>.Create('Content-Encoding', 'br');
-    except
-      // Brotli compress error — fall through to gzip below
-      LUseBr := False;
-    end;
-  end;
-
-  if not LUseBr then
-  begin
-    if not AConfig.Compression.TryCompress(ABody, LAccept, LOut, LEnc) then Exit;
-    ABody := LOut;
-    SetLength(AExtra, Length(AExtra) + 1);
-    AExtra[High(AExtra)] := TPair<string,string>.Create('Content-Encoding', LEnc);
-  end;
-end;
-
 procedure TProtocolDispatcher.Dispatch(AConn: Pointer; const AConfig: TDispatchConfig);
 var
   LConn:          TNativeConn absolute AConn;
@@ -254,8 +114,6 @@ var
   LWsKey:         string;
   I:              Integer;
   LStartTick:     Int64;
-  LRxBytes:       Int64;
-  LTxBytes:       Int64;
   LDurationMs:    Int64;
   LLogEvt:        TPoseidonRequestLogEvent;
   LPPAddr:        string;
@@ -373,26 +231,6 @@ begin
     Move(LConn.AccumBuf[LConsumed], LConn.AccumBuf[0], LConn.AccumLen - LConsumed);
   LConn.AccumLen := LConn.AccumLen - LConsumed;
 
-  // S-1: method allowlist
-  if not IsMethodAllowed(LReq.Method, AConfig.AllowedMethods) then
-  begin
-    LResp := BuildHTTPResponse(405, 'text/plain',
-      TEncoding.ASCII.GetBytes('Method Not Allowed'), False, [],
-      AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
-    FCallbacks.SendResponse(AConn, LResp, 0);
-    Exit;
-  end;
-
-  // S-2: path traversal
-  if not IsPathSafe(LReq.Path) then
-  begin
-    LResp := BuildHTTPResponse(400, 'text/plain',
-      TEncoding.ASCII.GetBytes('Bad Request'), False, [],
-      AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
-    FCallbacks.SendResponse(AConn, LResp, 0);
-    Exit;
-  end;
-
   // Protocol upgrade checks
   LUpgrade := '';
   LWsKey   := '';
@@ -414,74 +252,27 @@ begin
 
   LConn.KeepAlive := LReq.KeepAlive;
 
-  // Rate limiting
-  if not FCallbacks.CheckRateLimit(LConn.RemoteAddr) then
-  begin
-    LResp := BuildHTTPResponse(AConfig.RateLimitResponse, 'text/plain',
-      TEncoding.ASCII.GetBytes('Too Many Requests'), LReq.KeepAlive,
-      [TPair<string,string>.Create('Retry-After', '1')],
-      AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
-    FCallbacks.SendResponse(AConn, LResp, 0);
-    // OnSendComplete re-arma recv (keep-alive) ou fecha — não chamar PostRecv aqui
-    Exit;
-  end;
-
-  // Prometheus metrics endpoint
-  if AConfig.MetricsEnabled and (LReq.Method = 'GET') and
-     (LReq.Path = AConfig.MetricsPath) then
-  begin
-    if (AConfig.MetricsAllowedCIDR <> '') and
-       not IsIPInCIDR(LConn.RemoteAddr, AConfig.MetricsAllowedCIDR) then
-    begin
-      LResp := BuildHTTPResponse(403, 'text/plain',
-        TEncoding.ASCII.GetBytes('Forbidden'), LReq.KeepAlive, [],
-        AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
-      FCallbacks.SendResponse(AConn, LResp, 0);
-      // OnSendComplete re-arma recv (keep-alive) ou fecha — não chamar PostRecv aqui
-      Exit;
-    end;
-    if FCallbacks.GetMetricsBody(LReq.Path, LConn.RemoteAddr, LBody) then
-    begin
-      LResp := BuildHTTPResponse(200, 'text/plain; version=0.0.4',
-        LBody, LReq.KeepAlive, [],
-        AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
-      FCallbacks.SendResponse(AConn, LResp, 0);
-      // OnSendComplete re-arma recv (keep-alive) ou fecha — não chamar PostRecv aqui
-      Exit;
-    end;
-  end;
-
   // --------------------------------------------------------------------------
   // Invoke application handler
-  // R-5 backpressure (MaxQueueDepth / FInFlightCount) is now enforced in
-  // _DispatchAccumBuf *before* queuing, so FInFlightCount already counts
-  // queued + executing tasks.  No check or AdjustInflight call needed here.
+  // Security, rate limiting, compression and metrics are now opt-in
+  // middlewares — registered via TPoseidon.Use().
   // --------------------------------------------------------------------------
-  LRxBytes   := Length(LReq.RawBody);
   LStartTick := Int64(TThread.GetTickCount64);
   FCallbacks.InvokeRequest(LReq, LStatus, LCT, LBody, LExtra);
 
-  _TryCompressResponse(LReq, AConfig, LCT, LBody, LExtra);
-
-  // P-4: pool-backed response buffer
+  // Build response
   LResp       := BuildHTTPResponsePooled(LStatus, LCT, LBody, LReq.KeepAlive,
     LExtra, AConfig.SecureHeadersEnabled, AConfig.ServerBanner, LRespActualLen);
-  LTxBytes    := LRespActualLen;
   LDurationMs := Int64(TThread.GetTickCount64) - LStartTick;
 
-  FCallbacks.RecordRequest(LStatus, LDurationMs, LRxBytes, LTxBytes);
-
-  if True then  // always log if callback registered; callback checks internally
-  begin
-    LLogEvt.Method     := LReq.Method;
-    LLogEvt.Path       := LReq.Path;
-    LLogEvt.Status     := LStatus;
-    LLogEvt.DurationMs := LDurationMs;
-    LLogEvt.RemoteAddr := LConn.RemoteAddr;
-    LLogEvt.RxBytes    := LRxBytes;
-    LLogEvt.TxBytes    := LTxBytes;
-    FCallbacks.LogRequest(LLogEvt);
-  end;
+  LLogEvt.Method     := LReq.Method;
+  LLogEvt.Path       := LReq.Path;
+  LLogEvt.Status     := LStatus;
+  LLogEvt.DurationMs := LDurationMs;
+  LLogEvt.RemoteAddr := LConn.RemoteAddr;
+  LLogEvt.RxBytes    := Length(LReq.RawBody);
+  LLogEvt.TxBytes    := LRespActualLen;
+  FCallbacks.LogRequest(LLogEvt);
 
   FCallbacks.SendResponse(AConn, LResp, LRespActualLen);
 end;

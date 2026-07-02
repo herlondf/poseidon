@@ -60,10 +60,6 @@ type
     // before Listen.
     class procedure AddSSLCert(const AHostName, ACertFile, AKeyFile: string); static;
 
-    // Enable inline gzip compression for responses > 1KB with
-    // Accept-Encoding: gzip. Default off (CPU trade-off).
-    class procedure EnableCompression(AEnabled: Boolean = True); static;
-
     // Register a WebSocket handler for a specific path.
     // AHandler is called for each incoming text or binary frame.
     class procedure WebSocket(const APath: string; AHandler: TWSMessageCallback); static;
@@ -264,13 +260,6 @@ begin
   if FServer = nil then
     FServer := TPoseidonNativeServer.Create;
   FServer.ConfigureSSL(ACertFile, AKeyFile);
-end;
-
-class procedure TPoseidonProviderNative.EnableCompression(AEnabled: Boolean);
-begin
-  if FServer = nil then
-    FServer := TPoseidonNativeServer.Create;
-  FServer.CompressionEnabled := AEnabled;
 end;
 
 class procedure TPoseidonProviderNative.AddSSLCert(const AHostName, ACertFile,

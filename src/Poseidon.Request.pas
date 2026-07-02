@@ -13,7 +13,6 @@ uses
   Poseidon.Commons,
   Poseidon.Core.Param,
   Poseidon.Exception,
-  Poseidon.Validation,
   Poseidon.Cookies;
 
 type
@@ -160,7 +159,6 @@ begin
     LJSON.Free;
   end;
 
-  TPoseidonValidator.ValidateOrRaise(Result);
 end;
 
 function TPoseidonRequest.SetBody(ABody: TObject): TPoseidonRequest;
