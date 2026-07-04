@@ -29,6 +29,7 @@ type
     FIsParamKey: Boolean;
     FRouterRegex: string;
     FIsRouterRegex: Boolean;
+    FCompiledRegex: TRegEx;
     FMiddleware: TList<TPoseidonCallback>;
     FParamKeys: TList<string>;
     FCallBack: TObjectDictionary<TMethodType, TList<TPoseidonCallback>>;
@@ -245,6 +246,8 @@ begin
     FTag := FPart.Substring(1);
     FIsRouterRegex := FPart.StartsWith('(') and FPart.EndsWith(')');
     FRouterRegex := FPart;
+    if FIsRouterRegex then
+      FCompiledRegex := TRegEx.Create(Format('^%s$', [FRouterRegex]), [roCompiled]);
     FIsInitialized := True;
   end
   else
@@ -380,7 +383,7 @@ begin
     Exit(FCallBack.ContainsKey(AMethod) or (AMethod = mtAny));
 
   if FIsRouterRegex then
-    Exit(TRegEx.IsMatch(APaths[AIndex], Format('^%s$', [FRouterRegex])));
+    Exit(FCompiledRegex.IsMatch(APaths[AIndex]));
 
   if FChildren.TryGetValue(APaths[AIndex + 1], LChild) then
     Exit(LChild.HasNext(AMethod, APaths, AIndex + 1));
