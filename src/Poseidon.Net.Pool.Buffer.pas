@@ -94,70 +94,60 @@ var
 // Acquire — thread-local first, then global, then heap
 // ---------------------------------------------------------------------------
 
+function _GlobalPopOrAlloc(AStack: TStack<TBytes>; ABufSize: Integer): TBytes;
+var
+  LHave: Boolean;
+begin
+  Result := nil;
+  TMonitor.Enter(AStack);
+  try
+    LHave := AStack.Count > 0;
+    if LHave then Result := AStack.Pop;
+  finally
+    TMonitor.Exit(AStack);
+  end;
+  if not LHave then
+    SetLength(Result, ABufSize);
+end;
+
 class function TBufferPool.Acquire(ASize: Integer): TBytes;
 var
   LCache: TThreadLocalBufCache;
-
-  function TLPop0: TBytes; inline;
-  begin
-    Dec(LCache.FTier0Count);
-    Result := LCache.FTier0[LCache.FTier0Count];
-    LCache.FTier0[LCache.FTier0Count] := nil;
-  end;
-
-  function TLPop1: TBytes; inline;
-  begin
-    Dec(LCache.FTier1Count);
-    Result := LCache.FTier1[LCache.FTier1Count];
-    LCache.FTier1[LCache.FTier1Count] := nil;
-  end;
-
-  function TLPop2: TBytes; inline;
-  begin
-    Dec(LCache.FTier2Count);
-    Result := LCache.FTier2[LCache.FTier2Count];
-    LCache.FTier2[LCache.FTier2Count] := nil;
-  end;
-
-  function GlobalPopOrAlloc(AStack: TStack<TBytes>; ABufSize: Integer): TBytes;
-  var
-    LHave: Boolean;
-  begin
-    Result := nil;
-    TMonitor.Enter(AStack);
-    try
-      LHave := AStack.Count > 0;
-      if LHave then Result := AStack.Pop;
-    finally
-      TMonitor.Exit(AStack);
-    end;
-    if not LHave then
-      SetLength(Result, ABufSize);
-  end;
-
 begin
   LCache := GetTLCache;
 
   if ASize <= POOL_TIER0_SIZE then
   begin
     if LCache.FTier0Count > 0 then
-      Result := TLPop0
+    begin
+      Dec(LCache.FTier0Count);
+      Result := LCache.FTier0[LCache.FTier0Count];
+      LCache.FTier0[LCache.FTier0Count] := nil;
+    end
     else
-      Result := GlobalPopOrAlloc(GTier0, POOL_TIER0_SIZE);
+      Result := _GlobalPopOrAlloc(GTier0, POOL_TIER0_SIZE);
   end
   else if ASize <= POOL_TIER1_SIZE then
   begin
     if LCache.FTier1Count > 0 then
-      Result := TLPop1
+    begin
+      Dec(LCache.FTier1Count);
+      Result := LCache.FTier1[LCache.FTier1Count];
+      LCache.FTier1[LCache.FTier1Count] := nil;
+    end
     else
-      Result := GlobalPopOrAlloc(GTier1, POOL_TIER1_SIZE);
+      Result := _GlobalPopOrAlloc(GTier1, POOL_TIER1_SIZE);
   end
   else if ASize <= POOL_TIER2_SIZE then
   begin
     if LCache.FTier2Count > 0 then
-      Result := TLPop2
+    begin
+      Dec(LCache.FTier2Count);
+      Result := LCache.FTier2[LCache.FTier2Count];
+      LCache.FTier2[LCache.FTier2Count] := nil;
+    end
     else
-      Result := GlobalPopOrAlloc(GTier2, POOL_TIER2_SIZE);
+      Result := _GlobalPopOrAlloc(GTier2, POOL_TIER2_SIZE);
   end
   else
     SetLength(Result, ASize);
@@ -167,21 +157,20 @@ end;
 // Release — thread-local first, overflow goes to global
 // ---------------------------------------------------------------------------
 
+procedure _GlobalPushIfRoom(AStack: TStack<TBytes>; AMax: Integer; const ABuf: TBytes);
+begin
+  TMonitor.Enter(AStack);
+  try
+    if AStack.Count < AMax then AStack.Push(ABuf);
+  finally
+    TMonitor.Exit(AStack);
+  end;
+end;
+
 class procedure TBufferPool.Release(var ABuf: TBytes);
 var
   LLen:   Integer;
   LCache: TThreadLocalBufCache;
-
-  procedure GlobalPushIfRoom(AStack: TStack<TBytes>; AMax: Integer);
-  begin
-    TMonitor.Enter(AStack);
-    try
-      if AStack.Count < AMax then AStack.Push(ABuf);
-    finally
-      TMonitor.Exit(AStack);
-    end;
-  end;
-
 begin
   LLen := Length(ABuf);
   LCache := GetTLCache;
@@ -194,7 +183,7 @@ begin
       Inc(LCache.FTier0Count);
     end
     else
-      GlobalPushIfRoom(GTier0, POOL_TIER0_MAX);
+      _GlobalPushIfRoom(GTier0, POOL_TIER0_MAX, ABuf);
   end
   else if LLen = POOL_TIER1_SIZE then
   begin
@@ -204,7 +193,7 @@ begin
       Inc(LCache.FTier1Count);
     end
     else
-      GlobalPushIfRoom(GTier1, POOL_TIER1_MAX);
+      _GlobalPushIfRoom(GTier1, POOL_TIER1_MAX, ABuf);
   end
   else if LLen = POOL_TIER2_SIZE then
   begin
@@ -214,7 +203,7 @@ begin
       Inc(LCache.FTier2Count);
     end
     else
-      GlobalPushIfRoom(GTier2, POOL_TIER2_MAX);
+      _GlobalPushIfRoom(GTier2, POOL_TIER2_MAX, ABuf);
   end;
   // Oversized or unrecognised: let the TBytes ref-count free it naturally.
   ABuf := nil;
