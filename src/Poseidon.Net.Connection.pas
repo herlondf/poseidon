@@ -32,7 +32,8 @@ const
 type
   TNativeConn = class
   private
-    FRefCount: Integer;   // #43: atomic ref count; reaches 0 → Destroy
+    FRefCount:     Integer;   // #43: atomic ref count; reaches 0 → Destroy
+    _PadRef:       array[0..59] of Byte;  // #69: cache-line padding
   public
 {$IFDEF MSWINDOWS}
     Socket:     TSocket;

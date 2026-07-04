@@ -63,6 +63,15 @@ function _IocpPost(Port: THandle; Bytes: DWORD; Key: NativeUInt;
   pOvl: Pointer): BOOL; stdcall;
   external 'kernel32.dll' name 'PostQueuedCompletionStatus';
 
+// #68: skip IOCP completion when WSASend/WSARecv completes synchronously
+function _SetFileCompletionNotificationModes(FileHandle: THandle;
+  Flags: Byte): BOOL; stdcall;
+  external 'kernel32.dll' name 'SetFileCompletionNotificationModes';
+
+const
+  FILE_SKIP_COMPLETION_PORT_ON_SUCCESS = $01;
+  FILE_SKIP_SET_EVENT_ON_HANDLE        = $02;
+
 function _WsaBind(s: TSocket; addr: PSockAddrIn; addrlen: Integer): Integer; stdcall;
   external 'ws2_32.dll' name 'bind';
 
@@ -235,8 +244,10 @@ begin
     // Association failed — caller (_OnNewSocket) will close the conn
     raise Exception.Create('IOCP associate failed');
   end;
-  // PostRecv is now called explicitly by _OnNewSocket after RegisterConn,
-  // keeping the responsibility at the server level (same contract as io_uring/epoll).
+  // #68: skip IOCP completion packet when WSASend/WSARecv completes synchronously.
+  // Result is inline on the calling thread — avoids kernel→user transition.
+  _SetFileCompletionNotificationModes(THandle(LConn.Socket),
+    FILE_SKIP_COMPLETION_PORT_ON_SUCCESS or FILE_SKIP_SET_EVENT_ON_HANDLE);
 end;
 
 procedure TIOCPBackend.PostRecv(AConn: Pointer);

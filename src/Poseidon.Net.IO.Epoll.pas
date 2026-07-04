@@ -155,6 +155,8 @@ procedure TEpollBackend.StartListening(const AHost: string; APort: Integer;
     _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEPORT, @LOne, SizeOf(LOne));
     if AFastOpen then
       _LinuxSetsockopt(Result, IPPROTO_TCP, 23 {TCP_FASTOPEN}, @LOne, SizeOf(LOne));
+    // #70: TCP_DEFER_ACCEPT — kernel waits for data before waking accept
+    _LinuxSetsockopt(Result, IPPROTO_TCP, 9 {TCP_DEFER_ACCEPT}, @LOne, SizeOf(LOne));
 
     FillChar(LAddr, SizeOf(LAddr), 0);
     LAddr.sin_family := AF_INET;

@@ -65,6 +65,7 @@ type
     TWorkerDeque = record
       Queue: TQueue<TWorkWrapper>;
       Lock:  TCriticalSection;
+      _Pad:  array[0..31] of Byte;  // #69: cache-line padding
     end;
   private
     FMinWorkers:    Integer;
@@ -73,10 +74,14 @@ type
     // #63: per-worker deques replace single shared queue
     FDeques:        array of TWorkerDeque;
     FDequeCount:    Integer;
+    // #69: cache-line padded atomic counters to prevent false sharing
     FNextDeque:     Integer;  // atomic round-robin counter for Post()
-    FSemaphore:     TSemaphore;
+    _Pad1:          array[0..59] of Byte;
     FActiveWorkers: Integer;  // atomic — total alive threads (including idle)
+    _Pad2:          array[0..59] of Byte;
     FIdleWorkers:   Integer;  // atomic — threads blocked on semaphore
+    _Pad3:          array[0..59] of Byte;
+    FSemaphore:     TSemaphore;
     FShutdown:      Boolean;
     procedure _WorkerLoop(ADequeIdx: Integer);
     procedure _SpawnWorker(ADequeIdx: Integer);
