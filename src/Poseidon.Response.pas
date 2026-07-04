@@ -125,7 +125,15 @@ begin
     FWebResponse.ContentLength := 0;
   end
   else
-    FWebResponse.Content := AContent;
+  begin
+    // Fast path: encode to UTF-8 once and use RawBody to skip CommitResponse re-encoding
+    FRawBody        := TEncoding.UTF8.GetBytes(AContent);
+    FRawContentType := FWebResponse.ContentType;
+    if FRawContentType.IsEmpty then
+      FRawContentType := 'text/html';
+    FHasRawBody     := True;
+    FWebResponse.Content := AContent; // Keep for middleware compatibility
+  end;
   Result := Self;
 end;
 

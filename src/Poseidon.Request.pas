@@ -27,7 +27,9 @@ type
     FBody: TObject;
     FSession: TObject;
     FOwnsSession: Boolean;
+    FHeadersFullyParsed: Boolean;
     procedure InitHeaders;
+    procedure ParseAllRawHeaders;
     procedure InitQuery;
     procedure InitCookie;
     procedure InitContentFields;
@@ -179,6 +181,8 @@ begin
     FHeaders := TPoseidonParam.Create
   else
     FHeaders.Clear;
+  FHeadersFullyParsed := False;
+  // Standard headers from WebBroker properties (fast path — no string parsing)
   FHeaders.AddOrSet('Content-Type',     FWebRequest.ContentType);
   FHeaders.AddOrSet('Host',             FWebRequest.Host);
   FHeaders.AddOrSet('Accept',           FWebRequest.Accept);
@@ -187,13 +191,36 @@ begin
   FHeaders.AddOrSet('Connection',       FWebRequest.Connection);
   FHeaders.AddOrSet('Content-Encoding', FWebRequest.ContentEncoding);
   FHeaders.AddOrSet('User-Agent',       FWebRequest.UserAgent);
-  // Arbitrary headers (JWT middleware uses Authorization above; compression uses this)
-  FHeaders.AddOrSet('Accept-Encoding',  FWebRequest.GetFieldByName('Accept-Encoding'));
-  // Proxy header — only added when present so GetOrDefault falls back to RemoteAddr correctly
-  var LFwd: string;
-  LFwd := FWebRequest.GetFieldByName('X-Forwarded-For');
-  if not LFwd.IsEmpty then
-    FHeaders.AddOrSet('X-Forwarded-For', LFwd);
+  // Custom headers resolved lazily on first miss via ParseAllRawHeaders
+  FHeaders.OnMiss := ParseAllRawHeaders;
+end;
+
+procedure TPoseidonRequest.ParseAllRawHeaders;
+var
+  LRaw: string;
+  LLines: TArray<string>;
+  LLine: string;
+  LPos: Integer;
+  LKey, LValue: string;
+begin
+  if FHeadersFullyParsed then Exit;
+  FHeadersFullyParsed := True;
+  LRaw := FWebRequest.GetFieldByName('ALL_RAW');
+  if not LRaw.IsEmpty then
+  begin
+    LLines := LRaw.Split([#13#10], TStringSplitOptions.ExcludeEmpty);
+    for LLine in LLines do
+    begin
+      LPos := Pos(':', LLine);
+      if LPos > 1 then
+      begin
+        LKey := Trim(Copy(LLine, 1, LPos - 1));
+        LValue := Trim(Copy(LLine, LPos + 1, MaxInt));
+        if not LKey.IsEmpty then
+          FHeaders.AddOrSet(LKey, LValue);
+      end;
+    end;
+  end;
 end;
 
 procedure TPoseidonRequest.InitQuery;
@@ -265,7 +292,9 @@ end;
 function TPoseidonRequest.Headers: TPoseidonParam;
 begin
   if FHeaders = nil then
-    InitHeaders;
+    InitHeaders
+  else if (FHeaders.Data.Count = 0) and (FHeaders.OnMiss = nil) then
+    InitHeaders;  // Re-populate after Reinitialize cleared it
   Result := FHeaders;
 end;
 
@@ -330,11 +359,16 @@ end;
 procedure TPoseidonRequest.Reinitialize(AWebRequest: TWebRequest);
 begin
   FWebRequest := AWebRequest;
-  // Re-init any previously accessed param (reuses its TDictionary capacity)
-  if FHeaders <> nil then InitHeaders;
-  if FQuery <> nil then InitQuery;
-  if FCookie <> nil then InitCookie;
-  if FContentFields <> nil then InitContentFields;
+  // Mark as dirty — lazy re-init on first access
+  if FHeaders <> nil then
+  begin
+    FHeaders.Clear;
+    FHeaders.OnMiss := nil;
+  end;
+  FHeadersFullyParsed := False;
+  if FQuery <> nil then FQuery.Clear;
+  if FCookie <> nil then FCookie.Clear;
+  if FContentFields <> nil then FContentFields.Clear;
   // Params is populated by the router — clear without freeing
   if FParams <> nil then
   begin

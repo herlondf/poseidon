@@ -112,6 +112,17 @@ begin
   GLUT[$3F] := BF_QMARK;
 end;
 
+// Module-level fast ASCII→string conversion (no TEncoding overhead)
+function _FastBufToStr(const ABuf: TBytes; AStart, ALen: Integer): string;
+var
+  LI: Integer;
+begin
+  if ALen <= 0 then begin Result := ''; Exit; end;
+  SetLength(Result, ALen);
+  for LI := 0 to ALen - 1 do
+    PWord(@PChar(Pointer(Result))[LI])^ := ABuf[AStart + LI];
+end;
+
 function DecodeHTTP1Chunked(ABuf: PByte; ABufLen, AMaxBodySize: Integer;
   out ABody: TBytes; out AConsumed: Integer; out AMalformed: Boolean): Boolean;
 var
@@ -216,9 +227,13 @@ const
   LF               = $0A;
 
   function BufToStr(AStart, ALen: Integer): string;
+  var
+    LI: Integer;
   begin
-    if ALen <= 0 then Result := ''
-    else Result := TEncoding.ASCII.GetString(ABuf, AStart, ALen);
+    if ALen <= 0 then begin Result := ''; Exit; end;
+    SetLength(Result, ALen);
+    for LI := 0 to ALen - 1 do
+      PWord(@PChar(Pointer(Result))[LI])^ := ABuf[AStart + LI];
   end;
 
 var
@@ -436,10 +451,15 @@ function ParseHTTP1Lightweight(
 const
   SP = $20; CR = $0D; LF = $0A;
 
+  // Direct byte→char widening — avoids TEncoding virtual dispatch + table lookup
   function BufToStr(AStart, ALen: Integer): string;
+  var
+    LI: Integer;
   begin
-    if ALen <= 0 then Result := ''
-    else Result := TEncoding.ASCII.GetString(ABuf, AStart, ALen);
+    if ALen <= 0 then begin Result := ''; Exit; end;
+    SetLength(Result, ALen);
+    for LI := 0 to ALen - 1 do
+      PWord(@PChar(Pointer(Result))[LI])^ := ABuf[AStart + LI];
   end;
 
   // Byte-level case-insensitive comparison for short header names
@@ -685,8 +705,8 @@ begin
       Inc(LValStart);
 
     Result[LCount] := TPair<string,string>.Create(
-      TEncoding.ASCII.GetString(ABuf, LLineStart, LColonPos - LLineStart),
-      TEncoding.ASCII.GetString(ABuf, LValStart, LLineEnd - LValStart));
+      _FastBufToStr(ABuf, LLineStart, LColonPos - LLineStart),
+      _FastBufToStr(ABuf, LValStart, LLineEnd - LValStart));
     Inc(LCount);
     LLineStart := LLineEnd + 2;
   end;

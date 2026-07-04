@@ -32,6 +32,7 @@ implementation
 
 uses
   System.SysUtils,
+  System.SyncObjs,
   System.Generics.Collections;
 
 const
@@ -45,6 +46,7 @@ type
 
 var
   GPool: TStack<TRequestPair>;
+  GPoolCS: TCriticalSection;
 
 class procedure TPoseidonRequestPool.Acquire(AWebReq: TWebRequest;
   AWebRes: TWebResponse; out AReq: TPoseidonRequest; out ARes: TPoseidonResponse);
@@ -52,13 +54,13 @@ var
   LPair: TRequestPair;
   LHave: Boolean;
 begin
-  TMonitor.Enter(GPool);
+  GPoolCS.Enter;
   try
     LHave := GPool.Count > 0;
     if LHave then
       LPair := GPool.Pop;
   finally
-    TMonitor.Exit(GPool);
+    GPoolCS.Leave;
   end;
 
   if LHave then
@@ -81,7 +83,7 @@ var
   LPair:   TRequestPair;
   LPooled: Boolean;
 begin
-  TMonitor.Enter(GPool);
+  GPoolCS.Enter;
   try
     LPooled := GPool.Count < MAX_POOL_SIZE;
     if LPooled then
@@ -91,7 +93,7 @@ begin
       GPool.Push(LPair);
     end;
   finally
-    TMonitor.Exit(GPool);
+    GPoolCS.Leave;
   end;
   if not LPooled then
   begin
@@ -102,6 +104,7 @@ end;
 
 initialization
   GPool := TStack<TRequestPair>.Create;
+  GPoolCS := TCriticalSection.Create;
 
 finalization
   while GPool.Count > 0 do
@@ -111,5 +114,6 @@ finalization
     LPair.Res.Free;
   end;
   FreeAndNil(GPool);
+  FreeAndNil(GPoolCS);
 
 end.

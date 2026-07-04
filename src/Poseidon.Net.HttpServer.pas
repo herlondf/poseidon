@@ -926,15 +926,20 @@ begin
   FDispatcher              := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self));
   // R-1: create platform IO backend — ONLY {$IFDEF} remaining in HttpServer.
   // On Linux: try io_uring (kernel 5.1+) first; fall back to epoll silently.
+  // Define FORCE_EPOLL to skip io_uring (useful when io_uring is virtualized/slow).
 {$IFDEF MSWINDOWS}
   FIOBackend               := TIOCPBackend.Create;
 {$ELSE}
+  {$IFDEF FORCE_EPOLL}
+  FIOBackend               := TEpollBackend.Create;
+  {$ELSE}
   try
     FIOBackend             := TIOUringBackend.Create;
   except
     on ENotSupportedException do
       FIOBackend           := TEpollBackend.Create;
   end;
+  {$ENDIF}
 {$ENDIF}
 end;
 
