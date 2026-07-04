@@ -1,19 +1,21 @@
 unit Poseidon.Net.Dispatcher;
 
-// TProtocolDispatcher — R-5 Strategy pattern for HTTP/1.1 / WebSocket / HTTP/2.
+// TProtocolDispatcher — Pipeline pattern (#83).
 //
-// Encapsulates the routing logic extracted from TPoseidonNativeServer._DispatchAccumBuf:
+// Replaces the dual _DispatchFull/_DispatchLightweight paths with a composable
+// array of TDispatchStep methods walked in a tight loop.  The pipeline is
+// configured once at construction time based on the ALightweight flag:
 //
-//   Proxy Protocol header stripping
-//   → HTTP/2 branch (TH2Conn.ProcessData)
-//   → WebSocket branch (frame dispatch loop)
-//   → HTTP/1.1 branch (parse → S-1/S-2 checks → rate limit → metrics
-//                       → backpressure → handler → gzip → response)
+//   Full:        [ProxyProtocol, SizeCheck, H2Branch, WSBranch,
+//                 ParseFull, UpgradeDetect, InvokeAndRespond]
+//   Lightweight: [SizeCheck, ParseLightweight, InvokeAndRespond]
 //
-// The server implements IDispatchCallbacks; the dispatcher calls back via the
-// interface for transport operations and server-owned state.
-// Pure config fields (no mutable server state) are bundled in TDispatchConfig
-// and passed by value on each Dispatch call.
+// Each step receives a stack-allocated TDispatchContext record and sets
+// Ctx.Handled := True to short-circuit the pipeline.
+//
+// TDispatchStep = procedure(var ACtx: TDispatchContext) of object
+//   → zero heap allocation (code + Self pointers only)
+//   → direct call, no vtable lookup
 
 interface
 
@@ -35,6 +37,8 @@ type
   // Config snapshot — fields read on every request; copied from server fields.
   // --------------------------------------------------------------------------
 
+  PDispatchConfig = ^TDispatchConfig;
+
   TDispatchConfig = record
     ProxyProtocol:        TProxyProtocolMode;
     MaxRequestSize:       Integer;
@@ -44,7 +48,6 @@ type
     ServerBanner:         string;
     MaxQueueDepth:        Integer;
     InFlightCount:        PInt64;   // pointer to server's FInFlightCount (atomic)
-    Lightweight:          Boolean;  // v2: skip protocol checks, lazy headers
   end;
 
   // --------------------------------------------------------------------------
@@ -76,19 +79,61 @@ type
   end;
 
   // --------------------------------------------------------------------------
-  // Strategy dispatcher
+  // Pipeline context — stack-allocated, flows between steps
+  // --------------------------------------------------------------------------
+
+  TDispatchContext = record
+    Conn:          Pointer;
+    Config:        PDispatchConfig;
+    Req:           TPoseidonNativeRequest;
+    Status:        Integer;
+    ContentType:   string;
+    Body:          TBytes;
+    Extra:         TArray<TPair<string,string>>;
+    Resp:          TBytes;
+    RespActualLen: Integer;
+    Consumed:      Integer;
+    ReqBad:        Boolean;
+    StartTick:     Int64;
+    Handled:       Boolean;   // True = stop pipeline
+    HdrStart:      Integer;   // lightweight: lazy headers byte range
+    HdrEnd:        Integer;
+  end;
+
+  // --------------------------------------------------------------------------
+  // Pipeline step signature
+  // --------------------------------------------------------------------------
+
+  TDispatchStep = procedure(var ACtx: TDispatchContext) of object;
+
+  // --------------------------------------------------------------------------
+  // Pipeline dispatcher
   // --------------------------------------------------------------------------
 
   TProtocolDispatcher = class
   private
-    FCallbacks: IDispatchCallbacks;
-    procedure _DispatchFull(AConn: Pointer; const AConfig: TDispatchConfig);
-    procedure _DispatchLightweight(AConn: Pointer; const AConfig: TDispatchConfig);
-  public
-    constructor Create(ACallbacks: IDispatchCallbacks);
+    FCallbacks:  IDispatchCallbacks;
+    FSteps:      array[0..7] of TDispatchStep;
+    FStepCount:  Integer;
+    FLightweight: Boolean;
 
-    // Route accumulated bytes in AConn to the appropriate protocol handler.
+    // Step methods — each ~20-40 lines, single responsibility
+    procedure StepProxyProtocol(var ACtx: TDispatchContext);
+    procedure StepSizeCheck(var ACtx: TDispatchContext);
+    procedure StepH2Branch(var ACtx: TDispatchContext);
+    procedure StepWSBranch(var ACtx: TDispatchContext);
+    procedure StepParseHTTP1Full(var ACtx: TDispatchContext);
+    procedure StepParseHTTP1Lightweight(var ACtx: TDispatchContext);
+    procedure StepUpgradeDetection(var ACtx: TDispatchContext);
+    procedure StepInvokeAndRespond(var ACtx: TDispatchContext);
+    procedure StepInvokeAndRespondLightweight(var ACtx: TDispatchContext);
+  public
+    constructor Create(ACallbacks: IDispatchCallbacks; ALightweight: Boolean);
+
+    // Walk the pipeline for AConn with the given config snapshot.
     procedure Dispatch(AConn: Pointer; const AConfig: TDispatchConfig); reintroduce;
+
+    property Lightweight: Boolean read FLightweight;
   end;
 
 implementation
@@ -96,277 +141,366 @@ implementation
 uses
   Poseidon.Net.HTTP1.Parser;
 
-constructor TProtocolDispatcher.Create(ACallbacks: IDispatchCallbacks);
+// ---------------------------------------------------------------------------
+// Constructor — assemble pipeline once
+// ---------------------------------------------------------------------------
+
+constructor TProtocolDispatcher.Create(ACallbacks: IDispatchCallbacks;
+  ALightweight: Boolean);
 begin
   inherited Create;
-  FCallbacks := ACallbacks;
-end;
+  FCallbacks   := ACallbacks;
+  FLightweight := ALightweight;
+  FStepCount   := 0;
 
-procedure TProtocolDispatcher.Dispatch(AConn: Pointer; const AConfig: TDispatchConfig);
-begin
-  if AConfig.Lightweight then
-    _DispatchLightweight(AConn, AConfig)
+  if ALightweight then
+  begin
+    // Lightweight: minimal pipeline for maximum throughput
+    FSteps[FStepCount] := StepSizeCheck;              Inc(FStepCount);
+    FSteps[FStepCount] := StepParseHTTP1Lightweight;  Inc(FStepCount);
+    FSteps[FStepCount] := StepInvokeAndRespondLightweight; Inc(FStepCount);
+  end
   else
-    _DispatchFull(AConn, AConfig);
+  begin
+    // Full: all protocol checks and features
+    FSteps[FStepCount] := StepProxyProtocol;     Inc(FStepCount);
+    FSteps[FStepCount] := StepSizeCheck;         Inc(FStepCount);
+    FSteps[FStepCount] := StepH2Branch;          Inc(FStepCount);
+    FSteps[FStepCount] := StepWSBranch;          Inc(FStepCount);
+    FSteps[FStepCount] := StepParseHTTP1Full;    Inc(FStepCount);
+    FSteps[FStepCount] := StepUpgradeDetection;  Inc(FStepCount);
+    FSteps[FStepCount] := StepInvokeAndRespond;  Inc(FStepCount);
+  end;
 end;
 
-procedure TProtocolDispatcher._DispatchFull(AConn: Pointer; const AConfig: TDispatchConfig);
+// ---------------------------------------------------------------------------
+// Dispatch — tight loop over pre-configured steps
+// ---------------------------------------------------------------------------
+
+procedure TProtocolDispatcher.Dispatch(AConn: Pointer;
+  const AConfig: TDispatchConfig);
 var
-  LConn:          TNativeConn absolute AConn;
-  LReq:           TPoseidonNativeRequest;
-  LStatus:        Integer;
-  LCT:            string;
-  LBody:          TBytes;
-  LExtra:         TArray<TPair<string,string>>;
-  LResp:          TBytes;
-  LRespActualLen: Integer;
-  LUpgrade:       string;
-  LWsKey:         string;
-  I:              Integer;
-  LStartTick:     Int64;
-  LDurationMs:    Int64;
-  LLogEvt:        TPoseidonRequestLogEvent;
-  LPPAddr:        string;
-  LPPPort:        Word;
-  LPPConsumed:    Integer;
-  LPPIncomplete:  Boolean;
-  LPPInvalid:     Boolean;
-  LPPNoSig:       Boolean;
-  LConsumed:      Integer;
-  LReqBad:        Boolean;
+  LCtx: TDispatchContext;
+  I:    Integer;
 begin
-  // --------------------------------------------------------------------------
-  // Proxy Protocol — consume header once per new connection
-  // --------------------------------------------------------------------------
-  if (AConfig.ProxyProtocol <> ppDisabled) and not LConn.PPParsed then
+  LCtx := Default(TDispatchContext);
+  LCtx.Conn    := AConn;
+  LCtx.Config  := @AConfig;
+  LCtx.Handled := False;
+
+  for I := 0 to FStepCount - 1 do
   begin
-    if LConn.AccumLen = 0 then
-    begin
-      FCallbacks.PostRecv(AConn);
+    FSteps[I](LCtx);
+    if LCtx.Handled then
       Exit;
+  end;
+end;
+
+// ===========================================================================
+// Pipeline steps
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// StepProxyProtocol — consume PP header once per new connection
+// ---------------------------------------------------------------------------
+
+procedure TProtocolDispatcher.StepProxyProtocol(var ACtx: TDispatchContext);
+var
+  LConn:         TNativeConn;
+  LPPAddr:       string;
+  LPPPort:       Word;
+  LPPConsumed:   Integer;
+  LPPIncomplete: Boolean;
+  LPPInvalid:    Boolean;
+  LPPNoSig:      Boolean;
+begin
+  LConn := TNativeConn(ACtx.Conn);
+
+  if (ACtx.Config^.ProxyProtocol = ppDisabled) or LConn.PPParsed then
+    Exit;
+
+  if LConn.AccumLen = 0 then
+  begin
+    FCallbacks.PostRecv(ACtx.Conn);
+    ACtx.Handled := True;
+    Exit;
+  end;
+
+  LPPAddr       := '';
+  LPPPort       := 0;
+  LPPConsumed   := 0;
+  LPPIncomplete := False;
+  LPPInvalid    := False;
+  LPPNoSig      := False;
+
+  if TryParseProxyProtocolAuto(ACtx.Config^.ProxyProtocol,
+       @LConn.AccumBuf[0], LConn.AccumLen,
+       LPPAddr, LPPPort, LPPConsumed,
+       LPPIncomplete, LPPInvalid, LPPNoSig) then
+  begin
+    if LPPConsumed > 0 then
+    begin
+      Dec(LConn.AccumLen, LPPConsumed);
+      if LConn.AccumLen > 0 then
+        Move(LConn.AccumBuf[LPPConsumed], LConn.AccumBuf[0], LConn.AccumLen);
     end;
-    LPPAddr       := '';
-    LPPPort       := 0;
-    LPPConsumed   := 0;
-    LPPIncomplete := False;
-    LPPInvalid    := False;
-    LPPNoSig      := False;
-    if TryParseProxyProtocolAuto(AConfig.ProxyProtocol,
-         @LConn.AccumBuf[0], LConn.AccumLen,
-         LPPAddr, LPPPort, LPPConsumed,
-         LPPIncomplete, LPPInvalid, LPPNoSig) then
-    begin
-      if LPPConsumed > 0 then
-      begin
-        Dec(LConn.AccumLen, LPPConsumed);
-        if LConn.AccumLen > 0 then
-          Move(LConn.AccumBuf[LPPConsumed], LConn.AccumBuf[0], LConn.AccumLen);
-      end;
-      if LPPAddr <> '' then
-        LConn.RemoteAddr := LPPAddr + ':' + IntToStr(LPPPort);
-      LConn.PPParsed := True;
-    end
-    else if LPPIncomplete then
-    begin
-      FCallbacks.PostRecv(AConn);
-      Exit;
-    end
-    else if LPPInvalid then
-    begin
-      FCallbacks.CloseConn(AConn);
-      Exit;
-    end
-    else
-      LConn.PPParsed := True;  // ppAuto + no signature → treat as plain
-  end;
-
-  if LConn.AccumLen > AConfig.MaxRequestSize then
+    if LPPAddr <> '' then
+      LConn.RemoteAddr := LPPAddr + ':' + IntToStr(LPPPort);
+    LConn.PPParsed := True;
+  end
+  else if LPPIncomplete then
   begin
-    LResp := BuildHTTPResponse(413, 'text/plain',
-      TEncoding.ASCII.GetBytes('Payload Too Large'), False, [],
-      AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
-    FCallbacks.SendResponse(AConn, LResp, 0);
-    Exit;
-  end;
-
-  // --------------------------------------------------------------------------
-  // HTTP/2 branch
-  // --------------------------------------------------------------------------
-  if LConn.H2Conn <> nil then
+    FCallbacks.PostRecv(ACtx.Conn);
+    ACtx.Handled := True;
+  end
+  else if LPPInvalid then
   begin
-    if LConn.AccumLen > 0 then
-    begin
-      LConn.H2Conn.ProcessData(@LConn.AccumBuf[0], LConn.AccumLen);
-      LConn.AccumLen := 0;
-    end;
-    if not LConn.H2Conn.GoAwaySent then
-      FCallbacks.PostRecv(AConn);
-    Exit;
-  end;
+    FCallbacks.CloseConn(ACtx.Conn);
+    ACtx.Handled := True;
+  end
+  else
+    LConn.PPParsed := True;  // ppAuto + no signature → treat as plain
+end;
 
-  // --------------------------------------------------------------------------
-  // WebSocket branch
-  // --------------------------------------------------------------------------
-  if LConn.WSMode = CM_WEBSOCKET then
+// ---------------------------------------------------------------------------
+// StepSizeCheck — reject oversized payloads with 413
+// ---------------------------------------------------------------------------
+
+procedure TProtocolDispatcher.StepSizeCheck(var ACtx: TDispatchContext);
+var
+  LConn: TNativeConn;
+  LResp: TBytes;
+begin
+  LConn := TNativeConn(ACtx.Conn);
+
+  if LConn.AccumLen <= ACtx.Config^.MaxRequestSize then
+    Exit;
+
+  LResp := BuildHTTPResponse(413, 'text/plain',
+    TEncoding.ASCII.GetBytes('Payload Too Large'), False, [],
+    ACtx.Config^.SecureHeadersEnabled, ACtx.Config^.ServerBanner);
+  FCallbacks.SendResponse(ACtx.Conn, LResp, 0);
+  ACtx.Handled := True;
+end;
+
+// ---------------------------------------------------------------------------
+// StepH2Branch — route to HTTP/2 handler if connection upgraded
+// ---------------------------------------------------------------------------
+
+procedure TProtocolDispatcher.StepH2Branch(var ACtx: TDispatchContext);
+var
+  LConn: TNativeConn;
+begin
+  LConn := TNativeConn(ACtx.Conn);
+
+  if LConn.H2Conn = nil then
+    Exit;
+
+  if LConn.AccumLen > 0 then
   begin
-    if FCallbacks.DispatchWSFrames(AConn) then
-      FCallbacks.PostRecv(AConn);
-    Exit;
+    LConn.H2Conn.ProcessData(@LConn.AccumBuf[0], LConn.AccumLen);
+    LConn.AccumLen := 0;
   end;
+  if not LConn.H2Conn.GoAwaySent then
+    FCallbacks.PostRecv(ACtx.Conn);
+  ACtx.Handled := True;
+end;
 
-  // --------------------------------------------------------------------------
-  // HTTP/1.1 branch — parse request
-  // --------------------------------------------------------------------------
-  LReqBad := False;
+// ---------------------------------------------------------------------------
+// StepWSBranch — route to WebSocket frame dispatch
+// ---------------------------------------------------------------------------
+
+procedure TProtocolDispatcher.StepWSBranch(var ACtx: TDispatchContext);
+var
+  LConn: TNativeConn;
+begin
+  LConn := TNativeConn(ACtx.Conn);
+
+  if LConn.WSMode <> CM_WEBSOCKET then
+    Exit;
+
+  if FCallbacks.DispatchWSFrames(ACtx.Conn) then
+    FCallbacks.PostRecv(ACtx.Conn);
+  ACtx.Handled := True;
+end;
+
+// ---------------------------------------------------------------------------
+// StepParseHTTP1Full — full HTTP/1.1 parse with all headers materialized
+// ---------------------------------------------------------------------------
+
+procedure TProtocolDispatcher.StepParseHTTP1Full(var ACtx: TDispatchContext);
+var
+  LConn: TNativeConn;
+  LResp: TBytes;
+begin
+  LConn := TNativeConn(ACtx.Conn);
+
+  ACtx.ReqBad := False;
   if not ParseHTTP1Request(
        LConn.AccumBuf, LConn.AccumLen,
-       AConfig.MaxHeaderSize, AConfig.MaxRequestSize,
-       LReq.Method, LReq.Path, LReq.QueryString,
-       LReq.Headers, LReq.RawBody, LReq.KeepAlive,
-       LConsumed, LReqBad) then
+       ACtx.Config^.MaxHeaderSize, ACtx.Config^.MaxRequestSize,
+       ACtx.Req.Method, ACtx.Req.Path, ACtx.Req.QueryString,
+       ACtx.Req.Headers, ACtx.Req.RawBody, ACtx.Req.KeepAlive,
+       ACtx.Consumed, ACtx.ReqBad) then
   begin
-    if LReqBad then
+    if ACtx.ReqBad then
     begin
       LResp := BuildHTTPResponse(400, 'text/plain',
         TEncoding.ASCII.GetBytes('Bad Request'), False, [],
-        AConfig.SecureHeadersEnabled, AConfig.ServerBanner);
-      FCallbacks.SendResponse(AConn, LResp, 0);
+        ACtx.Config^.SecureHeadersEnabled, ACtx.Config^.ServerBanner);
+      FCallbacks.SendResponse(ACtx.Conn, LResp, 0);
     end
     else
-      FCallbacks.PostRecv(AConn);
+      FCallbacks.PostRecv(ACtx.Conn);
+    ACtx.Handled := True;
     Exit;
   end;
-  LReq.RemoteAddr := LConn.RemoteAddr;
-  if LConn.AccumLen > LConsumed then
-    Move(LConn.AccumBuf[LConsumed], LConn.AccumBuf[0], LConn.AccumLen - LConsumed);
-  LConn.AccumLen := LConn.AccumLen - LConsumed;
 
-  // Protocol upgrade checks — only scan headers if method is GET (upgrades
-  // only happen on GET).  Uses length check + first-char test for fast rejection
-  // before calling SameText, avoiding O(n) string comparisons on every request.
-  if SameText(LReq.Method, 'GET') then
-  begin
-    LUpgrade := '';
-    LWsKey   := '';
-    for I := 0 to High(LReq.Headers) do
-    begin
-      if (Length(LReq.Headers[I].Key) = 7) and   // 'Upgrade' = 7 chars
-         SameText(LReq.Headers[I].Key, 'Upgrade') then
-        LUpgrade := LReq.Headers[I].Value
-      else if (Length(LReq.Headers[I].Key) = 17) and  // 'Sec-WebSocket-Key' = 17 chars
-         SameText(LReq.Headers[I].Key, 'Sec-WebSocket-Key') then
-        LWsKey := LReq.Headers[I].Value;
-    end;
-    if SameText(LUpgrade, 'websocket') and (LWsKey <> '') then
-    begin
-      FCallbacks.UpgradeToWS(AConn, LReq);
-      Exit;
-    end;
-    if SameText(LUpgrade, 'h2c') and AConfig.H2Enabled and (LConn.SSLHandle = nil) then
-    begin
-      FCallbacks.UpgradeToH2C(AConn, LReq);
-      Exit;
-    end;
-  end;
-
-  LConn.KeepAlive := LReq.KeepAlive;
-
-  // --------------------------------------------------------------------------
-  // Invoke application handler
-  // Security, rate limiting, compression and metrics are now opt-in
-  // middlewares — registered via TPoseidon.Use().
-  // --------------------------------------------------------------------------
-  LStartTick := Int64(TThread.GetTickCount64);
-  FCallbacks.InvokeRequest(LReq, LStatus, LCT, LBody, LExtra);
-
-  // Build response
-  LResp       := BuildHTTPResponsePooled(LStatus, LCT, LBody, LReq.KeepAlive,
-    LExtra, AConfig.SecureHeadersEnabled, AConfig.ServerBanner, LRespActualLen);
-  LDurationMs := Int64(TThread.GetTickCount64) - LStartTick;
-
-  LLogEvt.Method     := LReq.Method;
-  LLogEvt.Path       := LReq.Path;
-  LLogEvt.Status     := LStatus;
-  LLogEvt.DurationMs := LDurationMs;
-  LLogEvt.RemoteAddr := LConn.RemoteAddr;
-  LLogEvt.RxBytes    := Length(LReq.RawBody);
-  LLogEvt.TxBytes    := LRespActualLen;
-  FCallbacks.LogRequest(LLogEvt);
-
-  FCallbacks.SendResponse(AConn, LResp, LRespActualLen);
+  ACtx.Req.RemoteAddr := LConn.RemoteAddr;
+  if LConn.AccumLen > ACtx.Consumed then
+    Move(LConn.AccumBuf[ACtx.Consumed], LConn.AccumBuf[0],
+      LConn.AccumLen - ACtx.Consumed);
+  LConn.AccumLen := LConn.AccumLen - ACtx.Consumed;
 end;
 
 // ---------------------------------------------------------------------------
-// Lightweight dispatch — minimal pipeline for maximum throughput.
-// No protocol checks (HTTP/2, WebSocket, Proxy Protocol).
-// Uses ParseHTTP1Lightweight (zero header string allocations).
-// Headers materialized on-demand only if the handler accesses them.
+// StepParseHTTP1Lightweight — minimal parse, zero header string allocations
 // ---------------------------------------------------------------------------
 
-procedure TProtocolDispatcher._DispatchLightweight(AConn: Pointer;
-  const AConfig: TDispatchConfig);
+procedure TProtocolDispatcher.StepParseHTTP1Lightweight(
+  var ACtx: TDispatchContext);
 var
-  LConn:          TNativeConn absolute AConn;
-  LReq:           TPoseidonNativeRequest;
-  LStatus:        Integer;
-  LCT:            string;
-  LBody:          TBytes;
-  LExtra:         TArray<TPair<string,string>>;
-  LResp:          TBytes;
-  LRespActualLen: Integer;
-  LConsumed:      Integer;
-  LReqBad:        Boolean;
-  LHdrStart:      Integer;
-  LHdrEnd:        Integer;
+  LConn: TNativeConn;
+  LResp: TBytes;
 begin
-  if LConn.AccumLen > AConfig.MaxRequestSize then
-  begin
-    LResp := BuildHTTPResponse(413, 'text/plain',
-      TEncoding.ASCII.GetBytes('Payload Too Large'), False, [],
-      False, '');
-    FCallbacks.SendResponse(AConn, LResp, 0);
-    Exit;
-  end;
+  LConn := TNativeConn(ACtx.Conn);
 
-  // Lightweight parse — only request line + critical headers by byte scan
-  LReqBad := False;
+  ACtx.ReqBad := False;
   if not ParseHTTP1Lightweight(
        LConn.AccumBuf, LConn.AccumLen,
-       AConfig.MaxHeaderSize, AConfig.MaxRequestSize,
-       LReq.Method, LReq.Path, LReq.QueryString,
-       LReq.RawBody, LReq.KeepAlive,
-       LConsumed, LReqBad,
-       LHdrStart, LHdrEnd) then
+       ACtx.Config^.MaxHeaderSize, ACtx.Config^.MaxRequestSize,
+       ACtx.Req.Method, ACtx.Req.Path, ACtx.Req.QueryString,
+       ACtx.Req.RawBody, ACtx.Req.KeepAlive,
+       ACtx.Consumed, ACtx.ReqBad,
+       ACtx.HdrStart, ACtx.HdrEnd) then
   begin
-    if LReqBad then
+    if ACtx.ReqBad then
     begin
       LResp := BuildHTTPResponse(400, 'text/plain',
         TEncoding.ASCII.GetBytes('Bad Request'), False, [], False, '');
-      FCallbacks.SendResponse(AConn, LResp, 0);
+      FCallbacks.SendResponse(ACtx.Conn, LResp, 0);
     end
     else
-      FCallbacks.PostRecv(AConn);
+      FCallbacks.PostRecv(ACtx.Conn);
+    ACtx.Handled := True;
     Exit;
   end;
 
-  LReq.RemoteAddr := LConn.RemoteAddr;
-  // Lazy headers — only materialize if handler needs them
-  // Store raw buffer reference for on-demand parsing
-  LReq.Headers := nil;
+  ACtx.Req.RemoteAddr := LConn.RemoteAddr;
+  ACtx.Req.Headers := nil;  // lazy — materialized on demand
 
-  if LConn.AccumLen > LConsumed then
-    Move(LConn.AccumBuf[LConsumed], LConn.AccumBuf[0], LConn.AccumLen - LConsumed);
-  LConn.AccumLen := LConn.AccumLen - LConsumed;
-  LConn.KeepAlive := LReq.KeepAlive;
+  if LConn.AccumLen > ACtx.Consumed then
+    Move(LConn.AccumBuf[ACtx.Consumed], LConn.AccumBuf[0],
+      LConn.AccumLen - ACtx.Consumed);
+  LConn.AccumLen := LConn.AccumLen - ACtx.Consumed;
+  LConn.KeepAlive := ACtx.Req.KeepAlive;
+end;
 
-  // Direct handler invocation — no protocol checks, no upgrade detection
-  FCallbacks.InvokeRequest(LReq, LStatus, LCT, LBody, LExtra);
+// ---------------------------------------------------------------------------
+// StepUpgradeDetection — check for WebSocket/H2C upgrades (GET only)
+// ---------------------------------------------------------------------------
 
-  // Minimal response — no security headers, no server banner in lightweight mode
-  LResp := BuildHTTPResponsePooled(LStatus, LCT, LBody, LReq.KeepAlive,
-    LExtra, False, '', LRespActualLen);
+procedure TProtocolDispatcher.StepUpgradeDetection(var ACtx: TDispatchContext);
+var
+  LConn:    TNativeConn;
+  LUpgrade: string;
+  LWsKey:   string;
+  I:        Integer;
+begin
+  LConn := TNativeConn(ACtx.Conn);
 
-  FCallbacks.SendResponse(AConn, LResp, LRespActualLen);
+  if not SameText(ACtx.Req.Method, 'GET') then
+    Exit;
+
+  LUpgrade := '';
+  LWsKey   := '';
+  for I := 0 to High(ACtx.Req.Headers) do
+  begin
+    if (Length(ACtx.Req.Headers[I].Key) = 7) and
+       SameText(ACtx.Req.Headers[I].Key, 'Upgrade') then
+      LUpgrade := ACtx.Req.Headers[I].Value
+    else if (Length(ACtx.Req.Headers[I].Key) = 17) and
+       SameText(ACtx.Req.Headers[I].Key, 'Sec-WebSocket-Key') then
+      LWsKey := ACtx.Req.Headers[I].Value;
+  end;
+
+  if SameText(LUpgrade, 'websocket') and (LWsKey <> '') then
+  begin
+    FCallbacks.UpgradeToWS(ACtx.Conn, ACtx.Req);
+    ACtx.Handled := True;
+    Exit;
+  end;
+
+  if SameText(LUpgrade, 'h2c') and ACtx.Config^.H2Enabled and
+     (LConn.SSLHandle = nil) then
+  begin
+    FCallbacks.UpgradeToH2C(ACtx.Conn, ACtx.Req);
+    ACtx.Handled := True;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+// StepInvokeAndRespond — full mode: invoke handler, log, send response
+// ---------------------------------------------------------------------------
+
+procedure TProtocolDispatcher.StepInvokeAndRespond(var ACtx: TDispatchContext);
+var
+  LConn:      TNativeConn;
+  LDurationMs: Int64;
+  LLogEvt:    TPoseidonRequestLogEvent;
+begin
+  LConn := TNativeConn(ACtx.Conn);
+  LConn.KeepAlive := ACtx.Req.KeepAlive;
+
+  ACtx.StartTick := Int64(TThread.GetTickCount64);
+  FCallbacks.InvokeRequest(ACtx.Req, ACtx.Status, ACtx.ContentType,
+    ACtx.Body, ACtx.Extra);
+
+  ACtx.Resp := BuildHTTPResponsePooled(ACtx.Status, ACtx.ContentType,
+    ACtx.Body, ACtx.Req.KeepAlive, ACtx.Extra,
+    ACtx.Config^.SecureHeadersEnabled, ACtx.Config^.ServerBanner,
+    ACtx.RespActualLen);
+  LDurationMs := Int64(TThread.GetTickCount64) - ACtx.StartTick;
+
+  LLogEvt.Method     := ACtx.Req.Method;
+  LLogEvt.Path       := ACtx.Req.Path;
+  LLogEvt.Status     := ACtx.Status;
+  LLogEvt.DurationMs := LDurationMs;
+  LLogEvt.RemoteAddr := LConn.RemoteAddr;
+  LLogEvt.RxBytes    := Length(ACtx.Req.RawBody);
+  LLogEvt.TxBytes    := ACtx.RespActualLen;
+  FCallbacks.LogRequest(LLogEvt);
+
+  FCallbacks.SendResponse(ACtx.Conn, ACtx.Resp, ACtx.RespActualLen);
+  ACtx.Handled := True;
+end;
+
+// ---------------------------------------------------------------------------
+// StepInvokeAndRespondLightweight — no logging, no security headers
+// ---------------------------------------------------------------------------
+
+procedure TProtocolDispatcher.StepInvokeAndRespondLightweight(
+  var ACtx: TDispatchContext);
+begin
+  FCallbacks.InvokeRequest(ACtx.Req, ACtx.Status, ACtx.ContentType,
+    ACtx.Body, ACtx.Extra);
+
+  ACtx.Resp := BuildHTTPResponsePooled(ACtx.Status, ACtx.ContentType,
+    ACtx.Body, ACtx.Req.KeepAlive, ACtx.Extra, False, '',
+    ACtx.RespActualLen);
+
+  FCallbacks.SendResponse(ACtx.Conn, ACtx.Resp, ACtx.RespActualLen);
+  ACtx.Handled := True;
 end;
 
 end.
