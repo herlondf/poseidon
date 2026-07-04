@@ -60,18 +60,27 @@ type
     public
       Work: TElasticWorkItem;
     end;
+    // #63: per-worker deque for work-stealing
+    PWorkerDeque = ^TWorkerDeque;
+    TWorkerDeque = record
+      Queue: TQueue<TWorkWrapper>;
+      Lock:  TCriticalSection;
+    end;
   private
     FMinWorkers:    Integer;
     FMaxWorkers:    Integer;
     FIdleTimeoutMs: Integer;
-    FQueue:         TQueue<TWorkWrapper>;
-    FQueueCS:       TCriticalSection;
+    // #63: per-worker deques replace single shared queue
+    FDeques:        array of TWorkerDeque;
+    FDequeCount:    Integer;
+    FNextDeque:     Integer;  // atomic round-robin counter for Post()
     FSemaphore:     TSemaphore;
     FActiveWorkers: Integer;  // atomic — total alive threads (including idle)
     FIdleWorkers:   Integer;  // atomic — threads blocked on semaphore
     FShutdown:      Boolean;
-    procedure _WorkerLoop;
-    procedure _SpawnWorker;
+    procedure _WorkerLoop(ADequeIdx: Integer);
+    procedure _SpawnWorker(ADequeIdx: Integer);
+    function  _TrySteal(AMyIdx: Integer; out AWrapper: TWorkWrapper): Boolean;
   public
     constructor Create(AMin, AMax, AIdleTimeoutMs: Integer);
     destructor Destroy; override;
@@ -102,48 +111,90 @@ begin
   FShutdown      := False;
   FActiveWorkers := 0;
   FIdleWorkers   := 0;
-  FQueue         := TQueue<TWorkWrapper>.Create;
-  FQueueCS       := TCriticalSection.Create;
-  // Initial count 0; Release increments, WaitFor decrements.
-  FSemaphore     := TSemaphore.Create(nil, 0, MaxInt, '');
-  // Seed minimum workers so they are available before the first request arrives.
-  for I := 1 to FMinWorkers do
-    _SpawnWorker;
+  FNextDeque     := 0;
+
+  // #63: create per-worker deques (one per min worker)
+  FDequeCount := AMin;
+  if FDequeCount < 1 then FDequeCount := 1;
+  SetLength(FDeques, FDequeCount);
+  for I := 0 to FDequeCount - 1 do
+  begin
+    FDeques[I].Queue := TQueue<TWorkWrapper>.Create;
+    FDeques[I].Lock  := TCriticalSection.Create;
+  end;
+
+  FSemaphore := TSemaphore.Create(nil, 0, MaxInt, '');
+  // Seed minimum workers — each assigned to its own deque
+  for I := 0 to FMinWorkers - 1 do
+    _SpawnWorker(I mod FDequeCount);
 end;
 
 destructor TElasticWorkerPool.Destroy;
+var
+  I: Integer;
 begin
   Shutdown;
-  FreeAndNil(FQueue);
-  FreeAndNil(FQueueCS);
+  for I := 0 to FDequeCount - 1 do
+  begin
+    FreeAndNil(FDeques[I].Queue);
+    FreeAndNil(FDeques[I].Lock);
+  end;
   FreeAndNil(FSemaphore);
   inherited Destroy;
 end;
 
-procedure TElasticWorkerPool._SpawnWorker;
+procedure TElasticWorkerPool._SpawnWorker(ADequeIdx: Integer);
 var
+  LIdx:    Integer;
   LThread: TThread;
 begin
-  LThread := TThread.CreateAnonymousThread(procedure begin _WorkerLoop; end);
+  LIdx := ADequeIdx;
+  LThread := TThread.CreateAnonymousThread(
+    procedure begin _WorkerLoop(LIdx); end);
   LThread.FreeOnTerminate := True;
   LThread.Start;
 end;
 
-procedure TElasticWorkerPool._WorkerLoop;
+// #63: try to steal work from another worker's deque
+function TElasticWorkerPool._TrySteal(AMyIdx: Integer; out AWrapper: TWorkWrapper): Boolean;
+var
+  I, LTarget: Integer;
+begin
+  Result := False;
+  AWrapper := nil;
+  for I := 1 to FDequeCount - 1 do
+  begin
+    LTarget := (AMyIdx + I) mod FDequeCount;
+    FDeques[LTarget].Lock.Enter;
+    try
+      if FDeques[LTarget].Queue.Count > 0 then
+      begin
+        AWrapper := FDeques[LTarget].Queue.Dequeue;
+        Result := True;
+        Exit;
+      end;
+    finally
+      FDeques[LTarget].Lock.Leave;
+    end;
+  end;
+end;
+
+procedure TElasticWorkerPool._WorkerLoop(ADequeIdx: Integer);
 var
   LWrapper:        TWorkWrapper;
   LWork:           TElasticWorkItem;
   LResult:         TWaitResult;
   LCurActive:      Integer;
   LAlreadyDropped: Boolean;
+  LDeque:          PWorkerDeque;
 begin
   TInterlocked.Increment(FActiveWorkers);
   LAlreadyDropped := False;
+  LDeque := @FDeques[ADequeIdx];
   try
     while True do
     begin
       TInterlocked.Increment(FIdleWorkers);
-      // LongWord cast: WaitFor(Timeout: LongWord) — FIdleTimeoutMs is always >= 0
       LResult := FSemaphore.WaitFor(LongWord(FIdleTimeoutMs));
       TInterlocked.Decrement(FIdleWorkers);
 
@@ -152,41 +203,38 @@ begin
       if LResult = wrTimeout then
       begin
         // Attempt to self-terminate while staying above the minimum.
-        // CAS loop: speculatively decrement FActiveWorkers only when > FMinWorkers.
-        // If two workers race here, the CAS ensures only one successfully exits
-        // per iteration — the other retries the check.
-        // TInterlocked.Add(X, 0) is the portable atomic-read idiom for Integer;
-        // TInterlocked.Read only has the Int64 overload on dcc32.
         repeat
           LCurActive := TInterlocked.Add(FActiveWorkers, 0);
-          if LCurActive <= FMinWorkers then Break;  // At/below minimum — stay alive
+          if LCurActive <= FMinWorkers then Break;
         until TInterlocked.CompareExchange(
                 FActiveWorkers, LCurActive - 1, LCurActive) = LCurActive;
 
         if LCurActive > FMinWorkers then
         begin
-          // CAS succeeded: we claimed the exit slot and already decremented.
-          // Skip the finally block's decrement.
           LAlreadyDropped := True;
           Exit;
         end;
-        Continue;  // At minimum — keep waiting for work
+        Continue;
       end;
 
-      // Got a semaphore signal — dequeue and execute one work item.
+      // #63: try local deque first (LIFO — better cache locality)
       LWrapper := nil;
-      FQueueCS.Enter;
+      LDeque^.Lock.Enter;
       try
-        if FQueue.Count > 0 then
-          LWrapper := FQueue.Dequeue;
+        if LDeque^.Queue.Count > 0 then
+          LWrapper := LDeque^.Queue.Dequeue;
       finally
-        FQueueCS.Leave;
+        LDeque^.Lock.Leave;
       end;
+
+      // #63: local empty — steal from another worker (FIFO)
+      if not Assigned(LWrapper) then
+        _TrySteal(ADequeIdx, LWrapper);
 
       if Assigned(LWrapper) then
       begin
         LWork := LWrapper.Work;
-        LWrapper.Work := nil;  // Release closure before freeing wrapper
+        LWrapper.Work := nil;
         LWrapper.Free;
         try
           LWork();
@@ -195,7 +243,7 @@ begin
             Writeln(ErrOutput, '[pool.workers] WORKER_EX [',
               E.ClassName, ']: ', E.Message);
         end;
-        LWork := nil;  // Release closure and captured references
+        LWork := nil;
       end;
     end;
   finally
@@ -206,31 +254,32 @@ end;
 
 procedure TElasticWorkerPool.Post(AWork: TElasticWorkItem);
 var
-  LWrapper: TWorkWrapper;
-  LIdle:    Integer;
-  LActive:  Integer;
+  LWrapper:  TWorkWrapper;
+  LIdle:     Integer;
+  LActive:   Integer;
+  LDequeIdx: Integer;
 begin
   if FShutdown then Exit;
 
   LWrapper      := TWorkWrapper.Create;
   LWrapper.Work := AWork;
 
-  FQueueCS.Enter;
+  // #63: round-robin assignment to per-worker deques
+  LDequeIdx := TInterlocked.Increment(FNextDeque) mod FDequeCount;
+  FDeques[LDequeIdx].Lock.Enter;
   try
-    FQueue.Enqueue(LWrapper);
+    FDeques[LDequeIdx].Queue.Enqueue(LWrapper);
   finally
-    FQueueCS.Leave;
+    FDeques[LDequeIdx].Lock.Leave;
   end;
 
   FSemaphore.Release(1);
 
   // Spawn a new worker when all existing workers are busy and below max.
-  // TOCTOU: a mild race may briefly spawn one extra worker; it self-terminates
-  // on the next idle timeout without impacting correctness.
   LIdle   := TInterlocked.Add(FIdleWorkers, 0);
   LActive := TInterlocked.Add(FActiveWorkers, 0);
   if (LIdle = 0) and (LActive < FMaxWorkers) then
-    _SpawnWorker;
+    _SpawnWorker(LDequeIdx);
 end;
 
 procedure TElasticWorkerPool.Shutdown(ATimeoutMs: Integer);
@@ -238,6 +287,7 @@ var
   LActive:  Integer;
   LStart:   Int64;
   LWrapper: TWorkWrapper;
+  I:        Integer;
 begin
   if FShutdown then Exit;
   FShutdown := True;
@@ -247,8 +297,6 @@ begin
   if LActive > 0 then
     FSemaphore.Release(LActive);
 
-  // Wait for all workers to exit. Shutdown is a rare operation; short Sleep
-  // intervals are acceptable here.
   LStart := Int64(TThread.GetTickCount64);
   while TInterlocked.Add(FActiveWorkers, 0) > 0 do
   begin
@@ -256,17 +304,20 @@ begin
     Sleep(10);
   end;
 
-  // Drain any un-executed work items left in the queue (e.g. on timeout).
-  FQueueCS.Enter;
-  try
-    while FQueue.Count > 0 do
-    begin
-      LWrapper := FQueue.Dequeue;
-      LWrapper.Work := nil;
-      LWrapper.Free;
+  // Drain un-executed work from all deques
+  for I := 0 to FDequeCount - 1 do
+  begin
+    FDeques[I].Lock.Enter;
+    try
+      while FDeques[I].Queue.Count > 0 do
+      begin
+        LWrapper := FDeques[I].Queue.Dequeue;
+        LWrapper.Work := nil;
+        LWrapper.Free;
+      end;
+    finally
+      FDeques[I].Lock.Leave;
     end;
-  finally
-    FQueueCS.Leave;
   end;
 end;
 
