@@ -762,6 +762,7 @@ begin
   LCfg.ServerBanner         := FServerBanner;
   LCfg.MaxQueueDepth        := 0;           // consumed here; Dispatcher needs no copy
   LCfg.InFlightCount        := nil;         // ditto
+  LCfg.Lightweight          := FSyncDispatch;  // v2: lightweight pipeline with sync dispatch
 
   // v2-perf: SyncDispatch — execute directly on IO thread, skip worker pool.
   // Eliminates thread transition overhead (~50-100us per request).

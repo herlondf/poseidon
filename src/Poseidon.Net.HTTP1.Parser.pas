@@ -41,6 +41,31 @@ function ParseHTTP1Request(
   out AConsumed:      Integer;
   out ABadRequest:    Boolean): Boolean;
 
+// Lightweight parser — zero string allocations for headers.
+// Parses only request line (method, path, query) and detects Content-Length,
+// Connection and Transfer-Encoding by byte scan.  Headers are stored as raw
+// byte range (AHdrStart..AHdrEnd) for lazy materialization by the caller.
+// Used when SyncDispatch is active for maximum throughput.
+function ParseHTTP1Lightweight(
+  const ABuf:         TBytes;
+  ABufLen:            Integer;
+  AMaxHeaderSize:     Integer;
+  AMaxBodySize:       Integer;
+  out AMethod:        string;
+  out APath:          string;
+  out AQueryString:   string;
+  out ARawBody:       TBytes;
+  out AKeepAlive:     Boolean;
+  out AConsumed:      Integer;
+  out ABadRequest:    Boolean;
+  out AHdrStart:      Integer;
+  out AHdrEnd:        Integer): Boolean;
+
+// Materializes headers from raw buffer range.  Called on-demand when the
+// handler or middleware actually accesses headers.
+function MaterializeHeaders(const ABuf: TBytes;
+  AHdrStart, AHdrEnd: Integer): TArray<TPair<string,string>>;
+
 // Decodes chunked Transfer-Encoding body from ABuf[0..ABufLen-1].
 // AMaxBodySize caps the total decoded size (raises malformed on excess).
 //
@@ -396,6 +421,276 @@ begin
 
   AConsumed := LConsumed;
   Result    := True;
+end;
+
+// ---------------------------------------------------------------------------
+// ParseHTTP1Lightweight — minimal parse (zero header string allocations)
+// ---------------------------------------------------------------------------
+
+function ParseHTTP1Lightweight(
+  const ABuf: TBytes; ABufLen, AMaxHeaderSize, AMaxBodySize: Integer;
+  out AMethod, APath, AQueryString: string;
+  out ARawBody: TBytes; out AKeepAlive: Boolean;
+  out AConsumed: Integer; out ABadRequest: Boolean;
+  out AHdrStart, AHdrEnd: Integer): Boolean;
+const
+  SP = $20; CR = $0D; LF = $0A;
+
+  function BufToStr(AStart, ALen: Integer): string;
+  begin
+    if ALen <= 0 then Result := ''
+    else Result := TEncoding.ASCII.GetString(ABuf, AStart, ALen);
+  end;
+
+  // Byte-level case-insensitive comparison for short header names
+  function ByteMatch(APos, ALen: Integer; const ATarget: AnsiString): Boolean;
+  var
+    J: Integer;
+    LB: Byte;
+  begin
+    if ALen <> Length(ATarget) then Exit(False);
+    for J := 1 to ALen do
+    begin
+      LB := ABuf[APos + J - 1];
+      if LB >= Ord('A') then
+        if LB <= Ord('Z') then
+          LB := LB or $20;  // lowercase
+      if LB <> Byte(ATarget[J]) then Exit(False);
+    end;
+    Result := True;
+  end;
+
+var
+  I, LHdrEnd, LScanEnd, LLineEnd, LSpace1, LSpace2, LQPos: Integer;
+  LLineStart, LColonPos, LValStart: Integer;
+  LCL: Int64;
+  LIsHttp11, LIsChunked: Boolean;
+  LBodyStart, LConsumed: Integer;
+  LChunkBody: TBytes;
+  LChunkBytes: Integer;
+  LChunkBad: Boolean;
+  LValLen: Integer;
+begin
+  Result      := False;
+  ABadRequest := False;
+  AConsumed   := 0;
+  AHdrStart   := 0;
+  AHdrEnd     := 0;
+
+  // Find CRLFCRLF
+  LHdrEnd  := -1;
+  LScanEnd := ABufLen - 4;
+  if LScanEnd > AMaxHeaderSize then LScanEnd := AMaxHeaderSize;
+  for I := 0 to LScanEnd do
+    if (ABuf[I] = CR) and (ABuf[I+1] = LF) and
+       (ABuf[I+2] = CR) and (ABuf[I+3] = LF) then
+    begin
+      LHdrEnd := I;
+      Break;
+    end;
+
+  if LHdrEnd < 0 then
+  begin
+    if ABufLen > AMaxHeaderSize then ABadRequest := True;
+    Exit;
+  end;
+
+  // Parse request line
+  LLineEnd := -1;
+  for I := 0 to LHdrEnd - 1 do
+    if (ABuf[I] = CR) and (ABuf[I+1] = LF) then
+    begin LLineEnd := I; Break; end;
+  if LLineEnd <= 0 then begin ABadRequest := True; Exit; end;
+
+  LSpace1 := -1;
+  for I := 0 to LLineEnd - 1 do
+    if ABuf[I] = SP then begin LSpace1 := I; Break; end;
+  if LSpace1 <= 0 then begin ABadRequest := True; Exit; end;
+
+  LSpace2 := -1;
+  for I := LSpace1 + 1 to LLineEnd - 1 do
+    if ABuf[I] = SP then begin LSpace2 := I; Break; end;
+  if LSpace2 < 0 then LSpace2 := LLineEnd;
+
+  // Only 3 string allocations: method, path, query
+  AMethod := BufToStr(0, LSpace1);
+
+  LQPos := -1;
+  for I := LSpace1 + 1 to LSpace2 - 1 do
+    if ABuf[I] = Byte('?') then begin LQPos := I; Break; end;
+  if LQPos > 0 then
+  begin
+    APath        := BufToStr(LSpace1 + 1, LQPos - LSpace1 - 1);
+    AQueryString := BufToStr(LQPos + 1, LSpace2 - LQPos - 1);
+  end
+  else
+  begin
+    APath        := BufToStr(LSpace1 + 1, LSpace2 - LSpace1 - 1);
+    AQueryString := '';
+  end;
+
+  // HTTP version detection
+  LIsHttp11 := False;
+  if (LLineEnd - LSpace2 - 1) = 8 then
+    LIsHttp11 :=
+      (ABuf[LSpace2+1] = Byte('H')) and (ABuf[LSpace2+2] = Byte('T')) and
+      (ABuf[LSpace2+3] = Byte('T')) and (ABuf[LSpace2+4] = Byte('P')) and
+      (ABuf[LSpace2+5] = Byte('/')) and (ABuf[LSpace2+6] = Byte('1')) and
+      (ABuf[LSpace2+7] = Byte('.')) and (ABuf[LSpace2+8] = Byte('1'));
+  AKeepAlive := LIsHttp11;
+
+  // Store header byte range for lazy materialization
+  AHdrStart := LLineEnd + 2;
+  AHdrEnd   := LHdrEnd;
+
+  // Scan headers by BYTES only — detect Content-Length, Connection,
+  // Transfer-Encoding without any string allocation
+  LCL        := 0;
+  LIsChunked := False;
+  LLineStart := LLineEnd + 2;
+  while LLineStart < LHdrEnd do
+  begin
+    // Find end of line
+    LLineEnd := -1;
+    LColonPos := -1;
+    for I := LLineStart to LHdrEnd do
+    begin
+      case GLUT[ABuf[I]] of
+        BF_COLON: if LColonPos < 0 then LColonPos := I;
+        BF_CR:
+          if ABuf[I+1] = LF then begin LLineEnd := I; Break; end;
+      end;
+    end;
+    if LLineEnd < 0 then Break;
+    if (LLineEnd = LLineStart) or (LColonPos < 0) then
+    begin
+      LLineStart := LLineEnd + 2;
+      Continue;
+    end;
+
+    // Skip OWS
+    LValStart := LColonPos + 1;
+    while (LValStart < LLineEnd) and
+          ((GLUT[ABuf[LValStart]] and BF_OWS) <> 0) do
+      Inc(LValStart);
+    LValLen := LLineEnd - LValStart;
+
+    // Check critical headers by byte match (no string allocation)
+    if ByteMatch(LLineStart, LColonPos - LLineStart, 'content-length') then
+    begin
+      // Parse integer from bytes
+      LCL := 0;
+      for I := LValStart to LLineEnd - 1 do
+      begin
+        if (ABuf[I] >= Ord('0')) and (ABuf[I] <= Ord('9')) then
+          LCL := LCL * 10 + (ABuf[I] - Ord('0'))
+        else
+          Break;
+      end;
+    end
+    else if ByteMatch(LLineStart, LColonPos - LLineStart, 'connection') then
+    begin
+      // Check for keep-alive or close by byte scan
+      if LValLen >= 5 then
+      begin
+        for I := LValStart to LLineEnd - 5 do
+          if (ABuf[I] or $20 = Ord('c')) and (ABuf[I+1] or $20 = Ord('l')) and
+             (ABuf[I+2] or $20 = Ord('o')) and (ABuf[I+3] or $20 = Ord('s')) and
+             (ABuf[I+4] or $20 = Ord('e')) then
+          begin AKeepAlive := False; Break; end;
+      end;
+    end
+    else if ByteMatch(LLineStart, LColonPos - LLineStart, 'transfer-encoding') then
+    begin
+      if LValLen >= 7 then
+        for I := LValStart to LLineEnd - 7 do
+          if (ABuf[I] or $20 = Ord('c')) and (ABuf[I+1] or $20 = Ord('h')) and
+             (ABuf[I+2] or $20 = Ord('u')) then
+          begin LIsChunked := True; Break; end;
+    end;
+
+    LLineStart := LLineEnd + 2;
+  end;
+
+  // Request smuggling check
+  if HasRequestSmuggling(LCL > 0, LIsChunked) then
+  begin ABadRequest := True; Exit; end;
+
+  LBodyStart := LHdrEnd + 4;
+
+  if LIsChunked then
+  begin
+    if not DecodeHTTP1Chunked(@ABuf[LBodyStart],
+         ABufLen - LBodyStart, AMaxBodySize,
+         LChunkBody, LChunkBytes, LChunkBad) then
+    begin
+      ABadRequest := LChunkBad;
+      Exit;
+    end;
+    ARawBody  := LChunkBody;
+    LConsumed := LBodyStart + LChunkBytes;
+  end
+  else
+  begin
+    if LCL > 0 then
+    begin
+      if ABufLen - LBodyStart < LCL then Exit;
+      SetLength(ARawBody, LCL);
+      Move(ABuf[LBodyStart], ARawBody[0], LCL);
+    end
+    else
+      SetLength(ARawBody, 0);
+    LConsumed := LBodyStart + Integer(LCL);
+  end;
+
+  AConsumed := LConsumed;
+  Result    := True;
+end;
+
+// ---------------------------------------------------------------------------
+// MaterializeHeaders — on-demand string allocation for headers
+// ---------------------------------------------------------------------------
+
+function MaterializeHeaders(const ABuf: TBytes;
+  AHdrStart, AHdrEnd: Integer): TArray<TPair<string,string>>;
+const
+  MAX_HEADER_COUNT = 100;
+var
+  I, LLineStart, LLineEnd, LColonPos, LValStart, LCount: Integer;
+begin
+  SetLength(Result, MAX_HEADER_COUNT);
+  LCount := 0;
+  LLineStart := AHdrStart;
+  while (LLineStart < AHdrEnd) and (LCount < MAX_HEADER_COUNT) do
+  begin
+    LLineEnd := -1;
+    LColonPos := -1;
+    for I := LLineStart to AHdrEnd do
+    begin
+      case GLUT[ABuf[I]] of
+        BF_COLON: if LColonPos < 0 then LColonPos := I;
+        BF_CR:
+          if ABuf[I+1] = $0A then begin LLineEnd := I; Break; end;
+      end;
+    end;
+    if LLineEnd < 0 then Break;
+    if (LLineEnd = LLineStart) or (LColonPos < 0) then
+    begin
+      LLineStart := LLineEnd + 2;
+      Continue;
+    end;
+    LValStart := LColonPos + 1;
+    while (LValStart < LLineEnd) and
+          ((GLUT[ABuf[LValStart]] and BF_OWS) <> 0) do
+      Inc(LValStart);
+
+    Result[LCount] := TPair<string,string>.Create(
+      TEncoding.ASCII.GetString(ABuf, LLineStart, LColonPos - LLineStart),
+      TEncoding.ASCII.GetString(ABuf, LValStart, LLineEnd - LValStart));
+    Inc(LCount);
+    LLineStart := LLineEnd + 2;
+  end;
+  SetLength(Result, LCount);
 end;
 
 initialization

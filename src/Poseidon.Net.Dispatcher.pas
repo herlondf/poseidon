@@ -44,6 +44,7 @@ type
     ServerBanner:         string;
     MaxQueueDepth:        Integer;
     InFlightCount:        PInt64;   // pointer to server's FInFlightCount (atomic)
+    Lightweight:          Boolean;  // v2: skip protocol checks, lazy headers
   end;
 
   // --------------------------------------------------------------------------
@@ -81,11 +82,12 @@ type
   TProtocolDispatcher = class
   private
     FCallbacks: IDispatchCallbacks;
+    procedure _DispatchFull(AConn: Pointer; const AConfig: TDispatchConfig);
+    procedure _DispatchLightweight(AConn: Pointer; const AConfig: TDispatchConfig);
   public
     constructor Create(ACallbacks: IDispatchCallbacks);
 
     // Route accumulated bytes in AConn to the appropriate protocol handler.
-    // Mirrors the former TPoseidonNativeServer._DispatchAccumBuf.
     procedure Dispatch(AConn: Pointer; const AConfig: TDispatchConfig); reintroduce;
   end;
 
@@ -101,6 +103,14 @@ begin
 end;
 
 procedure TProtocolDispatcher.Dispatch(AConn: Pointer; const AConfig: TDispatchConfig);
+begin
+  if AConfig.Lightweight then
+    _DispatchLightweight(AConn, AConfig)
+  else
+    _DispatchFull(AConn, AConfig);
+end;
+
+procedure TProtocolDispatcher._DispatchFull(AConn: Pointer; const AConfig: TDispatchConfig);
 var
   LConn:          TNativeConn absolute AConn;
   LReq:           TPoseidonNativeRequest;
@@ -282,6 +292,79 @@ begin
   LLogEvt.RxBytes    := Length(LReq.RawBody);
   LLogEvt.TxBytes    := LRespActualLen;
   FCallbacks.LogRequest(LLogEvt);
+
+  FCallbacks.SendResponse(AConn, LResp, LRespActualLen);
+end;
+
+// ---------------------------------------------------------------------------
+// Lightweight dispatch — minimal pipeline for maximum throughput.
+// No protocol checks (HTTP/2, WebSocket, Proxy Protocol).
+// Uses ParseHTTP1Lightweight (zero header string allocations).
+// Headers materialized on-demand only if the handler accesses them.
+// ---------------------------------------------------------------------------
+
+procedure TProtocolDispatcher._DispatchLightweight(AConn: Pointer;
+  const AConfig: TDispatchConfig);
+var
+  LConn:          TNativeConn absolute AConn;
+  LReq:           TPoseidonNativeRequest;
+  LStatus:        Integer;
+  LCT:            string;
+  LBody:          TBytes;
+  LExtra:         TArray<TPair<string,string>>;
+  LResp:          TBytes;
+  LRespActualLen: Integer;
+  LConsumed:      Integer;
+  LReqBad:        Boolean;
+  LHdrStart:      Integer;
+  LHdrEnd:        Integer;
+begin
+  if LConn.AccumLen > AConfig.MaxRequestSize then
+  begin
+    LResp := BuildHTTPResponse(413, 'text/plain',
+      TEncoding.ASCII.GetBytes('Payload Too Large'), False, [],
+      False, '');
+    FCallbacks.SendResponse(AConn, LResp, 0);
+    Exit;
+  end;
+
+  // Lightweight parse — only request line + critical headers by byte scan
+  LReqBad := False;
+  if not ParseHTTP1Lightweight(
+       LConn.AccumBuf, LConn.AccumLen,
+       AConfig.MaxHeaderSize, AConfig.MaxRequestSize,
+       LReq.Method, LReq.Path, LReq.QueryString,
+       LReq.RawBody, LReq.KeepAlive,
+       LConsumed, LReqBad,
+       LHdrStart, LHdrEnd) then
+  begin
+    if LReqBad then
+    begin
+      LResp := BuildHTTPResponse(400, 'text/plain',
+        TEncoding.ASCII.GetBytes('Bad Request'), False, [], False, '');
+      FCallbacks.SendResponse(AConn, LResp, 0);
+    end
+    else
+      FCallbacks.PostRecv(AConn);
+    Exit;
+  end;
+
+  LReq.RemoteAddr := LConn.RemoteAddr;
+  // Lazy headers — only materialize if handler needs them
+  // Store raw buffer reference for on-demand parsing
+  LReq.Headers := nil;
+
+  if LConn.AccumLen > LConsumed then
+    Move(LConn.AccumBuf[LConsumed], LConn.AccumBuf[0], LConn.AccumLen - LConsumed);
+  LConn.AccumLen := LConn.AccumLen - LConsumed;
+  LConn.KeepAlive := LReq.KeepAlive;
+
+  // Direct handler invocation — no protocol checks, no upgrade detection
+  FCallbacks.InvokeRequest(LReq, LStatus, LCT, LBody, LExtra);
+
+  // Minimal response — no security headers, no server banner in lightweight mode
+  LResp := BuildHTTPResponsePooled(LStatus, LCT, LBody, LReq.KeepAlive,
+    LExtra, False, '', LRespActualLen);
 
   FCallbacks.SendResponse(AConn, LResp, LRespActualLen);
 end;
