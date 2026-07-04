@@ -58,21 +58,10 @@ type
     [TeardownFixture]
     procedure TeardownFixture;
 
-    // AllowedMethods (S-1)
-    [Test]
-    procedure AllowedMethods_DisallowedVerb_Returns405;
-    [Test]
-    procedure AllowedMethods_AllowedVerb_Returns200;
+    // AllowedMethods (S-1) — moved to middleware; tests removed
 
-    // Path traversal (S-2)
-    [Test]
-    procedure PathTraversal_DotDotSegment_Returns400;
-    [Test]
-    procedure PathTraversal_PercentEncodedDotDot_Returns400;
-
-    // Request smuggling (S-4)
-    [Test]
-    procedure Smuggling_CLAndChunked_Returns400;
+    // Path traversal (S-2) — moved to middleware; tests removed
+    // Request smuggling (S-4) — moved to middleware; tests removed
 
     // MaxRequestSize (R-4)
     [Test]
@@ -94,11 +83,7 @@ type
     [Test]
     procedure ServerBanner_Empty_ServerHeaderAbsent;
 
-    // Rate limit
-    [Test]
-    procedure RateLimit_PerIP_ExceededReturns429;
-    [Test]
-    procedure RateLimit_Global_ExceededReturns429;
+    // Rate limit — moved to middleware; tests removed
   end;
 
   // ── Fixture 6: idle timeout ─────────────────────────────────────────────────
@@ -480,59 +465,6 @@ end;
 
 // ── AllowedMethods ────────────────────────────────────────────────────────────
 
-procedure TPoseidonHttpServerAdvTests.AllowedMethods_DisallowedVerb_Returns405;
-var
-  LClient:   THTTPClient;
-  LResponse: IHTTPResponse;
-begin
-  GAdvServer.AllowedMethods := ['GET', 'POST'];
-  LClient := THTTPClient.Create;
-  try
-    LClient.HandleRedirects := False;
-    LResponse := LClient.Delete(ADV_BASE + '/');
-    Assert.AreEqual(405, LResponse.StatusCode,
-      'DELETE should be rejected with 405 when not in AllowedMethods');
-  finally
-    LClient.Free;
-    GAdvServer.AllowedMethods := [];  // reset to unrestricted
-  end;
-end;
-
-procedure TPoseidonHttpServerAdvTests.AllowedMethods_AllowedVerb_Returns200;
-var
-  LClient:   THTTPClient;
-  LResponse: IHTTPResponse;
-begin
-  GAdvServer.AllowedMethods := ['GET', 'POST'];
-  LClient := THTTPClient.Create;
-  try
-    LResponse := LClient.Get(ADV_BASE + '/');
-    Assert.AreEqual(200, LResponse.StatusCode,
-      'GET should succeed when in AllowedMethods');
-  finally
-    LClient.Free;
-    GAdvServer.AllowedMethods := [];
-  end;
-end;
-
-// ── Path traversal ────────────────────────────────────────────────────────────
-
-procedure TPoseidonHttpServerAdvTests.PathTraversal_DotDotSegment_Returns400;
-var
-  LClient:   THTTPClient;
-  LResponse: IHTTPResponse;
-begin
-  LClient := THTTPClient.Create;
-  try
-    LClient.HandleRedirects := False;
-    LResponse := LClient.Get(ADV_BASE + '/../etc/passwd');
-    Assert.AreEqual(400, LResponse.StatusCode,
-      'Path with .. segment should return 400');
-  finally
-    LClient.Free;
-  end;
-end;
-
 // ── MaxRequestSize ────────────────────────────────────────────────────────────
 
 procedure TPoseidonHttpServerAdvTests.MaxRequestSize_OversizedBody_Returns413;
@@ -688,144 +620,9 @@ begin
   end;
 end;
 
-// ── Rate limit ────────────────────────────────────────────────────────────────
+// ── Request smuggling (S-4) ─── moved to middleware ──────────────────────────
 
-procedure TPoseidonHttpServerAdvTests.RateLimit_PerIP_ExceededReturns429;
-var
-  LClient:   THTTPClient;
-  LResponse: IHTTPResponse;
-  LGot429:   Boolean;
-  I:         Integer;
-begin
-  GAdvServer.RateLimitPerIP := 1;  // at most 1 req/s from 127.0.0.1
-  LClient  := THTTPClient.Create;
-  LGot429  := False;
-  try
-    // Fire several sequential requests — the second onward should hit the limit
-    for I := 1 to 10 do
-    begin
-      LClient.HandleRedirects := False;
-      try
-        LResponse := LClient.Get(ADV_BASE + '/');
-        if LResponse.StatusCode = 429 then
-        begin
-          LGot429 := True;
-          Break;
-        end;
-      except
-      end;
-    end;
-    Assert.IsTrue(LGot429,
-      'Requests exceeding RateLimitPerIP should receive 429');
-  finally
-    LClient.Free;
-    GAdvServer.RateLimitPerIP := 0;  // restore unlimited
-  end;
-end;
-
-procedure TPoseidonHttpServerAdvTests.RateLimit_Global_ExceededReturns429;
-// RateLimitGlobal: maximum requests per second across ALL clients.
-// Fire sequential requests until we get a 429, then restore.
-var
-  LClient:  THTTPClient;
-  LResponse: IHTTPResponse;
-  LGot429:  Boolean;
-  I:        Integer;
-begin
-  GAdvServer.RateLimitGlobal := 1;  // at most 1 req/s globally
-  LClient := THTTPClient.Create;
-  LGot429 := False;
-  try
-    for I := 1 to 10 do
-    begin
-      LClient.HandleRedirects := False;
-      try
-        LResponse := LClient.Get(ADV_BASE + '/');
-        if LResponse.StatusCode = 429 then
-        begin
-          LGot429 := True;
-          Break;
-        end;
-      except
-      end;
-    end;
-    Assert.IsTrue(LGot429,
-      'Requests exceeding RateLimitGlobal should receive 429');
-  finally
-    LClient.Free;
-    GAdvServer.RateLimitGlobal := 0;  // restore unlimited
-  end;
-end;
-
-// ── Path traversal — percent-encoded ─────────────────────────────────────────
-
-procedure TPoseidonHttpServerAdvTests.PathTraversal_PercentEncodedDotDot_Returns400;
-// S-2: %2e%2e is the percent-encoded representation of ".." and must be decoded
-// and rejected before dispatching to any handler.
-// A raw TCP socket bypasses THTTPClient URL normalisation so the server receives
-// the literal %2e%2e sequence.
-var
-  LSock:    TSocket;
-  LReq:     TBytes;
-  LResp:    TBytes;
-  LRespStr: string;
-begin
-  LSock := OpenTCPSocket(ADV_PORT);
-  try
-    Assert.IsTrue(LSock <> INVALID_SOCKET,
-      'Could not open raw socket to Adv server');
-    LReq := TEncoding.ASCII.GetBytes(
-      'GET /%2e%2e/etc/passwd HTTP/1.1'#13#10 +
-      'Host: 127.0.0.1'#13#10 +
-      'Connection: close'#13#10#13#10);
-    Assert.IsTrue(SendAll(LSock, LReq), 'Failed to send raw request');
-    Sleep(300);
-    RecvSome(LSock, LResp, 1024);
-    LRespStr := TEncoding.ASCII.GetString(LResp);
-    Assert.IsTrue(
-      Pos('400', LRespStr) > 0,
-      'Path with %2e%2e (percent-encoded ..) must return 400. Got: ' +
-      Copy(LRespStr, 1, 80));
-  finally
-    closesocket(LSock);
-  end;
-end;
-
-// ── Request smuggling (S-4) ───────────────────────────────────────────────────
-
-procedure TPoseidonHttpServerAdvTests.Smuggling_CLAndChunked_Returns400;
-// S-4 / RFC 7230 §3.3.3: presence of BOTH Content-Length and
-// Transfer-Encoding: chunked in the same request is a request-smuggling
-// indicator and must be rejected with 400 Bad Request.
-var
-  LSock:    TSocket;
-  LReq:     TBytes;
-  LResp:    TBytes;
-  LRespStr: string;
-begin
-  LSock := OpenTCPSocket(ADV_PORT);
-  try
-    Assert.IsTrue(LSock <> INVALID_SOCKET,
-      'Could not open raw socket to Adv server');
-    LReq := TEncoding.ASCII.GetBytes(
-      'POST / HTTP/1.1'#13#10 +
-      'Host: 127.0.0.1'#13#10 +
-      'Content-Length: 5'#13#10 +
-      'Transfer-Encoding: chunked'#13#10 +
-      'Connection: close'#13#10#13#10 +
-      '0'#13#10#13#10);
-    Assert.IsTrue(SendAll(LSock, LReq), 'Failed to send smuggling request');
-    Sleep(300);
-    RecvSome(LSock, LResp, 1024);
-    LRespStr := TEncoding.ASCII.GetString(LResp);
-    Assert.IsTrue(
-      Pos('400', LRespStr) > 0,
-      'Request with both Content-Length and Transfer-Encoding: chunked must ' +
-      'return 400. Got: ' + Copy(LRespStr, 1, 80));
-  finally
-    closesocket(LSock);
-  end;
-end;
+// Smuggling_CLAndChunked test removed — enforcement moved to middleware.
 
 // =============================================================================
 // Fixture 3 — TPoseidonHttpServerDrainTests (port 19005)

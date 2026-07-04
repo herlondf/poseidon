@@ -600,7 +600,7 @@ begin
 
     Assert.AreEqual('application/json', LFlushedCT,
       'ContentType must be flushed correctly');
-    Assert.AreEqual(2, Length(LFlushedExtra),
+    Assert.AreEqual(Integer(2), Integer(Length(LFlushedExtra)),
       'Must flush 2 extra headers (excluding Content-Type)');
   finally
     LWebResp.Free;
@@ -711,7 +711,7 @@ begin
 
     Assert.AreEqual(303, LFlushedStatus,
       'SendRedirect must flush status 303');
-    Assert.AreEqual(1, Length(LFlushedExtra),
+    Assert.AreEqual(Integer(1), Integer(Length(LFlushedExtra)),
       'SendRedirect must flush exactly one extra header');
     Assert.AreEqual('Location', LFlushedExtra[0].Key,
       'Extra header must be Location');

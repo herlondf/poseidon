@@ -196,8 +196,19 @@ function TMockWebRequest.WriteHeaders(StatusCode: Integer; const ReasonString, H
 begin Result := True; end;
 
 function TMockWebRequest.GetFieldByName(const Name: string): string;
+var
+  I: Integer;
 begin
-  Result := FCustomFields.Values[Name];
+  if SameText(Name, 'ALL_RAW') then
+  begin
+    // Compose ALL_RAW from custom fields so ParseAllRawHeaders can find them
+    Result := '';
+    for I := 0 to FCustomFields.Count - 1 do
+      Result := Result + FCustomFields.Names[I] + ': ' +
+        FCustomFields.ValueFromIndex[I] + #13#10;
+  end
+  else
+    Result := FCustomFields.Values[Name];
 end;
 
 { TMockWebRequestFiles }
