@@ -50,6 +50,8 @@ function BuildHTTPResponsePooled(
 
 // #61: Build only HTTP headers (no body copy). Returns pool-backed TBytes.
 // AHdrActualLen = bytes actually written. Body is sent separately via vectored I/O.
+// #72: When AUseArena=True, uses thread-local THeaderArena (no pool round-trip).
+//      Caller must NOT release the returned buffer (it's reused across requests).
 function BuildHTTPResponseHeaders(
   AStatus:          Integer;
   const AContentType: string;
@@ -58,7 +60,8 @@ function BuildHTTPResponseHeaders(
   const AExtra:     TArray<TPair<string,string>>;
   ASecureHeaders:   Boolean;
   const AServerBanner: string;
-  out AHdrActualLen: Integer): TBytes;
+  out AHdrActualLen: Integer;
+  AUseArena:        Boolean = False): TBytes;
 
 // Pre-encoded default error body: {"error":"Internal Server Error"}
 // Use as initial value in the dispatch loop before calling the user handler.
@@ -67,7 +70,8 @@ function DefaultErrorBody: TBytes;
 implementation
 
 uses
-  Poseidon.Net.Pool.Buffer;
+  Poseidon.Net.Pool.Buffer,
+  Poseidon.Net.Pool.Arena;
 
 // ---------------------------------------------------------------------------
 // Pre-encoded response fragments — initialized once in `initialization`.
@@ -359,12 +363,13 @@ begin
     AExtra, ASecureHeaders, AServerBanner);
 end;
 
-// #61: Build headers only — body sent separately via vectored I/O
+// #61+#72: Build headers only — body sent separately via vectored I/O.
+// When AUseArena=True, uses thread-local buffer (zero alloc on hot path).
 function BuildHTTPResponseHeaders(AStatus: Integer;
   const AContentType: string; ABodyLen: Integer; AKeepAlive: Boolean;
   const AExtra: TArray<TPair<string,string>>;
   ASecureHeaders: Boolean; const AServerBanner: string;
-  out AHdrActualLen: Integer): TBytes;
+  out AHdrActualLen: Integer; AUseArena: Boolean): TBytes;
 var
   LStatusBytes: TBytes;
   LConnBytes:   TBytes;
@@ -402,7 +407,11 @@ begin
           + Length(G_CL_PREFIX) + LCLLen + 2
           + Length(LConnBytes) + LExtraLen + Length(G_CRLF);
 
-  Result := TBufferPool.Acquire(LTotal);
+  // #72: thread-local arena avoids pool round-trip in SyncDispatch
+  if AUseArena then
+    Result := THeaderArena.Acquire(LTotal)
+  else
+    Result := TBufferPool.Acquire(LTotal);
   LPos := 0;
 
   Move(LStatusBytes[0], Result[LPos], Length(LStatusBytes));

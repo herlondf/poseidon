@@ -80,12 +80,14 @@ type
     FRecvFreeTop:  Integer;             // top of free stack
     FRecvPoolLock: TCriticalSection;    // protects free-list (separate from FSQLock)
     FRecvPoolBase: PByte;              // cached base address for index calculation
+    FMultishotAccept: Boolean;   // #73: True when multishot accept is active
     // helpers
     procedure _AcceptOn(AListenFd: Integer);
     procedure _CompletionLoop;
     function  _SubmitSQE(AOpcode: Byte; AFd: Integer; ABuf: Pointer;
       ALen: UInt32; AUserData: UInt64): Boolean;
-    procedure _ProcessCQE(AUserData: UInt64; ARes: Int32);
+    function  _SubmitAcceptMultishot(AListenFd: Integer): Boolean;
+    procedure _ProcessCQE(AUserData: UInt64; ARes: Int32; AFlags: UInt32);
     procedure _ResubmitSend(AConn: TNativeConn);
     function  _RecvPoolAcquire: Pointer;
     procedure _RecvPoolRelease(ACtx: Pointer);
@@ -136,9 +138,16 @@ const
   IORING_FEAT_SINGLE_MMAP = UInt32($0001);
 
   // SQE opcodes
-  IORING_OP_NOP  = Byte(0);
-  IORING_OP_RECV = Byte(22);
-  IORING_OP_SEND = Byte(23);
+  IORING_OP_NOP    = Byte(0);
+  IORING_OP_ACCEPT = Byte(13);   // #73: multishot accept
+  IORING_OP_RECV   = Byte(22);
+  IORING_OP_SEND   = Byte(23);
+
+  // #73: multishot accept — one SQE generates multiple CQEs
+  IOSQE_ACCEPT_MULTISHOT = UInt16(1 shl 0);  // ioprio flag for multishot accept
+
+  // CQE flags
+  IORING_CQE_F_MORE = UInt32(1 shl 1);  // more CQEs to come from this SQE
 
   // mmap file offsets for the three ring regions
   IORING_OFF_SQ_RING = Int64(0);
@@ -146,8 +155,9 @@ const
   IORING_OFF_SQES    = Int64($10000000);
 
   // user_data sentinels / tag bits
-  UD_TAG_SEND  = UInt64(1);                    // bit 0 = send completion
-  UD_SHUTDOWN  = UInt64($FFFFFFFFFFFFFFFF);    // NOP shutdown sentinel
+  UD_TAG_SEND   = UInt64(1);                    // bit 0 = send completion
+  UD_TAG_ACCEPT = UInt64(2);                    // bit 1 = accept completion (#73)
+  UD_SHUTDOWN   = UInt64($FFFFFFFFFFFFFFFF);    // NOP shutdown sentinel
 
   RECV_BUF_SIZE  = 32768;
   RING_ENTRIES   = 512;
@@ -520,15 +530,34 @@ begin
   FCompThread.FreeOnTerminate := False;
   FCompThread.Start;
 
-  // --- Per-core accept threads (#58) ---
-  SetLength(FAcceptThreads, LAcceptN);
-  for I := 0 to LAcceptN - 1 do
+  // --- #73: Try multishot accept via io_uring ---
+  // Submit one IORING_OP_ACCEPT with multishot for each listen socket.
+  // If successful, no accept threads needed (kernel pushes CQEs directly).
+  FMultishotAccept := False;
+  if LAcceptN = 1 then
   begin
-    LFd := FListenSockets[I];
-    FAcceptThreads[I] := TThread.CreateAnonymousThread(
-      procedure begin _AcceptOn(LFd); end);
-    FAcceptThreads[I].FreeOnTerminate := False;
-    FAcceptThreads[I].Start;
+    FSQLock.Acquire;
+    try
+      FMultishotAccept := _SubmitAcceptMultishot(FListenSockets[0]);
+      if FMultishotAccept then
+        _NotifyKernel;
+    finally
+      FSQLock.Release;
+    end;
+  end;
+
+  // Fallback: per-core accept threads (when multishot not used or multiple listeners)
+  if not FMultishotAccept then
+  begin
+    SetLength(FAcceptThreads, LAcceptN);
+    for I := 0 to LAcceptN - 1 do
+    begin
+      LFd := FListenSockets[I];
+      FAcceptThreads[I] := TThread.CreateAnonymousThread(
+        procedure begin _AcceptOn(LFd); end);
+      FAcceptThreads[I].FreeOnTerminate := False;
+      FAcceptThreads[I].Start;
+    end;
   end;
 end;
 
@@ -832,16 +861,77 @@ end;
 // Internal: CQE dispatch
 // ---------------------------------------------------------------------------
 
-procedure TIOUringBackend._ProcessCQE(AUserData: UInt64; ARes: Int32);
+// #73: Submit a multishot accept SQE — one submission handles all future accepts
+function TIOUringBackend._SubmitAcceptMultishot(AListenFd: Integer): Boolean;
+var
+  LTail, LIdx: UInt32;
+  LSQE:        PIOUringSQE;
+begin
+  LTail := FPSQTail^;
+  if LTail - FPSQHead^ >= FPSQMask^ + 1 then
+  begin
+    Result := False;
+    Exit;
+  end;
+
+  LIdx := LTail and FPSQMask^;
+  LSQE := PIOUringSQE(PByte(FSQEs) + NativeUInt(LIdx) * SizeOf(TIOUringSQE));
+  FillChar(LSQE^, SizeOf(TIOUringSQE), 0);
+  LSQE^.opcode    := IORING_OP_ACCEPT;
+  LSQE^.fd        := AListenFd;
+  LSQE^.ioprio    := IOSQE_ACCEPT_MULTISHOT;  // multishot: one SQE → many CQEs
+  LSQE^.op_flags  := UInt32(SOCK_NONBLOCK or SOCK_CLOEXEC);  // accept4 flags
+  LSQE^.user_data := UD_TAG_ACCEPT;
+  // addr=0, len=0: we don't need the remote address from the kernel
+  // (we get it via getpeername later if needed)
+
+  FPSQTail^ := LTail + 1;
+  Result := True;
+end;
+
+procedure TIOUringBackend._ProcessCQE(AUserData: UInt64; ARes: Int32;
+  AFlags: UInt32);
 var
   LCtx:       PRecvCtx;
   LConn:      TNativeConn;
   LRecvConn:  TNativeConn;
   LTotal:     Integer;
+  LOne:       Integer;
+  LAddr:      sockaddr_in;
+  LAddrLen:   Cardinal;
+  LIP:        AnsiString;
 begin
   if AUserData = UD_SHUTDOWN then
   begin
     FShutdown := True;
+    Exit;
+  end;
+
+  // #73: multishot accept completion
+  if (AUserData and UD_TAG_ACCEPT) <> 0 then
+  begin
+    if ARes >= 0 then
+    begin
+      // ARes = new socket fd
+      LOne := 1;
+      _LinuxSetsockopt(ARes, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
+      _LinuxSetsockopt(ARes, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
+      // Get peer address
+      FillChar(LAddr, SizeOf(LAddr), 0);
+      LAddrLen := SizeOf(LAddr);
+      getpeername(ARes, sockaddr(LAddr), LAddrLen);
+      LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
+      try
+        FCallbacks.OnNewConn(NativeUInt(ARes),
+          string(LIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
+      except
+        _LinuxClose(ARes);
+      end;
+    end;
+    // Multishot: if IORING_CQE_F_MORE is NOT set, the kernel cancelled the accept
+    // (e.g., listen socket closed). We don't need to resubmit.
+    if (AFlags and IORING_CQE_F_MORE) = 0 then
+      FMultishotAccept := False;
     Exit;
   end;
 
@@ -922,7 +1012,7 @@ begin
       LCQE := PIOUringCQE(PByte(FPCQEs) +
         NativeUInt(LHead and LMask) * SizeOf(TIOUringCQE));
       try
-        _ProcessCQE(LCQE^.user_data, LCQE^.res);
+        _ProcessCQE(LCQE^.user_data, LCQE^.res, LCQE^.flags);
       except
         on E: Exception do
           Writeln(ErrOutput, '[io_uring] CQE_EX [', E.ClassName, ']: ', E.Message);
