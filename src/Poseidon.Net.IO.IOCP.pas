@@ -42,6 +42,9 @@ type
     procedure RegisterConn(AConn: Pointer);
     procedure PostRecv(AConn: Pointer);
     procedure PostSend(AConn: Pointer; const AData: TBytes; AActualLen: Integer);
+    procedure PostSendV(AConn: Pointer;
+      const AHeaders: TBytes; AHdrLen: Integer;
+      const ABody: TBytes; ABodyLen: Integer);
     procedure SocketClose(AConn: Pointer);
   end;
 
@@ -89,7 +92,7 @@ const
   RECV_BUF_SIZE = 32768;
 
 type
-  TIocpAction = (iaRecv, iaSend);
+  TIocpAction = (iaRecv, iaSend, iaSendV);
 
   PRecvCtx = ^TRecvCtx;
   TRecvCtx = record
@@ -108,6 +111,17 @@ type
     WsaBuf:    TWsaBuf;
     SendBuf:   TBytes;
     ActualLen: Integer;             // P-4: bytes to send; 0 = use Length(SendBuf)
+  end;
+
+  // #61: Vectored send context — 2 WSABUFs for headers + body
+  PSendVCtx = ^TSendVCtx;
+  TSendVCtx = record
+    Ovl:       TOverlapped;         // MUST be first
+    Action:    TIocpAction;
+    Conn:      Pointer;
+    WsaBufs:   array[0..1] of TWsaBuf;
+    HeaderBuf: TBytes;
+    BodyBuf:   TBytes;
   end;
 
   PIocpHdr = ^TIocpHdr;
@@ -321,6 +335,66 @@ begin
   end;
 end;
 
+// #61: Vectored send — WSASend with 2 WSABUFs (headers + body)
+procedure TIOCPBackend.PostSendV(AConn: Pointer;
+  const AHeaders: TBytes; AHdrLen: Integer;
+  const ABody: TBytes; ABodyLen: Integer);
+var
+  LConn:  TNativeConn absolute AConn;
+  LCtx:   PSendVCtx;
+  LBytes: DWORD;
+  LRes:   Integer;
+  LHLen:  Integer;
+  LBLen:  Integer;
+  LCount: DWORD;
+begin
+  LHLen := AHdrLen;
+  if LHLen = 0 then LHLen := Length(AHeaders);
+  LBLen := ABodyLen;
+  if LBLen = 0 then LBLen := Length(ABody);
+
+  if LHLen + LBLen = 0 then
+  begin
+    FCallbacks.OnSendComplete(AConn);
+    Exit;
+  end;
+
+  New(LCtx);
+  FillChar(LCtx^.Ovl, SizeOf(TOverlapped), 0);
+  LCtx^.Action    := iaSendV;
+  LCtx^.Conn      := AConn;
+  LCtx^.HeaderBuf := AHeaders;
+  LCtx^.BodyBuf   := ABody;
+
+  LCount := 0;
+  if LHLen > 0 then
+  begin
+    LCtx^.WsaBufs[LCount].len := ULONG(LHLen);
+    LCtx^.WsaBufs[LCount].buf := @LCtx^.HeaderBuf[0];
+    Inc(LCount);
+  end;
+  if LBLen > 0 then
+  begin
+    LCtx^.WsaBufs[LCount].len := ULONG(LBLen);
+    LCtx^.WsaBufs[LCount].buf := @LCtx^.BodyBuf[0];
+    Inc(LCount);
+  end;
+
+  LBytes := 0;
+  LConn.AddRef;
+  LRes := WSASend(LConn.Socket, @LCtx^.WsaBufs[0], LCount, LBytes, 0,
+    PWSAOverlapped(@LCtx^.Ovl), nil);
+
+  if (LRes = SOCKET_ERROR) and (WSAGetLastError <> WSA_IO_PENDING) then
+  begin
+    LConn.Release;
+    TBufferPool.Release(LCtx^.HeaderBuf);
+    TBufferPool.Release(LCtx^.BodyBuf);
+    Dispose(LCtx);
+    FCallbacks.OnConnError(AConn);
+  end;
+end;
+
 procedure TIOCPBackend.SocketClose(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
@@ -401,9 +475,15 @@ begin
             TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
             Dispose(PSendCtx(LOvl));
           end;
+          iaSendV:
+          begin
+            TBufferPool.Release(PSendVCtx(LOvl)^.HeaderBuf);
+            TBufferPool.Release(PSendVCtx(LOvl)^.BodyBuf);
+            Dispose(PSendVCtx(LOvl));
+          end;
         end;
         FCallbacks.OnConnError(LConn);
-        LConn.Release;  // #43: drop IOCP-op ref (AddRef was in PostRecv/PostSend)
+        LConn.Release;
         Continue;
       end;
 
@@ -412,14 +492,22 @@ begin
         begin
           FCallbacks.OnRecv(LConn, @PRecvCtx(LOvl)^.Data[0], LBytes);
           FreeMem(PRecvCtx(LOvl));
-          LConn.Release;  // #43: drop IOCP recv op ref
+          LConn.Release;
         end;
         iaSend:
         begin
           TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
           Dispose(PSendCtx(LOvl));
           FCallbacks.OnSendComplete(LConn);
-          LConn.Release;  // #43: drop IOCP send op ref
+          LConn.Release;
+        end;
+        iaSendV:
+        begin
+          TBufferPool.Release(PSendVCtx(LOvl)^.HeaderBuf);
+          TBufferPool.Release(PSendVCtx(LOvl)^.BodyBuf);
+          Dispose(PSendVCtx(LOvl));
+          FCallbacks.OnSendComplete(LConn);
+          LConn.Release;
         end;
       end;
     except

@@ -67,6 +67,12 @@ type
     // Initiates an asynchronous send.
     procedure PostSend(AConn: Pointer; const AData: TBytes; AActualLen: Integer);
 
+    // #61: Vectored send — headers + body in one syscall, no concatenation.
+    // AHdrLen/ABodyLen: actual bytes to send (0 = use Length).
+    procedure PostSendV(AConn: Pointer;
+      const AHeaders: TBytes; AHdrLen: Integer;
+      const ABody: TBytes; ABodyLen: Integer);
+
     // Platform-specific socket teardown: remove from epoll / close fd or handle.
     // Called from server's _CloseConn after app-level cleanup (SSL, WS, H2) is done.
     procedure SocketClose(AConn: Pointer);

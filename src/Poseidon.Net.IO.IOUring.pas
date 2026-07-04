@@ -104,6 +104,9 @@ type
     procedure RegisterConn(AConn: Pointer);
     procedure PostRecv(AConn: Pointer);
     procedure PostSend(AConn: Pointer; const AData: TBytes; AActualLen: Integer);
+    procedure PostSendV(AConn: Pointer;
+      const AHeaders: TBytes; AHdrLen: Integer;
+      const ABody: TBytes; ABodyLen: Integer);
     procedure SocketClose(AConn: Pointer);
   end;
 
@@ -656,6 +659,34 @@ begin
   LConn.PendingSendActual := AActualLen;
   LConn.SentBytes         := 0;
   _ResubmitSend(LConn);
+end;
+
+// #61: Vectored send — io_uring SEND doesn't support scatter-gather on sockets,
+// so concatenate into a pool buffer and delegate to PostSend.
+procedure TIOUringBackend.PostSendV(AConn: Pointer;
+  const AHeaders: TBytes; AHdrLen: Integer;
+  const ABody: TBytes; ABodyLen: Integer);
+var
+  LHLen:   Integer;
+  LBLen:   Integer;
+  LConcat: TBytes;
+begin
+  LHLen := AHdrLen;
+  if LHLen = 0 then LHLen := Length(AHeaders);
+  LBLen := ABodyLen;
+  if LBLen = 0 then LBLen := Length(ABody);
+
+  if LHLen + LBLen = 0 then
+  begin
+    FCallbacks.OnSendComplete(AConn);
+    Exit;
+  end;
+
+  LConcat := TBufferPool.Acquire(LHLen + LBLen);
+  if LHLen > 0 then Move(AHeaders[0], LConcat[0], LHLen);
+  if LBLen > 0 then Move(ABody[0], LConcat[LHLen], LBLen);
+
+  PostSend(AConn, LConcat, LHLen + LBLen);
 end;
 
 procedure TIOUringBackend.SocketClose(AConn: Pointer);

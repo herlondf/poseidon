@@ -61,6 +61,10 @@ type
     procedure PostRecv(AConn: Pointer);
     procedure CloseConn(AConn: Pointer);
     procedure SendResponse(AConn: Pointer; const AData: TBytes; AActualLen: Integer);
+    // #61: Vectored send — headers + body separately, no concatenation
+    procedure SendResponseV(AConn: Pointer;
+      const AHeaders: TBytes; AHdrLen: Integer;
+      const ABody: TBytes; ABodyLen: Integer);
 
     // Protocol upgrades
     procedure UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
@@ -455,9 +459,11 @@ end;
 
 procedure TProtocolDispatcher.StepInvokeAndRespond(var ACtx: TDispatchContext);
 var
-  LConn:      TNativeConn;
+  LConn:       TNativeConn;
   LDurationMs: Int64;
-  LLogEvt:    TPoseidonRequestLogEvent;
+  LLogEvt:     TPoseidonRequestLogEvent;
+  LHdrBuf:     TBytes;
+  LHdrLen:     Integer;
 begin
   LConn := TNativeConn(ACtx.Conn);
   LConn.KeepAlive := ACtx.Req.KeepAlive;
@@ -466,10 +472,11 @@ begin
   FCallbacks.InvokeRequest(ACtx.Req, ACtx.Status, ACtx.ContentType,
     ACtx.Body, ACtx.Extra);
 
-  ACtx.Resp := BuildHTTPResponsePooled(ACtx.Status, ACtx.ContentType,
-    ACtx.Body, ACtx.Req.KeepAlive, ACtx.Extra,
+  // #61: vectored send — build headers separately, body sent as-is
+  LHdrBuf := BuildHTTPResponseHeaders(ACtx.Status, ACtx.ContentType,
+    Length(ACtx.Body), ACtx.Req.KeepAlive, ACtx.Extra,
     ACtx.Config^.SecureHeadersEnabled, ACtx.Config^.ServerBanner,
-    ACtx.RespActualLen);
+    LHdrLen);
   LDurationMs := Int64(TThread.GetTickCount64) - ACtx.StartTick;
 
   LLogEvt.Method     := ACtx.Req.Method;
@@ -478,10 +485,11 @@ begin
   LLogEvt.DurationMs := LDurationMs;
   LLogEvt.RemoteAddr := LConn.RemoteAddr;
   LLogEvt.RxBytes    := Length(ACtx.Req.RawBody);
-  LLogEvt.TxBytes    := ACtx.RespActualLen;
+  LLogEvt.TxBytes    := LHdrLen + Length(ACtx.Body);
   FCallbacks.LogRequest(LLogEvt);
 
-  FCallbacks.SendResponse(ACtx.Conn, ACtx.Resp, ACtx.RespActualLen);
+  FCallbacks.SendResponseV(ACtx.Conn, LHdrBuf, LHdrLen,
+    ACtx.Body, Length(ACtx.Body));
   ACtx.Handled := True;
 end;
 
@@ -491,15 +499,20 @@ end;
 
 procedure TProtocolDispatcher.StepInvokeAndRespondLightweight(
   var ACtx: TDispatchContext);
+var
+  LHdrBuf: TBytes;
+  LHdrLen: Integer;
 begin
   FCallbacks.InvokeRequest(ACtx.Req, ACtx.Status, ACtx.ContentType,
     ACtx.Body, ACtx.Extra);
 
-  ACtx.Resp := BuildHTTPResponsePooled(ACtx.Status, ACtx.ContentType,
-    ACtx.Body, ACtx.Req.KeepAlive, ACtx.Extra, False, '',
-    ACtx.RespActualLen);
+  // #61: vectored send — headers + body separately
+  LHdrBuf := BuildHTTPResponseHeaders(ACtx.Status, ACtx.ContentType,
+    Length(ACtx.Body), ACtx.Req.KeepAlive, ACtx.Extra, False, '',
+    LHdrLen);
 
-  FCallbacks.SendResponse(ACtx.Conn, ACtx.Resp, ACtx.RespActualLen);
+  FCallbacks.SendResponseV(ACtx.Conn, LHdrBuf, LHdrLen,
+    ACtx.Body, Length(ACtx.Body));
   ACtx.Handled := True;
 end;
 

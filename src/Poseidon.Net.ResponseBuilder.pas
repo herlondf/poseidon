@@ -48,6 +48,18 @@ function BuildHTTPResponsePooled(
   const AServerBanner: string;
   out AActualLen:   Integer): TBytes;
 
+// #61: Build only HTTP headers (no body copy). Returns pool-backed TBytes.
+// AHdrActualLen = bytes actually written. Body is sent separately via vectored I/O.
+function BuildHTTPResponseHeaders(
+  AStatus:          Integer;
+  const AContentType: string;
+  ABodyLen:         Integer;
+  AKeepAlive:       Boolean;
+  const AExtra:     TArray<TPair<string,string>>;
+  ASecureHeaders:   Boolean;
+  const AServerBanner: string;
+  out AHdrActualLen: Integer): TBytes;
+
 // Pre-encoded default error body: {"error":"Internal Server Error"}
 // Use as initial value in the dispatch loop before calling the user handler.
 function DefaultErrorBody: TBytes;
@@ -345,6 +357,83 @@ begin
   Result := TBufferPool.Acquire(LTotal);
   AActualLen := _BuildCore(Result, AStatus, AContentType, ABody, AKeepAlive,
     AExtra, ASecureHeaders, AServerBanner);
+end;
+
+// #61: Build headers only — body sent separately via vectored I/O
+function BuildHTTPResponseHeaders(AStatus: Integer;
+  const AContentType: string; ABodyLen: Integer; AKeepAlive: Boolean;
+  const AExtra: TArray<TPair<string,string>>;
+  ASecureHeaders: Boolean; const AServerBanner: string;
+  out AHdrActualLen: Integer): TBytes;
+var
+  LStatusBytes: TBytes;
+  LConnBytes:   TBytes;
+  LCTValue:     TBytes;
+  LCTAlloced:   Boolean;
+  LExtraStr:    string;
+  LCLLen, LExtraLen, LCTLen: Integer;
+  LTotal, LPos: Integer;
+  I:            Integer;
+begin
+  LStatusBytes := GetStatusLineBytes(AStatus);
+  if AKeepAlive then LConnBytes := G_CONN_KA
+  else               LConnBytes := G_CONN_CLOSE;
+  LCTValue := GetContentTypeValueBytes(AContentType, LCTAlloced);
+  LCLLen   := DigitCount(ABodyLen);
+
+  LExtraStr := '';
+  for I := 0 to High(AExtra) do
+    LExtraStr := LExtraStr + AExtra[I].Key + ': ' +
+      _SanitizeHeaderValue(AExtra[I].Value) + #13#10;
+  if ASecureHeaders then
+    LExtraStr := LExtraStr
+      + 'X-Content-Type-Options: nosniff'#13#10
+      + 'X-Frame-Options: DENY'#13#10
+      + 'Referrer-Policy: strict-origin-when-cross-origin'#13#10;
+  if AServerBanner <> '' then
+    LExtraStr := LExtraStr + 'Server: ' + AServerBanner + #13#10;
+  LExtraLen := Length(LExtraStr);
+
+  if AContentType <> '' then
+    LCTLen := Length(G_CT_PREFIX) + Length(LCTValue) + 2
+  else
+    LCTLen := 0;
+  LTotal := Length(LStatusBytes) + LCTLen
+          + Length(G_CL_PREFIX) + LCLLen + 2
+          + Length(LConnBytes) + LExtraLen + Length(G_CRLF);
+
+  Result := TBufferPool.Acquire(LTotal);
+  LPos := 0;
+
+  Move(LStatusBytes[0], Result[LPos], Length(LStatusBytes));
+  Inc(LPos, Length(LStatusBytes));
+  if AContentType <> '' then
+  begin
+    Move(G_CT_PREFIX[0], Result[LPos], Length(G_CT_PREFIX));
+    Inc(LPos, Length(G_CT_PREFIX));
+    if Length(LCTValue) > 0 then
+    begin
+      Move(LCTValue[0], Result[LPos], Length(LCTValue));
+      Inc(LPos, Length(LCTValue));
+    end;
+    Result[LPos] := $0D; Result[LPos + 1] := $0A; Inc(LPos, 2);
+  end;
+  Move(G_CL_PREFIX[0], Result[LPos], Length(G_CL_PREFIX));
+  Inc(LPos, Length(G_CL_PREFIX));
+  WriteIntToBuffer(Result, LPos, ABodyLen);
+  Inc(LPos, LCLLen);
+  Result[LPos] := $0D; Result[LPos + 1] := $0A; Inc(LPos, 2);
+  Move(LConnBytes[0], Result[LPos], Length(LConnBytes));
+  Inc(LPos, Length(LConnBytes));
+  if LExtraLen > 0 then
+  begin
+    TEncoding.ASCII.GetBytes(LExtraStr, 1, LExtraLen, Result, LPos);
+    Inc(LPos, LExtraLen);
+  end;
+  Move(G_CRLF[0], Result[LPos], Length(G_CRLF));
+  Inc(LPos, Length(G_CRLF));
+
+  AHdrActualLen := LPos;
 end;
 
 function DefaultErrorBody: TBytes;

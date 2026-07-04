@@ -114,6 +114,9 @@ type
     procedure PostRecv(AConn: Pointer);
     procedure CloseConn(AConn: Pointer);
     procedure SendResponse(AConn: Pointer; const AData: TBytes; AActualLen: Integer);
+    procedure SendResponseV(AConn: Pointer;
+      const AHeaders: TBytes; AHdrLen: Integer;
+      const ABody: TBytes; ABodyLen: Integer);
     procedure UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     procedure UpgradeToH2C(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     function  DispatchWSFrames(AConn: Pointer): Boolean;
@@ -154,6 +157,23 @@ var
 begin
   SendResponseData := AData;
   LStr := TEncoding.ASCII.GetString(AData, 0, Min(Length(AData), 50));
+  LPos := Pos('HTTP/1.1 ', LStr);
+  if LPos > 0 then
+    SendResponseStatus := StrToIntDef(Copy(LStr, LPos + 9, 3), 0);
+end;
+
+procedure TMockCallbacks.SendResponseV(AConn: Pointer;
+  const AHeaders: TBytes; AHdrLen: Integer;
+  const ABody: TBytes; ABodyLen: Integer);
+var
+  LStr: string;
+  LPos: Integer;
+  LLen: Integer;
+begin
+  LLen := AHdrLen;
+  if LLen = 0 then LLen := Length(AHeaders);
+  SendResponseData := AHeaders;
+  LStr := TEncoding.ASCII.GetString(AHeaders, 0, Min(LLen, 50));
   LPos := Pos('HTTP/1.1 ', LStr);
   if LPos > 0 then
     SendResponseStatus := StrToIntDef(Copy(LStr, LPos + 9, 3), 0);

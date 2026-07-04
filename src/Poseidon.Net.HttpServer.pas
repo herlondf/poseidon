@@ -357,6 +357,9 @@ type
     procedure PostRecv(AConn: Pointer);
     procedure CloseConn(AConn: Pointer);
     procedure SendResponse(AConn: Pointer; const AData: TBytes; AActualLen: Integer);
+    procedure SendResponseV(AConn: Pointer;
+      const AHeaders: TBytes; AHdrLen: Integer;
+      const ABody: TBytes; ABodyLen: Integer);
     procedure UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     procedure UpgradeToH2C(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     function  DispatchWSFrames(AConn: Pointer): Boolean;
@@ -387,6 +390,37 @@ procedure TServerDispatchAdapter.SendResponse(AConn: Pointer;
   const AData: TBytes; AActualLen: Integer);
 begin
   FServer._EncryptAndSend(AConn, AData, AActualLen);
+end;
+
+// #61: Vectored send — SSL falls back to concatenation, plain uses PostSendV
+procedure TServerDispatchAdapter.SendResponseV(AConn: Pointer;
+  const AHeaders: TBytes; AHdrLen: Integer;
+  const ABody: TBytes; ABodyLen: Integer);
+var
+  LConn:   TNativeConn;
+  LConcat: TBytes;
+  LHLen:   Integer;
+  LBLen:   Integer;
+  LTmp:    TBytes;
+begin
+  LConn := TNativeConn(AConn);
+  LHLen := AHdrLen;
+  if LHLen = 0 then LHLen := Length(AHeaders);
+  LBLen := ABodyLen;
+  if LBLen = 0 then LBLen := Length(ABody);
+
+  if LConn.SSLHandle <> nil then
+  begin
+    // SSL requires contiguous data — concatenate and encrypt
+    LConcat := TBufferPool.Acquire(LHLen + LBLen);
+    if LHLen > 0 then Move(AHeaders[0], LConcat[0], LHLen);
+    if LBLen > 0 then Move(ABody[0], LConcat[LHLen], LBLen);
+    LTmp := AHeaders;
+    TBufferPool.Release(LTmp);
+    FServer._EncryptAndSend(AConn, LConcat, LHLen + LBLen);
+  end
+  else
+    FServer.FIOBackend.PostSendV(AConn, AHeaders, LHLen, ABody, LBLen);
 end;
 
 procedure TServerDispatchAdapter.UpgradeToWS(AConn: Pointer;

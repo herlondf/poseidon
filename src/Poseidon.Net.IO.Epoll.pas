@@ -49,6 +49,9 @@ type
     procedure RegisterConn(AConn: Pointer);
     procedure PostRecv(AConn: Pointer);
     procedure PostSend(AConn: Pointer; const AData: TBytes; AActualLen: Integer);
+    procedure PostSendV(AConn: Pointer;
+      const AHeaders: TBytes; AHdrLen: Integer;
+      const ABody: TBytes; ABodyLen: Integer);
     procedure SocketClose(AConn: Pointer);
   end;
 
@@ -119,6 +122,16 @@ function _LinuxRecv(sockfd: Integer; buf: Pointer; len: NativeUInt; flags: Integ
   external 'libc.so.6' name 'recv';
 function _LinuxSend(sockfd: Integer; buf: Pointer; len: NativeUInt; flags: Integer): NativeInt; cdecl;
   external 'libc.so.6' name 'send';
+
+// #61: Vectored I/O
+type
+  iovec = record
+    iov_base: Pointer;
+    iov_len:  NativeUInt;
+  end;
+
+function _LinuxWritev(fd: Integer; iov: Pointer; iovcnt: Integer): NativeInt; cdecl;
+  external 'libc.so.6' name 'writev';
 
 // ---------------------------------------------------------------------------
 // TEpollBackend
@@ -324,6 +337,85 @@ begin
 
   LConn.PendingSend       := AData;
   LConn.PendingSendActual := AActualLen;
+  LConn.SentBytes         := 0;
+  _FlushSend(AConn);
+end;
+
+// #61: Vectored send — writev() headers+body in one syscall
+procedure TEpollBackend.PostSendV(AConn: Pointer;
+  const AHeaders: TBytes; AHdrLen: Integer;
+  const ABody: TBytes; ABodyLen: Integer);
+var
+  LConn:    TNativeConn absolute AConn;
+  LVec:     array[0..1] of iovec;
+  LCount:   Integer;
+  LN:       NativeInt;
+  LTotal:   Integer;
+  LHLen:    Integer;
+  LBLen:    Integer;
+  LConcat:  TBytes;
+  LTmpH:    TBytes;
+  LTmpB:    TBytes;
+begin
+  LHLen := AHdrLen;
+  if LHLen = 0 then LHLen := Length(AHeaders);
+  LBLen := ABodyLen;
+  if LBLen = 0 then LBLen := Length(ABody);
+  LTotal := LHLen + LBLen;
+
+  if LTotal = 0 then
+  begin
+    FCallbacks.OnSendComplete(AConn);
+    Exit;
+  end;
+
+  LCount := 0;
+  if LHLen > 0 then
+  begin
+    LVec[LCount].iov_base := @AHeaders[0];
+    LVec[LCount].iov_len  := LHLen;
+    Inc(LCount);
+  end;
+  if LBLen > 0 then
+  begin
+    LVec[LCount].iov_base := @ABody[0];
+    LVec[LCount].iov_len  := LBLen;
+    Inc(LCount);
+  end;
+
+  LN := _LinuxWritev(LConn.Socket, @LVec[0], LCount);
+  if LN = LTotal then
+  begin
+    LTmpH := AHeaders; TBufferPool.Release(LTmpH);
+    LTmpB := ABody;    TBufferPool.Release(LTmpB);
+    FCallbacks.OnSendComplete(AConn);
+    Exit;
+  end;
+
+  if (LN < 0) and (GetLastError <> EAGAIN) then
+  begin
+    LTmpH := AHeaders; TBufferPool.Release(LTmpH);
+    LTmpB := ABody;    TBufferPool.Release(LTmpB);
+    FCallbacks.OnConnError(AConn);
+    Exit;
+  end;
+  if LN < 0 then LN := 0;
+
+  LConcat := TBufferPool.Acquire(LTotal - Integer(LN));
+  if LN < LHLen then
+  begin
+    Move(AHeaders[LN], LConcat[0], LHLen - Integer(LN));
+    if LBLen > 0 then
+      Move(ABody[0], LConcat[LHLen - Integer(LN)], LBLen);
+  end
+  else if LTotal - Integer(LN) > 0 then
+    Move(ABody[Integer(LN) - LHLen], LConcat[0], LTotal - Integer(LN));
+
+  LTmpH := AHeaders; TBufferPool.Release(LTmpH);
+  LTmpB := ABody;    TBufferPool.Release(LTmpB);
+
+  LConn.PendingSend       := LConcat;
+  LConn.PendingSendActual := LTotal - Integer(LN);
   LConn.SentBytes         := 0;
   _FlushSend(AConn);
 end;
