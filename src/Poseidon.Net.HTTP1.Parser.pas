@@ -57,6 +57,36 @@ function DecodeHTTP1Chunked(
 
 implementation
 
+// ---------------------------------------------------------------------------
+// Byte classification lookup table (#59)
+//
+// Pre-computed flags per byte value — replaces per-byte comparisons in the
+// parsing hot loops with a single indexed read + bitmask test.
+// ---------------------------------------------------------------------------
+
+const
+  BF_CR    = $01;  // $0D
+  BF_LF    = $02;  // $0A
+  BF_SP    = $04;  // $20
+  BF_HT    = $08;  // $09
+  BF_COLON = $10;  // $3A
+  BF_QMARK = $20;  // $3F
+  BF_OWS   = $0C;  // SP or HT (BF_SP or BF_HT)
+
+var
+  GLUT: array[0..255] of Byte;
+
+procedure _InitLUT;
+begin
+  FillChar(GLUT, SizeOf(GLUT), 0);
+  GLUT[$0D] := BF_CR;
+  GLUT[$0A] := BF_LF;
+  GLUT[$20] := BF_SP;
+  GLUT[$09] := BF_HT;
+  GLUT[$3A] := BF_COLON;
+  GLUT[$3F] := BF_QMARK;
+end;
+
 function DecodeHTTP1Chunked(ABuf: PByte; ABufLen, AMaxBodySize: Integer;
   out ABody: TBytes; out AConsumed: Integer; out AMalformed: Boolean): Boolean;
 var
@@ -274,13 +304,23 @@ begin
   begin
     if LHdrCount >= MAX_HEADER_COUNT then Break;
 
-    LLineEnd := -1;
+    // Single-pass scan (#59): find CRLF (line end) and colon (name/value
+    // delimiter) in one loop using the LUT, eliminating two separate scans.
+    LLineEnd  := -1;
+    LColonPos := -1;
     for I := LLineStart to LHdrEnd do
-      if (ABuf[I] = CR) and (ABuf[I+1] = LF) then
-      begin
-        LLineEnd := I;
-        Break;
+    begin
+      case GLUT[ABuf[I]] of
+        BF_COLON:
+          if LColonPos < 0 then LColonPos := I;
+        BF_CR:
+          if ABuf[I+1] = LF then
+          begin
+            LLineEnd := I;
+            Break;
+          end;
       end;
+    end;
     if LLineEnd < 0 then Break;
     if LLineEnd = LLineStart then  // empty line — skip
     begin
@@ -288,19 +328,16 @@ begin
       Continue;
     end;
 
-    LColonPos := -1;
-    for I := LLineStart to LLineEnd - 1 do
-      if ABuf[I] = Byte(':') then begin LColonPos := I; Break; end;
     if LColonPos < 0 then
     begin
       LLineStart := LLineEnd + 2;
       Continue;
     end;
 
-    // Skip OWS after colon
+    // Skip OWS after colon using LUT
     LValStart := LColonPos + 1;
     while (LValStart < LLineEnd) and
-          ((ABuf[LValStart] = SP) or (ABuf[LValStart] = HT)) do
+          ((GLUT[ABuf[LValStart]] and BF_OWS) <> 0) do
       Inc(LValStart);
 
     LName  := BufToStr(LLineStart, LColonPos - LLineStart);
@@ -360,5 +397,8 @@ begin
   AConsumed := LConsumed;
   Result    := True;
 end;
+
+initialization
+  _InitLUT;
 
 end.
