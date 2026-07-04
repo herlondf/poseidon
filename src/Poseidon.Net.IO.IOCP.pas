@@ -33,7 +33,8 @@ type
     destructor  Destroy; override;
     // IIOBackend
     procedure StartListening(const AHost: string; APort: Integer;
-      AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks);
+      AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
+      AAcceptThreads: Integer = 1);
     procedure StopAccept;
     procedure ShutdownConn(AConn: Pointer);
     procedure SignalWorkers;
@@ -124,7 +125,8 @@ begin
 end;
 
 procedure TIOCPBackend.StartListening(const AHost: string; APort: Integer;
-  AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks);
+  AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
+  AAcceptThreads: Integer);
 var
   LAddr:  TSockAddrIn;
   LOne:   Integer;

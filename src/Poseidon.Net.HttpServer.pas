@@ -73,6 +73,7 @@ type
     FSecureHeadersEnabled:   Boolean;  // A-1: inject X-Content-Type-Options etc.
     FServerBanner:    string;          // A-2: Server: header value; '' = omit
     FTCPFastOpen:     Boolean;         // feat: TCP_FASTOPEN — opt-in; graceful no-op on unsupported OS
+    FPerCoreAccept:   Boolean;         // #58: per-core accept threads with SO_REUSEPORT
     FProxyProtocol:     TProxyProtocolMode; // PP v1/v2/auto; default ppDisabled
     FOnH2Push:          TOnH2Push; // HTTP/2 server push callback; nil = no push
     // R-1: platform IO backend — holds IOCP/epoll fd, listen socket, workers.
@@ -200,6 +201,11 @@ type
     // Requires Windows 10 1607+ or Linux kernel 3.7+ with tcp_fastopen enabled.
     // Silently ignored when the OS does not support it.
     property TCPFastOpen: Boolean read FTCPFastOpen write FTCPFastOpen;
+    // Per-core accept (#58): creates one listen socket per CPU core with
+    // SO_REUSEPORT (Linux). The kernel distributes incoming connections
+    // across sockets via source IP/port hash. Default False (single accept).
+    // On Windows: ignored (IOCP handles distribution internally).
+    property PerCoreAccept: Boolean read FPerCoreAccept write FPerCoreAccept;
     // Proxy Protocol: ppDisabled (default) disables PP processing.
     // ppV1/ppV2: enforce a specific version. ppAuto: detect by signature.
     // Enable only when the server receives connections exclusively from a
@@ -893,6 +899,7 @@ begin
   FSecureHeadersEnabled    := False;               // A-1: opt-in
   FServerBanner            := 'Poseidon/1.0';      // A-2
   FTCPFastOpen             := False;               // TCP_FASTOPEN: opt-in
+  FPerCoreAccept           := False;               // #58: per-core accept: opt-in
   FProxyProtocol           := ppDisabled;
   FPerIPCount              := TDictionary<string, Integer>.Create;
   FWSHandlers              := TDictionary<string, TWSMessageCallback>.Create;
@@ -1290,6 +1297,7 @@ var
   LIOWorkers:  Integer;
   LMinReq:     Integer;
   LMaxReq:     Integer;
+  LAcceptN:    Integer;
 begin
   if FActive then
     raise Exception.Create('TPoseidonNativeServer: already listening');
@@ -1304,8 +1312,13 @@ begin
   // IO workers no longer run blocking handlers, so the cap stays low safely.
   LIOWorkers := Min(Max(WORKER_COUNT_MIN, TThread.ProcessorCount * 2),
                     WORKER_COUNT_MAX);
+  // #58: per-core accept — one listen socket + accept thread per CPU core
+  if FPerCoreAccept then
+    LAcceptN := TThread.ProcessorCount
+  else
+    LAcceptN := 1;
   FIOBackend.StartListening(AHost, APort, LIOWorkers, FTCPFastOpen,
-    TServerIOAdapter.Create(Self));
+    TServerIOAdapter.Create(Self), LAcceptN);
 
   // Request tier: elastic pool — runs blocking handlers (DB, ACBr, etc.).
   // Starts with LMinReq threads (fast debugger startup), grows to LMaxReq.

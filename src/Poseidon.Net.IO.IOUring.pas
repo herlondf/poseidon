@@ -65,11 +65,11 @@ type
     FPCQMask:      PUInt32;
     FPCQEs:        Pointer;   // base of CQE array
     // threads
-    FAcceptThread: TThread;
-    FCompThread:   TThread;
+    FAcceptThreads: TArray<TThread>;   // per-core accept threads (#58)
+    FCompThread:    TThread;
     // infrastructure
-    FCallbacks:    IIOCallbacks;
-    FListenSocket: Integer;
+    FCallbacks:     IIOCallbacks;
+    FListenSockets: TArray<Integer>;   // per-core listen sockets (#58)
     FSQLock:       TCriticalSection;
     FShutdown:     Boolean;
     // Pre-allocated recv context pool (#56) — eliminates New/Dispose per recv
@@ -79,7 +79,7 @@ type
     FRecvPoolLock: TCriticalSection;    // protects free-list (separate from FSQLock)
     FRecvPoolBase: PByte;              // cached base address for index calculation
     // helpers
-    procedure _Accept;
+    procedure _AcceptOn(AListenFd: Integer);
     procedure _CompletionLoop;
     function  _SubmitSQE(AOpcode: Byte; AFd: Integer; ABuf: Pointer;
       ALen: UInt32; AUserData: UInt64): Boolean;
@@ -92,7 +92,8 @@ type
     destructor  Destroy; override;
     // IIOBackend
     procedure StartListening(const AHost: string; APort: Integer;
-      AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks);
+      AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
+      AAcceptThreads: Integer = 1);
     procedure StopAccept;
     procedure ShutdownConn(AConn: Pointer);
     procedure SignalWorkers;
@@ -351,7 +352,6 @@ begin
   end;
 
   FRingFd       := -1;
-  FListenSocket := -1;
   FSQLock       := TCriticalSection.Create;
   FRecvPoolLock := TCriticalSection.Create;
   FShutdown     := False;
@@ -382,40 +382,54 @@ end;
 // ---------------------------------------------------------------------------
 
 procedure TIOUringBackend.StartListening(const AHost: string; APort: Integer;
-  AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks);
+  AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
+  AAcceptThreads: Integer);
+
+  function CreateListenSocket: Integer;
+  var
+    LAddr: sockaddr_in;
+    LOne:  Integer;
+  begin
+    Result := _LinuxSocket(AF_INET, SOCK_STREAM or SOCK_CLOEXEC, 0);
+    if Result < 0 then
+      raise Exception.Create('socket() failed: ' + IntToStr(GetLastError));
+
+    LOne := 1;
+    _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEADDR, @LOne, SizeOf(LOne));
+    _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEPORT, @LOne, SizeOf(LOne));
+    if AFastOpen then
+      _LinuxSetsockopt(Result, IPPROTO_TCP, 23 {TCP_FASTOPEN}, @LOne, SizeOf(LOne));
+
+    FillChar(LAddr, SizeOf(LAddr), 0);
+    LAddr.sin_family := AF_INET;
+    LAddr.sin_port   := htons(APort);
+    if (AHost = '0.0.0.0') or (AHost = '') then
+      LAddr.sin_addr.s_addr := INADDR_ANY
+    else
+      LAddr.sin_addr.s_addr := inet_addr(MarshaledAString(AnsiString(AHost)));
+
+    if _LinuxBind(Result, @LAddr, SizeOf(LAddr)) < 0 then
+      raise Exception.Create('bind() failed: ' + IntToStr(GetLastError));
+    if _LinuxListen(Result, SOMAXCONN) < 0 then
+      raise Exception.Create('listen() failed: ' + IntToStr(GetLastError));
+  end;
+
 var
   LParams:   TIOUringParams;
-  LAddr:     sockaddr_in;
   LOne, I:   Integer;
   LSQSize:   NativeUInt;
   LCQSize:   NativeUInt;
+  LAcceptN:  Integer;
 begin
   FCallbacks := ACallbacks;
   FShutdown  := False;
+  LAcceptN   := AAcceptThreads;
+  if LAcceptN < 1 then LAcceptN := 1;
 
-  // --- Listen socket (identical to TEpollBackend) ---
-  FListenSocket := _LinuxSocket(AF_INET, SOCK_STREAM or SOCK_CLOEXEC, 0);
-  if FListenSocket < 0 then
-    raise Exception.Create('socket() failed: ' + IntToStr(GetLastError));
-
-  LOne := 1;
-  _LinuxSetsockopt(FListenSocket, SOL_SOCKET, SO_REUSEADDR, @LOne, SizeOf(LOne));
-  _LinuxSetsockopt(FListenSocket, SOL_SOCKET, SO_REUSEPORT, @LOne, SizeOf(LOne));
-  if AFastOpen then
-    _LinuxSetsockopt(FListenSocket, IPPROTO_TCP, 23 {TCP_FASTOPEN}, @LOne, SizeOf(LOne));
-
-  FillChar(LAddr, SizeOf(LAddr), 0);
-  LAddr.sin_family := AF_INET;
-  LAddr.sin_port   := htons(APort);
-  if (AHost = '0.0.0.0') or (AHost = '') then
-    LAddr.sin_addr.s_addr := INADDR_ANY
-  else
-    LAddr.sin_addr.s_addr := inet_addr(MarshaledAString(AnsiString(AHost)));
-
-  if _LinuxBind(FListenSocket, @LAddr, SizeOf(LAddr)) < 0 then
-    raise Exception.Create('bind() failed: ' + IntToStr(GetLastError));
-  if _LinuxListen(FListenSocket, SOMAXCONN) < 0 then
-    raise Exception.Create('listen() failed: ' + IntToStr(GetLastError));
+  // --- Per-core listen sockets (#58) ---
+  SetLength(FListenSockets, LAcceptN);
+  for I := 0 to LAcceptN - 1 do
+    FListenSockets[I] := CreateListenSocket;
 
   // --- io_uring ring ---
   FillChar(LParams, SizeOf(LParams), 0);
@@ -477,21 +491,37 @@ begin
   FCompThread.FreeOnTerminate := False;
   FCompThread.Start;
 
-  // --- Accept thread ---
-  FAcceptThread := TThread.CreateAnonymousThread(procedure begin _Accept; end);
-  FAcceptThread.FreeOnTerminate := False;
-  FAcceptThread.Start;
+  // --- Per-core accept threads (#58) ---
+  SetLength(FAcceptThreads, LAcceptN);
+  for I := 0 to LAcceptN - 1 do
+  begin
+    var LFd := FListenSockets[I];
+    FAcceptThreads[I] := TThread.CreateAnonymousThread(
+      procedure begin _AcceptOn(LFd); end);
+    FAcceptThreads[I].FreeOnTerminate := False;
+    FAcceptThreads[I].Start;
+  end;
 end;
 
 procedure TIOUringBackend.StopAccept;
+var
+  I: Integer;
 begin
-  _LinuxClose(FListenSocket);
-  FListenSocket := -1;
-  if FAcceptThread <> nil then
+  for I := 0 to High(FListenSockets) do
   begin
-    FAcceptThread.WaitFor;
-    FreeAndNil(FAcceptThread);
+    if FListenSockets[I] >= 0 then
+      _LinuxClose(FListenSockets[I]);
+    FListenSockets[I] := -1;
   end;
+  for I := 0 to High(FAcceptThreads) do
+  begin
+    if FAcceptThreads[I] <> nil then
+    begin
+      FAcceptThreads[I].WaitFor;
+      FreeAndNil(FAcceptThreads[I]);
+    end;
+  end;
+  SetLength(FAcceptThreads, 0);
 end;
 
 procedure TIOUringBackend.ShutdownConn(AConn: Pointer);
@@ -832,7 +862,7 @@ end;
 // Accept thread — plain accept4() loop, identical to TEpollBackend._Accept
 // ---------------------------------------------------------------------------
 
-procedure TIOUringBackend._Accept;
+procedure TIOUringBackend._AcceptOn(AListenFd: Integer);
 var
   LFd:      Integer;
   LAddr:    sockaddr_in;
@@ -844,7 +874,7 @@ begin
   begin
     FillChar(LAddr, SizeOf(LAddr), 0);
     LAddrLen := SizeOf(LAddr);
-    LFd := _LinuxAccept4(FListenSocket, @LAddr, @LAddrLen,
+    LFd := _LinuxAccept4(AListenFd, @LAddr, @LAddrLen,
       SOCK_NONBLOCK or SOCK_CLOEXEC);
     if LFd < 0 then
     begin

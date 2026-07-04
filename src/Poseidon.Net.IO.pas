@@ -31,9 +31,12 @@ type
     ['{B2C3D4E5-F6A7-8901-BCDE-F12345678901}']
     // --- Lifecycle (call in order during Listen / Stop) ---
 
-    // Sets up IO subsystem, listen socket, workers, and accept thread.
+    // Sets up IO subsystem, listen socket(s), workers, and accept thread(s).
+    // AAcceptThreads > 1 creates per-core accept with SO_REUSEPORT (Linux)
+    // or multiple accept threads on shared socket (Windows).
     procedure StartListening(const AHost: string; APort: Integer;
-      AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks);
+      AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
+      AAcceptThreads: Integer = 1);
 
     // Closes listen socket; accept thread exits naturally on next syscall.
     procedure StopAccept;
