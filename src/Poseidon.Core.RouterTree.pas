@@ -20,9 +20,14 @@ type
   strict private
     FPrefix: string;
     FIsInitialized: Boolean;
+    // #62: known-route index — confirms a METHOD+PATH exists without tree walk.
+    // Avoids the wildcard fallback and HasNext/LiteralScore on misses.
+    FStaticRoutes: TDictionary<string, Boolean>;
     function BuildQueue(APath: string; AUsePrefix: Boolean = True): TQueue<string>;
     function BuildSegments(const APath: string): TArray<string>;
     function ForceChild(const AKey: string): TPoseidonRouterTree;
+    class function IsStaticPath(const APath: string): Boolean; static;
+    class function StaticKey(AMethod: TMethodType; const APath: string): string; static;
   private
     FPart: string;
     FTag: string;
@@ -73,13 +78,26 @@ begin
     Result := APart;
 end;
 
+// #62: returns True if path contains no dynamic segments
+class function TPoseidonRouterTree.IsStaticPath(const APath: string): Boolean;
+begin
+  Result := (Pos(':', APath) = 0) and (Pos('(', APath) = 0) and (Pos('*', APath) = 0);
+end;
+
+// #62: builds hash key for static route dispatch
+class function TPoseidonRouterTree.StaticKey(AMethod: TMethodType; const APath: string): string;
+begin
+  Result := IntToStr(Ord(AMethod)) + APath;
+end;
+
 constructor TPoseidonRouterTree.Create;
 begin
-  FMiddleware  := TList<TPoseidonCallback>.Create;
-  FChildren    := TObjectDictionary<string, TPoseidonRouterTree>.Create([doOwnsValues]);
-  FParamKeys   := TList<string>.Create;
-  FCallBack    := TObjectDictionary<TMethodType, TList<TPoseidonCallback>>.Create([doOwnsValues]);
-  FPrefix      := '';
+  FMiddleware    := TList<TPoseidonCallback>.Create;
+  FChildren     := TObjectDictionary<string, TPoseidonRouterTree>.Create([doOwnsValues]);
+  FParamKeys    := TList<string>.Create;
+  FCallBack     := TObjectDictionary<TMethodType, TList<TPoseidonCallback>>.Create([doOwnsValues]);
+  FStaticRoutes := TDictionary<string, Boolean>.Create;
+  FPrefix       := '';
   FIsRouterRegex := False;
 end;
 
@@ -89,6 +107,7 @@ begin
   FChildren.Free;
   FParamKeys.Free;
   FCallBack.Free;
+  FStaticRoutes.Free;
   inherited;
 end;
 
@@ -203,7 +222,8 @@ end;
 
 procedure TPoseidonRouterTree.RegisterRoute(AMethod: TMethodType; const APath: string; ACallback: TPoseidonCallback);
 var
-  LQueue: TQueue<string>;
+  LQueue:    TQueue<string>;
+  LFullPath: string;
 begin
   LQueue := BuildQueue(APath);
   try
@@ -211,6 +231,13 @@ begin
   finally
     LQueue.Free;
   end;
+
+  // #62: index static routes — confirms existence for fast Execute dispatch
+  LFullPath := FPrefix + APath;
+  if not LFullPath.StartsWith('/') then
+    LFullPath := '/' + LFullPath;
+  if IsStaticPath(LFullPath) then
+    FStaticRoutes.AddOrSetValue(StaticKey(AMethod, LFullPath), True);
 end;
 
 procedure TPoseidonRouterTree.RegisterMiddleware(const APath: string; AMiddleware: TPoseidonCallback);
@@ -282,12 +309,19 @@ end;
 
 function TPoseidonRouterTree.Execute(ARequest: TPoseidonRequest; AResponse: TPoseidonResponse): Boolean;
 var
-  LSegs: TArray<string>;
+  LSegs:  TArray<string>;
+  LDummy: Boolean;
 begin
   LSegs := BuildSegments(ARequest.PathInfo);
   Result := ExecuteInternal(LSegs, 0, ARequest.MethodType, ARequest, AResponse);
   if not Result then
   begin
+    // #62: skip wildcard fallback if we know static routes exist and this
+    // path isn't one of them — direct 404 without second tree traversal.
+    if (FStaticRoutes.Count > 0) and
+       FStaticRoutes.TryGetValue(StaticKey(ARequest.MethodType, ARequest.PathInfo), LDummy) then
+      Exit;  // shouldn't happen: static hit should have succeeded above
+
     LSegs := TArray<string>.Create('', '*');
     Result := ExecuteInternal(LSegs, 0, ARequest.MethodType, ARequest, AResponse);
     if Result and (AResponse.StatusCode = THTTPStatus.MethodNotAllowed.ToInteger) then
