@@ -7,6 +7,11 @@ unit Poseidon.Net.Pool.Buffer;
 //   Tier 1 —  64 KB ( 64 slots) — medium requests / uploads
 //   Tier 2 — 512 KB ( 16 slots) — large responses / streaming
 //
+// v2: Thread-local fast path per tier.  Each worker thread keeps a small cache
+//     (TL_TIER*_MAX) per tier — Acquire/Release hit this cache first with ZERO
+//     locks.  Only when the local cache is empty (Acquire) or full (Release)
+//     does the code fall back to the global pool under TMonitor.
+//
 // Acquire(ASize) returns the smallest tier whose slot size >= ASize.
 // Buffers larger than 512 KB bypass the pool (heap alloc/free).
 // Release detects the tier by buffer length and returns it to the correct stack.
@@ -24,6 +29,11 @@ const
   POOL_TIER0_MAX   = 256;
   POOL_TIER1_MAX   =  64;
   POOL_TIER2_MAX   =  16;
+
+  // Thread-local cache sizes per tier (small — avoids hoarding buffers)
+  TL_TIER0_MAX     =   8;
+  TL_TIER1_MAX     =   4;
+  TL_TIER2_MAX     =   2;
 
   // Backward-compat alias
   POOL_BUF_SIZE    = POOL_TIER0_SIZE;
@@ -44,14 +54,72 @@ uses
   System.SyncObjs,
   System.Generics.Collections;
 
+// ---------------------------------------------------------------------------
+// Thread-local cache — one instance per thread, lazily created
+// ---------------------------------------------------------------------------
+
+type
+  TThreadLocalBufCache = class
+    FTier0: array[0..TL_TIER0_MAX - 1] of TBytes;
+    FTier0Count: Integer;
+    FTier1: array[0..TL_TIER1_MAX - 1] of TBytes;
+    FTier1Count: Integer;
+    FTier2: array[0..TL_TIER2_MAX - 1] of TBytes;
+    FTier2Count: Integer;
+  end;
+
+threadvar
+  GTLCache: TThreadLocalBufCache;
+
+function GetTLCache: TThreadLocalBufCache; inline;
+begin
+  Result := GTLCache;
+  if Result = nil then
+  begin
+    Result := TThreadLocalBufCache.Create;
+    GTLCache := Result;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+// Global pool (fallback when thread-local cache misses)
+// ---------------------------------------------------------------------------
+
 var
   GTier0: TStack<TBytes>;
   GTier1: TStack<TBytes>;
   GTier2: TStack<TBytes>;
 
-class function TBufferPool.Acquire(ASize: Integer): TBytes;
+// ---------------------------------------------------------------------------
+// Acquire — thread-local first, then global, then heap
+// ---------------------------------------------------------------------------
 
-  function PopOrAlloc(AStack: TStack<TBytes>; ABufSize: Integer): TBytes;
+class function TBufferPool.Acquire(ASize: Integer): TBytes;
+var
+  LCache: TThreadLocalBufCache;
+
+  function TLPop0: TBytes; inline;
+  begin
+    Dec(LCache.FTier0Count);
+    Result := LCache.FTier0[LCache.FTier0Count];
+    LCache.FTier0[LCache.FTier0Count] := nil;
+  end;
+
+  function TLPop1: TBytes; inline;
+  begin
+    Dec(LCache.FTier1Count);
+    Result := LCache.FTier1[LCache.FTier1Count];
+    LCache.FTier1[LCache.FTier1Count] := nil;
+  end;
+
+  function TLPop2: TBytes; inline;
+  begin
+    Dec(LCache.FTier2Count);
+    Result := LCache.FTier2[LCache.FTier2Count];
+    LCache.FTier2[LCache.FTier2Count] := nil;
+  end;
+
+  function GlobalPopOrAlloc(AStack: TStack<TBytes>; ABufSize: Integer): TBytes;
   var
     LHave: Boolean;
   begin
@@ -68,22 +136,43 @@ class function TBufferPool.Acquire(ASize: Integer): TBytes;
   end;
 
 begin
+  LCache := GetTLCache;
+
   if ASize <= POOL_TIER0_SIZE then
-    Result := PopOrAlloc(GTier0, POOL_TIER0_SIZE)
+  begin
+    if LCache.FTier0Count > 0 then
+      Result := TLPop0
+    else
+      Result := GlobalPopOrAlloc(GTier0, POOL_TIER0_SIZE);
+  end
   else if ASize <= POOL_TIER1_SIZE then
-    Result := PopOrAlloc(GTier1, POOL_TIER1_SIZE)
+  begin
+    if LCache.FTier1Count > 0 then
+      Result := TLPop1
+    else
+      Result := GlobalPopOrAlloc(GTier1, POOL_TIER1_SIZE);
+  end
   else if ASize <= POOL_TIER2_SIZE then
-    Result := PopOrAlloc(GTier2, POOL_TIER2_SIZE)
+  begin
+    if LCache.FTier2Count > 0 then
+      Result := TLPop2
+    else
+      Result := GlobalPopOrAlloc(GTier2, POOL_TIER2_SIZE);
+  end
   else
-    // Oversized: allocate directly, bypassing the pool
     SetLength(Result, ASize);
 end;
 
+// ---------------------------------------------------------------------------
+// Release — thread-local first, overflow goes to global
+// ---------------------------------------------------------------------------
+
 class procedure TBufferPool.Release(var ABuf: TBytes);
 var
-  LLen: Integer;
+  LLen:   Integer;
+  LCache: TThreadLocalBufCache;
 
-  procedure PushIfRoom(AStack: TStack<TBytes>; AMax: Integer);
+  procedure GlobalPushIfRoom(AStack: TStack<TBytes>; AMax: Integer);
   begin
     TMonitor.Enter(AStack);
     try
@@ -95,12 +184,38 @@ var
 
 begin
   LLen := Length(ABuf);
+  LCache := GetTLCache;
+
   if LLen = POOL_TIER0_SIZE then
-    PushIfRoom(GTier0, POOL_TIER0_MAX)
+  begin
+    if LCache.FTier0Count < TL_TIER0_MAX then
+    begin
+      LCache.FTier0[LCache.FTier0Count] := ABuf;
+      Inc(LCache.FTier0Count);
+    end
+    else
+      GlobalPushIfRoom(GTier0, POOL_TIER0_MAX);
+  end
   else if LLen = POOL_TIER1_SIZE then
-    PushIfRoom(GTier1, POOL_TIER1_MAX)
+  begin
+    if LCache.FTier1Count < TL_TIER1_MAX then
+    begin
+      LCache.FTier1[LCache.FTier1Count] := ABuf;
+      Inc(LCache.FTier1Count);
+    end
+    else
+      GlobalPushIfRoom(GTier1, POOL_TIER1_MAX);
+  end
   else if LLen = POOL_TIER2_SIZE then
-    PushIfRoom(GTier2, POOL_TIER2_MAX);
+  begin
+    if LCache.FTier2Count < TL_TIER2_MAX then
+    begin
+      LCache.FTier2[LCache.FTier2Count] := ABuf;
+      Inc(LCache.FTier2Count);
+    end
+    else
+      GlobalPushIfRoom(GTier2, POOL_TIER2_MAX);
+  end;
   // Oversized or unrecognised: let the TBytes ref-count free it naturally.
   ABuf := nil;
 end;
