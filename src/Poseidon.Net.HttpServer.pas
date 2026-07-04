@@ -768,7 +768,7 @@ begin
   // Eliminates thread transition overhead (~50-100us per request).
   if FSyncDispatch then
   begin
-    TNativeConn(AConn).LastActivity := Now;
+    TNativeConn(AConn).LastActivityTick := TThread.GetTickCount64;
     FDispatcher.Dispatch(AConn, LCfg);
     Exit;
   end;
@@ -791,7 +791,7 @@ begin
     procedure
     begin
       try
-        TNativeConn(AConn).LastActivity := Now;  // reset idle-clock at dequeue time
+        TNativeConn(AConn).LastActivityTick := TThread.GetTickCount64;  // reset idle-clock at dequeue time
         FDispatcher.Dispatch(AConn, LCfg);
       finally
         TInterlocked.Decrement(FInFlightCount);
@@ -808,7 +808,7 @@ var
   LAborted: Boolean;
 begin
   try
-    LConn.LastActivity := Now;   // touched on any inbound bytes — gates idle-sweep
+    LConn.LastActivityTick := TThread.GetTickCount64;  // vDSO on Linux — no syscall
     LAborted := False;
     if LConn.SSLHandle <> nil then
       _ProcessRecvSSL(AConn, ABuf, ALen, LAborted)
@@ -1262,7 +1262,7 @@ var
   LSnap:  TArray<Pointer>;
   I:      Integer;
   LConn:  TNativeConn;
-  LNow:   TDateTime;
+  LNowTick: UInt64;
   LIdle:  Int64;
 begin
   while FActive do
@@ -1285,17 +1285,14 @@ begin
       FConnLock.Leave;
     end;
 
-    LNow := Now;
+    LNowTick := TThread.GetTickCount64;
     for I := 0 to High(LSnap) do
     begin
       LConn := TNativeConn(LSnap[I]);
       try
-        // Skip connections currently being handled by the elastic pool — their
-        // LastActivity reflects when the request arrived, not when processing
-        // started.  Closing a socket while a pool worker holds a blocking DB
-        // call would cause the subsequent WSASend to fail and lose the response.
+        // Skip connections currently being handled by the elastic pool
         if TInterlocked.Add(LConn.InFlightPool, 0) > 0 then Continue;
-        LIdle := MilliSecondsBetween(LNow, LConn.LastActivity);
+        LIdle := Integer(LNowTick - LConn.LastActivityTick);
         if LIdle > FIdleTimeoutMs then
         begin
           _Log(llError, '[sweep] idle close: ' + LConn.RemoteAddr +

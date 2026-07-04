@@ -17,6 +17,7 @@ interface
 
 uses
   System.SysUtils,
+  System.Classes,
   System.SyncObjs,
 {$IFDEF MSWINDOWS}
   Winapi.Winsock2,
@@ -43,7 +44,7 @@ type
     AccumBuf:      TBytes;
     AccumLen:      Integer;
     KeepAlive:     Boolean;
-    LastActivity:  TDateTime;    // updated on every _ProcessRecv — drives idle-timeout
+    LastActivityTick: UInt64;    // TThread.GetTickCount64 — drives idle-timeout
     InFlightPool:  Integer;      // atomic counter: >0 while pool lambdas hold this connection; idle-sweep skips it
     SSLHandle:     Pointer;    // SSL* (nil when plain HTTP)
     SSLReadBio:    Pointer;    // BIO* — encrypted bytes from network
@@ -98,7 +99,7 @@ begin
   AccumBuf     := TBufferPool.Acquire;  // pooled 8 KB
   AccumLen     := 0;
   KeepAlive    := False;
-  LastActivity := Now;
+  LastActivityTick := TThread.GetTickCount64;
   InFlightPool := 0;
   SSLHandle    := nil;
   SSLReadBio   := nil;
