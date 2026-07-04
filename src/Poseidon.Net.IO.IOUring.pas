@@ -72,6 +72,8 @@ type
     FListenSockets: TArray<Integer>;   // per-core listen sockets (#58)
     FSQLock:       TCriticalSection;
     FShutdown:     Boolean;
+    FSQPoll:       Boolean;            // #60: kernel poll thread active
+    FPSQFlags:     PUInt32;            // #60: pointer to sq_off.flags for NEED_WAKEUP check
     // Pre-allocated recv context pool (#56) — eliminates New/Dispose per recv
     FRecvCtxPool:  Pointer;             // contiguous block: RECV_POOL_SIZE × SizeOf(TRecvCtx)
     FRecvFreeIdx:  array of UInt16;     // free-list stack of pool indices
@@ -87,6 +89,7 @@ type
     procedure _ResubmitSend(AConn: TNativeConn);
     function  _RecvPoolAcquire: PRecvCtx;
     procedure _RecvPoolRelease(ACtx: PRecvCtx);
+    procedure _NotifyKernel; inline;  // #60: io_uring_enter or SQPOLL wakeup
   public
     constructor Create;
     destructor  Destroy; override;
@@ -117,7 +120,14 @@ const
   NR_IO_URING_REGISTER = NativeInt(427);
 
   // io_uring_enter flags
-  IORING_ENTER_GETEVENTS = UInt32(1);
+  IORING_ENTER_GETEVENTS  = UInt32(1);
+  IORING_ENTER_SQ_WAKEUP  = UInt32(2);   // #60: wake up idle SQPOLL thread
+
+  // io_uring_setup flags
+  IORING_SETUP_SQPOLL     = UInt32(2);   // #60: kernel-side SQ polling thread
+
+  // SQ ring flags (read from sq_off.flags at runtime)
+  IORING_SQ_NEED_WAKEUP   = UInt32(1);   // #60: SQPOLL thread is idle, need wakeup
 
   // io_uring feature flags (returned in params.features)
   IORING_FEAT_SINGLE_MMAP = UInt32($0001);
@@ -432,8 +442,20 @@ begin
     FListenSockets[I] := CreateListenSocket;
 
   // --- io_uring ring ---
+  // #60: try SQPOLL first (kernel 5.11+ or CAP_SYS_NICE); fall back silently
   FillChar(LParams, SizeOf(LParams), 0);
+  LParams.flags          := IORING_SETUP_SQPOLL;
+  LParams.sq_thread_idle := 10000;  // 10ms idle before kernel poller sleeps
   FRingFd := _io_uring_setup(RING_ENTRIES, @LParams);
+  if FRingFd >= 0 then
+    FSQPoll := True
+  else
+  begin
+    // SQPOLL not available — normal mode
+    FSQPoll := False;
+    FillChar(LParams, SizeOf(LParams), 0);
+    FRingFd := _io_uring_setup(RING_ENTRIES, @LParams);
+  end;
   if FRingFd < 0 then
     raise Exception.CreateFmt('io_uring_setup failed (errno %d)', [GetLastError]);
 
@@ -474,6 +496,7 @@ begin
   FPSQHead  := PUInt32(PByte(FSQRing) + LParams.sq_off.head);
   FPSQTail  := PUInt32(PByte(FSQRing) + LParams.sq_off.tail);
   FPSQMask  := PUInt32(PByte(FSQRing) + LParams.sq_off.ring_mask);
+  FPSQFlags := PUInt32(PByte(FSQRing) + LParams.sq_off.flags);  // #60: NEED_WAKEUP
 
   FPCQHead  := PUInt32(PByte(FCQRing) + LParams.cq_off.head);
   FPCQTail  := PUInt32(PByte(FCQRing) + LParams.cq_off.tail);
@@ -605,7 +628,7 @@ begin
       FCallbacks.OnConnError(AConn);
       Exit;
     end;
-    _io_uring_enter(FRingFd, 1, 0, 0);
+    _NotifyKernel;
   finally
     FSQLock.Release;
   end;
@@ -689,6 +712,25 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
+// #60: Notify kernel about new SQEs.  In normal mode, calls io_uring_enter
+// with to_submit=1.  In SQPOLL mode, the kernel poller picks up SQEs
+// automatically; we only call io_uring_enter if it went idle (NEED_WAKEUP).
+// ---------------------------------------------------------------------------
+
+procedure TIOUringBackend._NotifyKernel;
+begin
+  if FSQPoll then
+  begin
+    // Kernel poller is active — only wake it if it went idle
+    if (FPSQFlags <> nil) and
+       ((FPSQFlags^ and IORING_SQ_NEED_WAKEUP) <> 0) then
+      _io_uring_enter(FRingFd, 0, 0, IORING_ENTER_SQ_WAKEUP);
+  end
+  else
+    _io_uring_enter(FRingFd, 1, 0, 0);
+end;
+
+// ---------------------------------------------------------------------------
 // Internal: SQE submission — MUST be called under FSQLock
 // ---------------------------------------------------------------------------
 
@@ -746,7 +788,7 @@ begin
       FCallbacks.OnConnError(AConn);
       Exit;
     end;
-    _io_uring_enter(FRingFd, 1, 0, 0);
+    _NotifyKernel;
   finally
     FSQLock.Release;
   end;
