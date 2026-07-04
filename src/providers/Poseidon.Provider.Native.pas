@@ -43,6 +43,10 @@ type
     class property Host:      string  read FHost      write FHost;
     class property IsRunning: Boolean read FRunning;
 
+    // v2-perf: dispatch on IO thread, skip worker pool.
+    // Only for non-blocking handlers. Call before Listen().
+    class procedure EnableSyncDispatch; static;
+
     class procedure Listen; overload; override;
     class procedure Listen(APort: Integer; const AHost: string = DEFAULT_HOST;
       AOnListen: TProc = nil; AOnStop: TProc = nil); reintroduce; overload; static;
@@ -238,6 +242,13 @@ class procedure TPoseidonProviderNative.Listen(APort: Integer;
   AOnListen, AOnStop: TProc);
 begin
   Listen(APort, DEFAULT_HOST, AOnListen, AOnStop);
+end;
+
+class procedure TPoseidonProviderNative.EnableSyncDispatch;
+begin
+  if FServer = nil then
+    FServer := TPoseidonNativeServer.Create;
+  FServer.SyncDispatch := True;
 end;
 
 class procedure TPoseidonProviderNative.StopListen;

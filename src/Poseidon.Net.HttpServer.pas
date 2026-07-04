@@ -74,6 +74,7 @@ type
     FServerBanner:    string;          // A-2: Server: header value; '' = omit
     FTCPFastOpen:     Boolean;         // feat: TCP_FASTOPEN — opt-in; graceful no-op on unsupported OS
     FPerCoreAccept:   Boolean;         // #58: per-core accept threads with SO_REUSEPORT
+    FSyncDispatch:    Boolean;         // v2-perf: dispatch on IO thread (skip worker pool)
     FProxyProtocol:     TProxyProtocolMode; // PP v1/v2/auto; default ppDisabled
     FOnH2Push:          TOnH2Push; // HTTP/2 server push callback; nil = no push
     // R-1: platform IO backend — holds IOCP/epoll fd, listen socket, workers.
@@ -206,6 +207,12 @@ type
     // across sockets via source IP/port hash. Default False (single accept).
     // On Windows: ignored (IOCP handles distribution internally).
     property PerCoreAccept: Boolean read FPerCoreAccept write FPerCoreAccept;
+    // SyncDispatch: execute request handlers directly on IO threads instead of
+    // posting to the elastic worker pool. Eliminates thread-transition overhead
+    // (~50-100us per request) but BLOCKS the IO thread during handler execution.
+    // Only enable when handlers are non-blocking (no DB, no file I/O, no Sleep).
+    // Default False (async worker pool).
+    property SyncDispatch: Boolean read FSyncDispatch write FSyncDispatch;
     // Proxy Protocol: ppDisabled (default) disables PP processing.
     // ppV1/ppV2: enforce a specific version. ppAuto: detect by signature.
     // Enable only when the server receives connections exclusively from a
@@ -756,6 +763,15 @@ begin
   LCfg.MaxQueueDepth        := 0;           // consumed here; Dispatcher needs no copy
   LCfg.InFlightCount        := nil;         // ditto
 
+  // v2-perf: SyncDispatch — execute directly on IO thread, skip worker pool.
+  // Eliminates thread transition overhead (~50-100us per request).
+  if FSyncDispatch then
+  begin
+    TNativeConn(AConn).LastActivity := Now;
+    FDispatcher.Dispatch(AConn, LCfg);
+    Exit;
+  end;
+
   // Count this task as in-flight from queue time.  The finally in the pool
   // worker decrements it after Dispatch returns, ensuring the counter always
   // reflects queued + executing work — making the pre-queue check above
@@ -900,6 +916,7 @@ begin
   FServerBanner            := 'Poseidon/1.0';      // A-2
   FTCPFastOpen             := False;               // TCP_FASTOPEN: opt-in
   FPerCoreAccept           := False;               // #58: per-core accept: opt-in
+  FSyncDispatch            := False;               // v2-perf: sync dispatch: opt-in
   FProxyProtocol           := ppDisabled;
   FPerIPCount              := TDictionary<string, Integer>.Create;
   FWSHandlers              := TDictionary<string, TWSMessageCallback>.Create;

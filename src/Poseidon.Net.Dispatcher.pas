@@ -231,23 +231,32 @@ begin
     Move(LConn.AccumBuf[LConsumed], LConn.AccumBuf[0], LConn.AccumLen - LConsumed);
   LConn.AccumLen := LConn.AccumLen - LConsumed;
 
-  // Protocol upgrade checks
-  LUpgrade := '';
-  LWsKey   := '';
-  for I := 0 to High(LReq.Headers) do
+  // Protocol upgrade checks — only scan headers if method is GET (upgrades
+  // only happen on GET).  Uses length check + first-char test for fast rejection
+  // before calling SameText, avoiding O(n) string comparisons on every request.
+  if SameText(LReq.Method, 'GET') then
   begin
-    if SameText(LReq.Headers[I].Key, 'Upgrade')           then LUpgrade := LReq.Headers[I].Value;
-    if SameText(LReq.Headers[I].Key, 'Sec-WebSocket-Key') then LWsKey   := LReq.Headers[I].Value;
-  end;
-  if SameText(LUpgrade, 'websocket') and (LWsKey <> '') then
-  begin
-    FCallbacks.UpgradeToWS(AConn, LReq);
-    Exit;
-  end;
-  if SameText(LUpgrade, 'h2c') and AConfig.H2Enabled and (LConn.SSLHandle = nil) then
-  begin
-    FCallbacks.UpgradeToH2C(AConn, LReq);
-    Exit;
+    LUpgrade := '';
+    LWsKey   := '';
+    for I := 0 to High(LReq.Headers) do
+    begin
+      if (Length(LReq.Headers[I].Key) = 7) and   // 'Upgrade' = 7 chars
+         SameText(LReq.Headers[I].Key, 'Upgrade') then
+        LUpgrade := LReq.Headers[I].Value
+      else if (Length(LReq.Headers[I].Key) = 17) and  // 'Sec-WebSocket-Key' = 17 chars
+         SameText(LReq.Headers[I].Key, 'Sec-WebSocket-Key') then
+        LWsKey := LReq.Headers[I].Value;
+    end;
+    if SameText(LUpgrade, 'websocket') and (LWsKey <> '') then
+    begin
+      FCallbacks.UpgradeToWS(AConn, LReq);
+      Exit;
+    end;
+    if SameText(LUpgrade, 'h2c') and AConfig.H2Enabled and (LConn.SSLHandle = nil) then
+    begin
+      FCallbacks.UpgradeToH2C(AConn, LReq);
+      Exit;
+    end;
   end;
 
   LConn.KeepAlive := LReq.KeepAlive;
