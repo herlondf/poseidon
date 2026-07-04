@@ -87,9 +87,9 @@ type
       ALen: UInt32; AUserData: UInt64): Boolean;
     procedure _ProcessCQE(AUserData: UInt64; ARes: Int32);
     procedure _ResubmitSend(AConn: TNativeConn);
-    function  _RecvPoolAcquire: PRecvCtx;
-    procedure _RecvPoolRelease(ACtx: PRecvCtx);
-    procedure _NotifyKernel; inline;  // #60: io_uring_enter or SQPOLL wakeup
+    function  _RecvPoolAcquire: Pointer;
+    procedure _RecvPoolRelease(ACtx: Pointer);
+    procedure _NotifyKernel;  // #60: io_uring_enter or SQPOLL wakeup
   public
     constructor Create;
     destructor  Destroy; override;
@@ -430,6 +430,7 @@ var
   LSQSize:   NativeUInt;
   LCQSize:   NativeUInt;
   LAcceptN:  Integer;
+  LFd:       Integer;
 begin
   FCallbacks := ACallbacks;
   FShutdown  := False;
@@ -518,7 +519,7 @@ begin
   SetLength(FAcceptThreads, LAcceptN);
   for I := 0 to LAcceptN - 1 do
   begin
-    var LFd := FListenSockets[I];
+    LFd := FListenSockets[I];
     FAcceptThreads[I] := TThread.CreateAnonymousThread(
       procedure begin _AcceptOn(LFd); end);
     FAcceptThreads[I].FreeOnTerminate := False;
@@ -668,7 +669,7 @@ end;
 // Pre-allocated recv context pool (#56)
 // ---------------------------------------------------------------------------
 
-function TIOUringBackend._RecvPoolAcquire: PRecvCtx;
+function TIOUringBackend._RecvPoolAcquire: Pointer;
 var
   LIdx: Integer;
 begin
@@ -688,7 +689,7 @@ begin
   New(Result);
 end;
 
-procedure TIOUringBackend._RecvPoolRelease(ACtx: PRecvCtx);
+procedure TIOUringBackend._RecvPoolRelease(ACtx: Pointer);
 var
   LOffset: NativeUInt;
   LIdx:    Integer;

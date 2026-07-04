@@ -175,6 +175,7 @@ var
   LPipe:       array[0..1] of Integer;
   I:           Integer;
   LAcceptN:    Integer;
+  LFd:         Integer;
 begin
   FCallbacks := ACallbacks;
   LAcceptN   := AAcceptThreads;
@@ -214,7 +215,7 @@ begin
   SetLength(FAcceptThreads, LAcceptN);
   for I := 0 to LAcceptN - 1 do
   begin
-    var LFd := FListenSockets[I];
+    LFd := FListenSockets[I];
     FAcceptThreads[I] := TThread.CreateAnonymousThread(
       procedure begin _AcceptOn(LFd); end);
     FAcceptThreads[I].FreeOnTerminate := False;
