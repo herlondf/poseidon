@@ -17,9 +17,13 @@ unit Poseidon.Net.IO.IOUring;
 //                       notify the kernel via io_uring_enter(to_submit=1).
 //
 // user_data encoding in SQEs / CQEs:
-//   Recv:     UInt64(PRecvCtx)              — bit 0 = 0 (heap-allocated, 8-byte aligned)
+//   Recv:     UInt64(PRecvCtx)              — bit 0 = 0 (pool-allocated, 8-byte aligned)
 //   Send:     UInt64(TNativeConn) or $1     — bit 0 = 1
 //   Shutdown: UD_SHUTDOWN = $FFFFFFFFFFFFFFFF
+//
+// v2 (#56): Recv contexts are pre-allocated in a contiguous pool (RECV_POOL_SIZE
+// entries) at Create time, eliminating New/Dispose per recv operation.  Pool
+// exhaustion (should not happen — sized to RING_ENTRIES) falls back to heap.
 
 {$IFNDEF MSWINDOWS}
 
@@ -68,6 +72,12 @@ type
     FListenSocket: Integer;
     FSQLock:       TCriticalSection;
     FShutdown:     Boolean;
+    // Pre-allocated recv context pool (#56) — eliminates New/Dispose per recv
+    FRecvCtxPool:  Pointer;             // contiguous block: RECV_POOL_SIZE × SizeOf(TRecvCtx)
+    FRecvFreeIdx:  array of UInt16;     // free-list stack of pool indices
+    FRecvFreeTop:  Integer;             // top of free stack
+    FRecvPoolLock: TCriticalSection;    // protects free-list (separate from FSQLock)
+    FRecvPoolBase: PByte;              // cached base address for index calculation
     // helpers
     procedure _Accept;
     procedure _CompletionLoop;
@@ -75,6 +85,8 @@ type
       ALen: UInt32; AUserData: UInt64): Boolean;
     procedure _ProcessCQE(AUserData: UInt64; ARes: Int32);
     procedure _ResubmitSend(AConn: TNativeConn);
+    function  _RecvPoolAcquire: PRecvCtx;
+    procedure _RecvPoolRelease(ACtx: PRecvCtx);
   public
     constructor Create;
     destructor  Destroy; override;
@@ -123,8 +135,9 @@ const
   UD_TAG_SEND  = UInt64(1);                    // bit 0 = send completion
   UD_SHUTDOWN  = UInt64($FFFFFFFFFFFFFFFF);    // NOP shutdown sentinel
 
-  RECV_BUF_SIZE = 32768;
-  RING_ENTRIES  = 512;
+  RECV_BUF_SIZE  = 32768;
+  RING_ENTRIES   = 512;
+  RECV_POOL_SIZE = RING_ENTRIES;  // one recv ctx per possible in-flight SQE
 
   // io_uring_register opcodes
   IORING_REGISTER_PROBE = UInt32(8);   // added in kernel 5.6
@@ -291,6 +304,7 @@ var
   LParams: TIOUringParams;
   LFd:     Integer;
   LProbe:  TIOUringProbe;
+  LI:      Integer;
 begin
   inherited Create;
 
@@ -339,11 +353,26 @@ begin
   FRingFd       := -1;
   FListenSocket := -1;
   FSQLock       := TCriticalSection.Create;
+  FRecvPoolLock := TCriticalSection.Create;
   FShutdown     := False;
+
+  // Pre-allocate recv context pool — contiguous block for cache locality
+  FRecvCtxPool := AllocMem(RECV_POOL_SIZE * SizeOf(TRecvCtx));
+  FRecvPoolBase := PByte(FRecvCtxPool);
+  SetLength(FRecvFreeIdx, RECV_POOL_SIZE);
+  FRecvFreeTop := RECV_POOL_SIZE;
+  for LI := 0 to RECV_POOL_SIZE - 1 do
+    FRecvFreeIdx[LI] := UInt16(LI);
 end;
 
 destructor TIOUringBackend.Destroy;
 begin
+  if FRecvCtxPool <> nil then
+  begin
+    FreeMem(FRecvCtxPool);
+    FRecvCtxPool := nil;
+  end;
+  FreeAndNil(FRecvPoolLock);
   FreeAndNil(FSQLock);
   inherited Destroy;
 end;
@@ -531,7 +560,7 @@ var
   LCtx:  PRecvCtx;
   LConn: TNativeConn absolute AConn;
 begin
-  New(LCtx);
+  LCtx := _RecvPoolAcquire;
   LCtx^.Conn := LConn;
   LConn.AddRef;  // #43: keep conn alive while recv CQE is in-flight
   FSQLock.Acquire;
@@ -542,7 +571,7 @@ begin
       // Ring full — cancel the ref we just took and signal an error so the
       // server closes the connection instead of leaving it orphaned forever.
       LConn.Release;
-      Dispose(LCtx);
+      _RecvPoolRelease(LCtx);
       FCallbacks.OnConnError(AConn);
       Exit;
     end;
@@ -580,6 +609,53 @@ begin
   // R-6: TCP half-close — FIN before full teardown so the client reads pending bytes
   shutdown(LConn.Socket, SHUT_WR);
   _LinuxClose(LConn.Socket);
+end;
+
+// ---------------------------------------------------------------------------
+// Pre-allocated recv context pool (#56)
+// ---------------------------------------------------------------------------
+
+function TIOUringBackend._RecvPoolAcquire: PRecvCtx;
+var
+  LIdx: Integer;
+begin
+  FRecvPoolLock.Acquire;
+  try
+    if FRecvFreeTop > 0 then
+    begin
+      Dec(FRecvFreeTop);
+      LIdx := FRecvFreeIdx[FRecvFreeTop];
+      Result := PRecvCtx(FRecvPoolBase + NativeUInt(LIdx) * SizeOf(TRecvCtx));
+      Exit;
+    end;
+  finally
+    FRecvPoolLock.Release;
+  end;
+  // Pool exhausted (should not happen — pool sized to RING_ENTRIES) — heap fallback
+  New(Result);
+end;
+
+procedure TIOUringBackend._RecvPoolRelease(ACtx: PRecvCtx);
+var
+  LOffset: NativeUInt;
+  LIdx:    Integer;
+begin
+  LOffset := NativeUInt(PByte(ACtx)) - NativeUInt(FRecvPoolBase);
+  // Check if the pointer belongs to our pool
+  if LOffset < NativeUInt(RECV_POOL_SIZE) * SizeOf(TRecvCtx) then
+  begin
+    LIdx := Integer(LOffset div SizeOf(TRecvCtx));
+    FRecvPoolLock.Acquire;
+    try
+      FRecvFreeIdx[FRecvFreeTop] := UInt16(LIdx);
+      Inc(FRecvFreeTop);
+    finally
+      FRecvPoolLock.Release;
+    end;
+  end
+  else
+    // Heap-allocated fallback context
+    Dispose(ACtx);
 end;
 
 // ---------------------------------------------------------------------------
@@ -701,7 +777,7 @@ begin
   begin
     // --- Recv completion ---
     LCtx      := PRecvCtx(Pointer(AUserData));
-    LRecvConn := LCtx^.Conn;  // save before Dispose(LCtx) frees the context
+    LRecvConn := LCtx^.Conn;  // save before releasing ctx back to pool
     try
       if ARes > 0 then
         FCallbacks.OnRecv(LRecvConn, @LCtx^.Buf[0], Cardinal(ARes))
@@ -712,7 +788,7 @@ begin
       else
         FCallbacks.OnConnError(LRecvConn);   // real error
     finally
-      Dispose(LCtx);
+      _RecvPoolRelease(LCtx);
       LRecvConn.Release;  // #43: drop recv-op ref (AddRef was in PostRecv)
     end;
   end;
