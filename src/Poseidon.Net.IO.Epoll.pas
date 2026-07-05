@@ -1,9 +1,12 @@
 unit Poseidon.Net.IO.Epoll;
 
 // TEpollBackend — Linux epoll(7) backend.
-// R-1: extracted from Poseidon.Net.HttpServer.  All platform-specific Linux
-// socket code lives here; HttpServer.pas now references this unit only at
-// construction time via a single {$IFNDEF MSWINDOWS}.
+//
+// #66: Shared-nothing per-core architecture.
+// Each worker thread has its OWN epoll fd + listen socket (SO_REUSEPORT).
+// Accept, recv, dispatch, and send all happen inline on the same thread.
+// The kernel distributes incoming connections across listen sockets via hash.
+// Zero contention between workers — no shared epoll fd, no dispatch queue.
 
 {$IFNDEF MSWINDOWS}
 
@@ -25,14 +28,13 @@ uses
 type
   TEpollBackend = class(TInterfacedObject, IIOBackend)
   private
-    FEpollFd:       Integer;
-    FShutdownPipe:  array[0..1] of Integer;
-    FListenSockets: TArray<Integer>;     // per-core listen sockets (#58)
     FWorkers:       TArray<TThread>;
-    FAcceptThreads: TArray<TThread>;     // per-core accept threads (#58)
+    FListenSockets: TArray<Integer>;
+    FEpollFds:      TArray<Integer>;      // #66: per-core epoll fds
+    FShutdownPipes: TArray<array[0..1] of Integer>;
     FCallbacks:     IIOCallbacks;
-    procedure _AcceptOn(AListenFd: Integer);
-    procedure _WorkerLoop;
+    FShutdown:      Boolean;
+    procedure _CoreWorkerLoop(ACoreIdx: Integer);
     procedure _DoRecv(AConn: Pointer);
     procedure _FlushSend(AConn: Pointer);
   public
@@ -64,32 +66,40 @@ implementation
 const
   RECV_BUF_SIZE = 32768;
   MAX_EVENTS    = 256;
-  // epoll(7) event flags
   EPOLLIN      = $00000001;
   EPOLLOUT     = $00000004;
   EPOLLERR     = $00000008;
   EPOLLHUP     = $00000010;
   EPOLLONESHOT = Integer($40000000);
-  // epoll_ctl operations
   EPOLL_CTL_ADD = 1;
   EPOLL_CTL_DEL = 2;
   EPOLL_CTL_MOD = 3;
-  // epoll_create1 flags
   EPOLL_CLOEXEC = $80000;
-  // setsockopt
   SO_REUSEPORT  = 15;
+  EAGAIN        = 11;
+  EINTR         = 4;
+  MSG_NOSIGNAL  = $4000;
+  SOCK_NONBLOCK = $800;
+  SOCK_CLOEXEC  = $80000;
+
+  // Sentinel pointer for listen socket events
+  LISTEN_SENTINEL = Pointer(1);
 
 type
   epoll_data_t = record
     case Integer of
       0: (ptr: Pointer);
       1: (fd:  Integer);
-      2: (u32: UInt32);
-      3: (u64: UInt64);
   end;
   epoll_event = packed record
     events: UInt32;
     data:   epoll_data_t;
+  end;
+
+  // #61: Vectored I/O
+  iovec = record
+    iov_base: Pointer;
+    iov_len:  NativeUInt;
   end;
 
 function epoll_create1(flags: Integer): Integer; cdecl;
@@ -109,7 +119,6 @@ function _LinuxWrite(fd: Integer; buf: Pointer; count: NativeUInt): NativeInt; c
   external 'libc.so.6' name 'write';
 function _LinuxClose(fd: Integer): Integer; cdecl;
   external 'libc.so.6' name 'close';
-
 function _LinuxSocket(domain, typ, protocol: Integer): Integer; cdecl;
   external 'libc.so.6' name 'socket';
 function _LinuxBind(sockfd: Integer; addr: Pointer; addrlen: UInt32): Integer; cdecl;
@@ -122,16 +131,37 @@ function _LinuxRecv(sockfd: Integer; buf: Pointer; len: NativeUInt; flags: Integ
   external 'libc.so.6' name 'recv';
 function _LinuxSend(sockfd: Integer; buf: Pointer; len: NativeUInt; flags: Integer): NativeInt; cdecl;
   external 'libc.so.6' name 'send';
-
-// #61: Vectored I/O
-type
-  iovec = record
-    iov_base: Pointer;
-    iov_len:  NativeUInt;
-  end;
-
 function _LinuxWritev(fd: Integer; iov: Pointer; iovcnt: Integer): NativeInt; cdecl;
   external 'libc.so.6' name 'writev';
+
+// #66: threadvar so _OnNewSocket can set OwnerEpollFd on new connections
+threadvar
+  GCurrentEpollFd: Integer;
+
+type
+  // #66: helper thread class to capture core index by value (avoids closure bug)
+  TCoreWorkerThread = class(TThread)
+  private
+    FBackend:  TEpollBackend;
+    FCoreIdx:  Integer;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(ABackend: TEpollBackend; ACoreIdx: Integer);
+  end;
+
+constructor TCoreWorkerThread.Create(ABackend: TEpollBackend; ACoreIdx: Integer);
+begin
+  inherited Create(True);  // create suspended
+  FBackend  := ABackend;
+  FCoreIdx  := ACoreIdx;
+  FreeOnTerminate := False;
+end;
+
+procedure TCoreWorkerThread.Execute;
+begin
+  FBackend._CoreWorkerLoop(FCoreIdx);
+end;
 
 // ---------------------------------------------------------------------------
 // TEpollBackend
@@ -140,9 +170,7 @@ function _LinuxWritev(fd: Integer; iov: Pointer; iovcnt: Integer): NativeInt; cd
 constructor TEpollBackend.Create;
 begin
   inherited Create;
-  FEpollFd         := -1;
-  FShutdownPipe[0] := -1;
-  FShutdownPipe[1] := -1;
+  FShutdown := False;
 end;
 
 destructor TEpollBackend.Destroy;
@@ -159,7 +187,8 @@ procedure TEpollBackend.StartListening(const AHost: string; APort: Integer;
     LAddr: sockaddr_in;
     LOne:  Integer;
   begin
-    Result := _LinuxSocket(AF_INET, SOCK_STREAM or SOCK_CLOEXEC, 0);
+    // #66: SOCK_NONBLOCK required — accept loop must not block the worker
+    Result := _LinuxSocket(AF_INET, SOCK_STREAM or SOCK_NONBLOCK or SOCK_CLOEXEC, 0);
     if Result < 0 then
       raise Exception.Create('socket() failed: ' + IntToStr(GetLastError));
 
@@ -168,7 +197,6 @@ procedure TEpollBackend.StartListening(const AHost: string; APort: Integer;
     _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEPORT, @LOne, SizeOf(LOne));
     if AFastOpen then
       _LinuxSetsockopt(Result, IPPROTO_TCP, 23 {TCP_FASTOPEN}, @LOne, SizeOf(LOne));
-    // #70: TCP_DEFER_ACCEPT — kernel waits for data before waking accept
     _LinuxSetsockopt(Result, IPPROTO_TCP, 9 {TCP_DEFER_ACCEPT}, @LOne, SizeOf(LOne));
 
     FillChar(LAddr, SizeOf(LAddr), 0);
@@ -186,55 +214,51 @@ procedure TEpollBackend.StartListening(const AHost: string; APort: Integer;
   end;
 
 var
-  LEv:         epoll_event;
-  LPipe:       array[0..1] of Integer;
-  I:           Integer;
-  LAcceptN:    Integer;
-  LFd:         Integer;
+  LEv:      epoll_event;
+  I:        Integer;
+  LCoreN:   Integer;
 begin
   FCallbacks := ACallbacks;
-  LAcceptN   := AAcceptThreads;
-  if LAcceptN < 1 then LAcceptN := 1;
+  FShutdown  := False;
 
-  if _LinuxPipe(@LPipe[0]) < 0 then
-    raise Exception.Create('pipe() failed: ' + IntToStr(GetLastError));
-  FShutdownPipe[0] := LPipe[0];
-  FShutdownPipe[1] := LPipe[1];
+  // #66: N cores, each with its own epoll + listen socket
+  LCoreN := AWorkerCount;
+  if LCoreN < 1 then LCoreN := 1;
 
-  FEpollFd := epoll_create1(EPOLL_CLOEXEC);
-  if FEpollFd < 0 then
-    raise Exception.Create('epoll_create1 failed: ' + IntToStr(GetLastError));
+  SetLength(FListenSockets, LCoreN);
+  SetLength(FEpollFds, LCoreN);
+  SetLength(FShutdownPipes, LCoreN);
+  SetLength(FWorkers, LCoreN);
 
-  FillChar(LEv, SizeOf(LEv), 0);
-  LEv.events   := EPOLLIN;
-  LEv.data.ptr := nil;  // shutdown sentinel
-  epoll_ctl(FEpollFd, EPOLL_CTL_ADD, FShutdownPipe[0], @LEv);
-
-  // Create per-core listen sockets (#58) — each with SO_REUSEPORT so the
-  // kernel distributes incoming connections across sockets via hash.
-  SetLength(FListenSockets, LAcceptN);
-  for I := 0 to LAcceptN - 1 do
+  for I := 0 to LCoreN - 1 do
+  begin
+    // Create listen socket with SO_REUSEPORT
     FListenSockets[I] := CreateListenSocket;
 
-  // Worker threads
-  SetLength(FWorkers, AWorkerCount);
-  for I := 0 to AWorkerCount - 1 do
-    FWorkers[I] := TThread.CreateAnonymousThread(procedure begin _WorkerLoop; end);
-  for I := 0 to AWorkerCount - 1 do
-  begin
-    FWorkers[I].FreeOnTerminate := False;
-    FWorkers[I].Start;
-  end;
+    // Create per-core shutdown pipe
+    if _LinuxPipe(@FShutdownPipes[I][0]) < 0 then
+      raise Exception.Create('pipe() failed for core ' + IntToStr(I));
 
-  // Per-core accept threads (#58)
-  SetLength(FAcceptThreads, LAcceptN);
-  for I := 0 to LAcceptN - 1 do
-  begin
-    LFd := FListenSockets[I];
-    FAcceptThreads[I] := TThread.CreateAnonymousThread(
-      procedure begin _AcceptOn(LFd); end);
-    FAcceptThreads[I].FreeOnTerminate := False;
-    FAcceptThreads[I].Start;
+    // Create per-core epoll
+    FEpollFds[I] := epoll_create1(EPOLL_CLOEXEC);
+    if FEpollFds[I] < 0 then
+      raise Exception.Create('epoll_create1 failed for core ' + IntToStr(I));
+
+    // Register shutdown pipe with epoll
+    FillChar(LEv, SizeOf(LEv), 0);
+    LEv.events   := EPOLLIN;
+    LEv.data.ptr := nil;  // shutdown sentinel
+    epoll_ctl(FEpollFds[I], EPOLL_CTL_ADD, FShutdownPipes[I][0], @LEv);
+
+    // Register listen socket with epoll — accept via epoll, not separate thread
+    FillChar(LEv, SizeOf(LEv), 0);
+    LEv.events   := EPOLLIN;
+    LEv.data.ptr := LISTEN_SENTINEL;
+    epoll_ctl(FEpollFds[I], EPOLL_CTL_ADD, FListenSockets[I], @LEv);
+
+    // #66: use TCoreWorkerThread — captures core index by value (no closure bug)
+    FWorkers[I] := TCoreWorkerThread.Create(Self, I);
+    FWorkers[I].Start;
   end;
 end;
 
@@ -242,22 +266,13 @@ procedure TEpollBackend.StopAccept;
 var
   I: Integer;
 begin
-  // Close all listen sockets — accept threads exit on next accept4 failure
+  FShutdown := True;
   for I := 0 to High(FListenSockets) do
   begin
     if FListenSockets[I] >= 0 then
       _LinuxClose(FListenSockets[I]);
     FListenSockets[I] := -1;
   end;
-  for I := 0 to High(FAcceptThreads) do
-  begin
-    if FAcceptThreads[I] <> nil then
-    begin
-      FAcceptThreads[I].WaitFor;
-      FreeAndNil(FAcceptThreads[I]);
-    end;
-  end;
-  SetLength(FAcceptThreads, 0);
 end;
 
 procedure TEpollBackend.ShutdownConn(AConn: Pointer);
@@ -274,7 +289,7 @@ var
 begin
   LDummy := 0;
   for I := 0 to High(FWorkers) do
-    _LinuxWrite(FShutdownPipe[1], @LDummy, 1);
+    _LinuxWrite(FShutdownPipes[I][1], @LDummy, 1);
 end;
 
 procedure TEpollBackend.JoinWorkers;
@@ -287,28 +302,31 @@ begin
     FWorkers[I].Free;
   end;
   SetLength(FWorkers, 0);
-  if FEpollFd >= 0 then
+  for I := 0 to High(FEpollFds) do
   begin
-    _LinuxClose(FEpollFd);
-    FEpollFd := -1;
+    if FEpollFds[I] >= 0 then _LinuxClose(FEpollFds[I]);
+    if FShutdownPipes[I][0] >= 0 then _LinuxClose(FShutdownPipes[I][0]);
+    if FShutdownPipes[I][1] >= 0 then _LinuxClose(FShutdownPipes[I][1]);
   end;
-  if FShutdownPipe[0] >= 0 then _LinuxClose(FShutdownPipe[0]);
-  if FShutdownPipe[1] >= 0 then _LinuxClose(FShutdownPipe[1]);
-  FShutdownPipe[0] := -1;
-  FShutdownPipe[1] := -1;
+  SetLength(FEpollFds, 0);
+  SetLength(FShutdownPipes, 0);
 end;
 
+// #66: RegisterConn sets OwnerEpollFd from the calling thread's GCurrentEpollFd
 procedure TEpollBackend.RegisterConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
   LEv:   epoll_event;
 begin
+  // #66: assign connection to the epoll of the thread that accepted it
+  LConn.OwnerEpollFd := GCurrentEpollFd;
   FillChar(LEv, SizeOf(LEv), 0);
   LEv.events   := EPOLLIN or EPOLLONESHOT;
   LEv.data.ptr := AConn;
-  epoll_ctl(FEpollFd, EPOLL_CTL_ADD, LConn.Socket, @LEv);
+  epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_ADD, LConn.Socket, @LEv);
 end;
 
+// #66: PostRecv uses the connection's OwnerEpollFd
 procedure TEpollBackend.PostRecv(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
@@ -317,7 +335,7 @@ begin
   FillChar(LEv, SizeOf(LEv), 0);
   LEv.events   := EPOLLIN or EPOLLONESHOT;
   LEv.data.ptr := AConn;
-  epoll_ctl(FEpollFd, EPOLL_CTL_MOD, LConn.Socket, @LEv);
+  epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_MOD, LConn.Socket, @LEv);
 end;
 
 procedure TEpollBackend.PostSend(AConn: Pointer; const AData: TBytes;
@@ -424,14 +442,13 @@ procedure TEpollBackend.SocketClose(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
 begin
-  epoll_ctl(FEpollFd, EPOLL_CTL_DEL, LConn.Socket, nil);
-  // R-6: TCP half-close — FIN before RST so the client receives the last bytes
+  epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_DEL, LConn.Socket, nil);
   shutdown(LConn.Socket, SHUT_WR);
   _LinuxClose(LConn.Socket);
 end;
 
 // ---------------------------------------------------------------------------
-// Internal: non-blocking send loop
+// Internal: non-blocking send loop — uses connection's OwnerEpollFd
 // ---------------------------------------------------------------------------
 
 procedure TEpollBackend._FlushSend(AConn: Pointer);
@@ -456,11 +473,10 @@ begin
     begin
       if GetLastError = EAGAIN then
       begin
-        // Kernel send buffer full — resume when EPOLLOUT fires
         FillChar(LEv, SizeOf(LEv), 0);
         LEv.events   := EPOLLOUT or EPOLLONESHOT;
         LEv.data.ptr := AConn;
-        epoll_ctl(FEpollFd, EPOLL_CTL_MOD, LConn.Socket, @LEv);
+        epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_MOD, LConn.Socket, @LEv);
       end
       else
         FCallbacks.OnConnError(AConn);
@@ -468,7 +484,6 @@ begin
     end;
   end;
 
-  // All bytes sent — P-4: return pool buffer (no-op for non-pool buffers)
   TBufferPool.Release(LConn.PendingSend);
   LConn.PendingSendActual := 0;
   FCallbacks.OnSendComplete(AConn);
@@ -488,67 +503,39 @@ begin
   if LN > 0 then
     FCallbacks.OnRecv(AConn, @LBuf[0], Cardinal(LN))
   else if LN = 0 then
-    FCallbacks.OnConnError(AConn)  // graceful FIN
+    FCallbacks.OnConnError(AConn)
   else if GetLastError <> EAGAIN then
     FCallbacks.OnConnError(AConn);
-  // EAGAIN: EPOLLONESHOT stays disarmed until PostRecv re-arms it
 end;
 
 // ---------------------------------------------------------------------------
-// Accept thread
+// #66: Per-core worker loop — shared-nothing architecture
+// Each worker owns: listen socket + epoll fd + its connections.
+// Accept, recv, dispatch, and send all happen inline on the same thread.
 // ---------------------------------------------------------------------------
 
-procedure TEpollBackend._AcceptOn(AListenFd: Integer);
+procedure TEpollBackend._CoreWorkerLoop(ACoreIdx: Integer);
 var
-  LFd:      Integer;
-  LAddr:    sockaddr_in;
-  LAddrLen: Cardinal;
-  LIP:      AnsiString;
-  LOne:     Integer;
+  LEvents:    array[0..MAX_EVENTS - 1] of epoll_event;
+  LN, I:      Integer;
+  LConn:      TNativeConn;
+  LDone:      Boolean;
+  LDummy:     Byte;
+  LEpollFd:   Integer;
+  LListenFd:  Integer;
+  LNewFd:     Integer;
+  LAddr:      sockaddr_in;
+  LAddrLen:   Cardinal;
+  LIP:        AnsiString;
+  LOne:       Integer;
 begin
-  while True do
-  begin
-    FillChar(LAddr, SizeOf(LAddr), 0);
-    LAddrLen := SizeOf(LAddr);
-    LFd := _LinuxAccept4(AListenFd, @LAddr, @LAddrLen,
-      SOCK_NONBLOCK or SOCK_CLOEXEC);
-    if LFd < 0 then
-    begin
-      if GetLastError = EINTR then Continue;
-      Break;
-    end;
+  LEpollFd  := FEpollFds[ACoreIdx];
+  LListenFd := FListenSockets[ACoreIdx];
+  LDone     := False;
 
-    // Apply per-connection socket options before handing off to server
-    LOne := 1;
-    _LinuxSetsockopt(LFd, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
-    _LinuxSetsockopt(LFd, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
-
-    LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
-    try
-      FCallbacks.OnNewConn(NativeUInt(LFd),
-        string(LIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
-    except
-      _LinuxClose(LFd);
-    end;
-  end;
-end;
-
-// ---------------------------------------------------------------------------
-// Worker loop
-// ---------------------------------------------------------------------------
-
-procedure TEpollBackend._WorkerLoop;
-var
-  LEvents: array[0..MAX_EVENTS - 1] of epoll_event;
-  LN, I:   Integer;
-  LConn:   TNativeConn;
-  LDone:   Boolean;
-  LDummy:  Byte;
-begin
-  LDone := False;
   while not LDone do
   begin
-    LN := epoll_wait(FEpollFd, @LEvents[0], MAX_EVENTS, -1);
+    LN := epoll_wait(LEpollFd, @LEvents[0], MAX_EVENTS, -1);
     if LN < 0 then
     begin
       if GetLastError = EINTR then Continue;
@@ -557,14 +544,43 @@ begin
 
     for I := 0 to LN - 1 do
     begin
+      // Shutdown sentinel
       if LEvents[I].data.ptr = nil then
       begin
-        // Shutdown sentinel: consume one byte so level-triggered fires once per worker
-        _LinuxRead(FShutdownPipe[0], @LDummy, 1);
+        _LinuxRead(FShutdownPipes[ACoreIdx][0], @LDummy, 1);
         LDone := True;
         Break;
       end;
 
+      // #66: Listen socket ready — accept new connections inline
+      if LEvents[I].data.ptr = LISTEN_SENTINEL then
+      begin
+        while not FShutdown do
+        begin
+          FillChar(LAddr, SizeOf(LAddr), 0);
+          LAddrLen := SizeOf(LAddr);
+          LNewFd := _LinuxAccept4(LListenFd, @LAddr, @LAddrLen,
+            SOCK_NONBLOCK or SOCK_CLOEXEC);
+          if LNewFd < 0 then Break;  // EAGAIN or error — no more pending
+
+          LOne := 1;
+          _LinuxSetsockopt(LNewFd, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
+          _LinuxSetsockopt(LNewFd, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
+
+          LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
+          // #66: set threadvar BEFORE OnNewConn so RegisterConn uses this core's epoll
+          GCurrentEpollFd := LEpollFd;
+          try
+            FCallbacks.OnNewConn(NativeUInt(LNewFd),
+              string(LIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
+          except
+            _LinuxClose(LNewFd);
+          end;
+        end;
+        Continue;
+      end;
+
+      // Client socket event
       LConn := TNativeConn(LEvents[I].data.ptr);
       try
         if (LEvents[I].events and (EPOLLERR or EPOLLHUP)) <> 0 then
@@ -578,7 +594,8 @@ begin
         end;
       except
         on E: Exception do
-          Writeln(ErrOutput, '[epoll] WORKER_EX [', E.ClassName, ']: ', E.Message);
+          Writeln(ErrOutput, '[epoll] CORE', ACoreIdx, '_EX [',
+            E.ClassName, ']: ', E.Message);
       end;
     end;
   end;

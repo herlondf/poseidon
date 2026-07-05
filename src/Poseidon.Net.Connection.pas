@@ -60,6 +60,7 @@ type
     PendingSend:       TBytes;
     PendingSendActual: Integer; // P-4: bytes to send; 0 = use Length(PendingSend)
     SentBytes:         Integer;
+    OwnerEpollFd:      Integer; // #66: per-core epoll fd that owns this connection
 {$ENDIF}
     // R-1: ASocket is NativeUInt so callers need no {$IFDEF} for socket type.
     // Internally cast to TSocket (Windows) or Integer (Linux).
@@ -111,6 +112,9 @@ begin
   WSDeflate    := False;
   H2Conn       := nil;
   PPParsed     := False;
+{$IFNDEF MSWINDOWS}
+  OwnerEpollFd := -1;   // #66: set by epoll backend on RegisterConn
+{$ENDIF}
 end;
 
 destructor TNativeConn.Destroy;
