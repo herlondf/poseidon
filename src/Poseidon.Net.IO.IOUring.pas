@@ -163,7 +163,10 @@ const
   IO_URING_OP_SUPPORTED = UInt16(1);
 
   // Linux setsockopt level/option constants not in the RTL
-  SO_REUSEPORT = 15;
+  SO_REUSEPORT    = 15;
+  SO_BUSY_POLL    = 46;
+  CBusyPollMicros = 50;
+  SO_ZEROCOPY     = 60;
 
 type
   // io_uring_setup params: offsets within the SQ ring mmap
@@ -416,6 +419,9 @@ procedure TIOUringBackend.StartListening(const AHost: string; APort: Integer;
       _LinuxSetsockopt(Result, IPPROTO_TCP, 23 {TCP_FASTOPEN}, @LOne, SizeOf(LOne));
     // #70: TCP_DEFER_ACCEPT — kernel waits for data before waking accept
     _LinuxSetsockopt(Result, IPPROTO_TCP, 9 {TCP_DEFER_ACCEPT}, @LOne, SizeOf(LOne));
+
+    LOne := CBusyPollMicros;
+    _LinuxSetsockopt(Result, SOL_SOCKET, SO_BUSY_POLL, @LOne, SizeOf(LOne));
 
     FillChar(LAddr, SizeOf(LAddr), 0);
     LAddr.sin_family := AF_INET;
@@ -886,6 +892,9 @@ begin
       LOne := 1;
       _LinuxSetsockopt(ARes, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
       _LinuxSetsockopt(ARes, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
+      _LinuxSetsockopt(ARes, SOL_SOCKET, SO_ZEROCOPY, @LOne, SizeOf(LOne));
+      LOne := CBusyPollMicros;
+      _LinuxSetsockopt(ARes, SOL_SOCKET, SO_BUSY_POLL, @LOne, SizeOf(LOne));
       FillChar(LAddr, SizeOf(LAddr), 0);
       LAddrLen := SizeOf(LAddr);
       getpeername(ARes, sockaddr(LAddr), LAddrLen);
@@ -1012,6 +1021,9 @@ begin
     LOne := 1;
     _LinuxSetsockopt(LFd, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
     _LinuxSetsockopt(LFd, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
+    _LinuxSetsockopt(LFd, SOL_SOCKET, SO_ZEROCOPY, @LOne, SizeOf(LOne));
+    LOne := CBusyPollMicros;
+    _LinuxSetsockopt(LFd, SOL_SOCKET, SO_BUSY_POLL, @LOne, SizeOf(LOne));
 
     LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
     try

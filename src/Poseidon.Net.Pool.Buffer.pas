@@ -54,6 +54,22 @@ uses
   System.SyncObjs,
   System.Generics.Collections;
 
+{$IFNDEF MSWINDOWS}
+const
+  MADV_HUGEPAGE = 14;
+
+function _madvise(addr: Pointer; len: NativeUInt; advice: Integer): Integer; cdecl;
+  external 'libc.so.6' name 'madvise';
+
+procedure _HintHugePage(var ABuf: TBytes);
+begin
+  if Length(ABuf) >= 65536 then
+    _madvise(@ABuf[0], NativeUInt(Length(ABuf)), MADV_HUGEPAGE);
+end;
+{$ELSE}
+procedure _HintHugePage(var ABuf: TBytes); begin end;
+{$ENDIF}
+
 // ---------------------------------------------------------------------------
 // Thread-local cache — one instance per thread, lazily created
 // ---------------------------------------------------------------------------
@@ -107,7 +123,10 @@ begin
     TMonitor.Exit(AStack);
   end;
   if not LHave then
+  begin
     SetLength(Result, ABufSize);
+    _HintHugePage(Result);
+  end;
 end;
 
 class function TBufferPool.Acquire(ASize: Integer): TBytes;

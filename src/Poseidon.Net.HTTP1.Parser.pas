@@ -112,6 +112,147 @@ begin
   GLUT[$3F] := BF_QMARK;
 end;
 
+// ---------------------------------------------------------------------------
+// #76: Perfect hash for common HTTP headers
+// ---------------------------------------------------------------------------
+
+type
+  THeaderId = (
+    hiUnknown,
+    hiContentLength, hiContentType, hiConnection, hiHost,
+    hiAccept, hiAcceptEncoding, hiAuthorization, hiCacheControl,
+    hiUserAgent, hiCookie, hiSecWebSocketKey, hiSecWebSocketExtensions,
+    hiUpgrade, hiTransferEncoding, hiContentEncoding,
+    hiXForwardedFor, hiXRealIP, hiOrigin, hiReferer
+  );
+
+  THeaderHashEntry = record
+    Name: AnsiString;
+    Id: THeaderId;
+  end;
+
+const
+  CHeaderHashSize = 256;
+
+var
+  GHeaderHash: array[0..CHeaderHashSize - 1] of THeaderHashEntry;
+
+function _QuickHeaderHash(AName: PByte; ALen: Integer): Byte; inline;
+begin
+  Result := Byte(ALen) xor (AName[0] or $20) xor (AName[ALen - 1] or $20);
+end;
+
+function _HeaderBytesMatch(A: PByte; ALen: Integer;
+  const ATarget: AnsiString): Boolean;
+var
+  LI: Integer;
+begin
+  if ALen <> Length(ATarget) then Exit(False);
+  for LI := 1 to ALen do
+    if (A[LI - 1] or $20) <> Byte(ATarget[LI]) then Exit(False);
+  Result := True;
+end;
+
+function LookupHeaderId(AName: PByte; ALen: Integer): THeaderId;
+var
+  LSlot: Byte;
+begin
+  if ALen <= 0 then Exit(hiUnknown);
+  LSlot := _QuickHeaderHash(AName, ALen);
+  if (GHeaderHash[LSlot].Id <> hiUnknown) and
+     _HeaderBytesMatch(AName, ALen, GHeaderHash[LSlot].Name) then
+    Result := GHeaderHash[LSlot].Id
+  else
+    Result := hiUnknown;
+end;
+
+procedure _RegisterHeader(const AName: AnsiString; AId: THeaderId);
+var
+  LSlot: Byte;
+begin
+  LSlot := Byte(Length(AName)) xor (Byte(AName[1]) or $20) xor
+           (Byte(AName[Length(AName)]) or $20);
+  GHeaderHash[LSlot].Name := AName;
+  GHeaderHash[LSlot].Id := AId;
+end;
+
+procedure _InitHeaderHash;
+var
+  LI: Integer;
+begin
+  for LI := 0 to CHeaderHashSize - 1 do
+  begin
+    GHeaderHash[LI].Name := '';
+    GHeaderHash[LI].Id := hiUnknown;
+  end;
+  _RegisterHeader('content-length', hiContentLength);
+  _RegisterHeader('content-type', hiContentType);
+  _RegisterHeader('connection', hiConnection);
+  _RegisterHeader('host', hiHost);
+  _RegisterHeader('accept', hiAccept);
+  _RegisterHeader('accept-encoding', hiAcceptEncoding);
+  _RegisterHeader('authorization', hiAuthorization);
+  _RegisterHeader('cache-control', hiCacheControl);
+  _RegisterHeader('user-agent', hiUserAgent);
+  _RegisterHeader('cookie', hiCookie);
+  _RegisterHeader('sec-websocket-key', hiSecWebSocketKey);
+  _RegisterHeader('sec-websocket-extensions', hiSecWebSocketExtensions);
+  _RegisterHeader('upgrade', hiUpgrade);
+  _RegisterHeader('transfer-encoding', hiTransferEncoding);
+  _RegisterHeader('content-encoding', hiContentEncoding);
+  _RegisterHeader('x-forwarded-for', hiXForwardedFor);
+  _RegisterHeader('x-real-ip', hiXRealIP);
+  _RegisterHeader('origin', hiOrigin);
+  _RegisterHeader('referer', hiReferer);
+end;
+
+// ---------------------------------------------------------------------------
+// #79: Word-scan CRLF — process 4 bytes at a time
+// ---------------------------------------------------------------------------
+
+function _FindCRLF(ABuf: PByte; ALen: Integer): Integer;
+var
+  LI: Integer;
+  LWord: UInt32;
+begin
+  LI := 0;
+  while LI + 4 <= ALen - 1 do
+  begin
+    LWord := PUInt32(@ABuf[LI])^;
+    // Check if any byte is $0D (CR)
+    if ((LWord xor $0D0D0D0D) - $01010101) and
+       (not (LWord xor $0D0D0D0D)) and $80808080 <> 0 then
+    begin
+      if (ABuf[LI] = $0D) and (ABuf[LI + 1] = $0A) then begin Result := LI; Exit; end;
+      if (ABuf[LI + 1] = $0D) and (ABuf[LI + 2] = $0A) then begin Result := LI + 1; Exit; end;
+      if (ABuf[LI + 2] = $0D) and (ABuf[LI + 3] = $0A) then begin Result := LI + 2; Exit; end;
+      if (LI + 4 < ALen) and (ABuf[LI + 3] = $0D) and (ABuf[LI + 4] = $0A) then begin Result := LI + 3; Exit; end;
+    end;
+    Inc(LI, 4);
+  end;
+  while LI < ALen - 1 do
+  begin
+    if (ABuf[LI] = $0D) and (ABuf[LI + 1] = $0A) then begin Result := LI; Exit; end;
+    Inc(LI);
+  end;
+  Result := -1;
+end;
+
+function _FindCRLFCRLF(ABuf: PByte; ALen: Integer): Integer;
+var
+  LI: Integer;
+  LWord: UInt32;
+begin
+  LI := 0;
+  while LI + 4 <= ALen do
+  begin
+    LWord := PUInt32(@ABuf[LI])^;
+    if LWord = $0A0D0A0D then begin Result := LI; Exit; end;
+    Inc(LI);
+  end;
+  Result := -1;
+end;
+
 // Module-level fast ASCII→string conversion (no TEncoding overhead)
 function _FastBufToStr(const ABuf: TBytes; AStart, ALen: Integer): string;
 var
@@ -262,17 +403,10 @@ begin
   ABadRequest := False;
   AConsumed   := 0;
 
-  // Scan for CRLFCRLF (end of headers)
-  LHdrEnd  := -1;
-  LScanEnd := ABufLen - 4;
-  if LScanEnd > AMaxHeaderSize then LScanEnd := AMaxHeaderSize;
-  for I := 0 to LScanEnd do
-    if (ABuf[I]   = CR) and (ABuf[I+1] = LF) and
-       (ABuf[I+2] = CR) and (ABuf[I+3] = LF) then
-    begin
-      LHdrEnd := I;
-      Break;
-    end;
+  // #79: Word-scan for CRLFCRLF (end of headers)
+  LScanEnd := ABufLen;
+  if LScanEnd > AMaxHeaderSize + 4 then LScanEnd := AMaxHeaderSize + 4;
+  LHdrEnd := _FindCRLFCRLF(@ABuf[0], LScanEnd);
 
   if LHdrEnd < 0 then
   begin
@@ -386,15 +520,18 @@ begin
     AHeaders[LHdrCount] := TPair<string,string>.Create(LName, LValue);
     Inc(LHdrCount);
 
-    if SameText(LName, 'Connection') then
-    begin
-      if Pos('keep-alive', LowerCase(LValue)) > 0 then AKeepAlive := True;
-      if Pos('close',      LowerCase(LValue)) > 0 then AKeepAlive := False;
-    end
-    else if SameText(LName, 'Content-Length') then
-      LCL := StrToInt64Def(LValue, 0)
-    else if SameText(LName, 'Transfer-Encoding') then
-      LIsChunked := Pos('chunked', LowerCase(LValue)) > 0;
+    // #76: perfect hash header identification
+    case LookupHeaderId(@ABuf[LLineStart], LColonPos - LLineStart) of
+      hiConnection:
+        begin
+          if Pos('keep-alive', LowerCase(LValue)) > 0 then AKeepAlive := True;
+          if Pos('close',      LowerCase(LValue)) > 0 then AKeepAlive := False;
+        end;
+      hiContentLength:
+        LCL := StrToInt64Def(LValue, 0);
+      hiTransferEncoding:
+        LIsChunked := Pos('chunked', LowerCase(LValue)) > 0;
+    end;
 
     LLineStart := LLineEnd + 2;
   end;
@@ -462,24 +599,6 @@ const
       PWord(@PChar(Pointer(Result))[LI])^ := ABuf[AStart + LI];
   end;
 
-  // Byte-level case-insensitive comparison for short header names
-  function ByteMatch(APos, ALen: Integer; const ATarget: AnsiString): Boolean;
-  var
-    J: Integer;
-    LB: Byte;
-  begin
-    if ALen <> Length(ATarget) then Exit(False);
-    for J := 1 to ALen do
-    begin
-      LB := ABuf[APos + J - 1];
-      if LB >= Ord('A') then
-        if LB <= Ord('Z') then
-          LB := LB or $20;  // lowercase
-      if LB <> Byte(ATarget[J]) then Exit(False);
-    end;
-    Result := True;
-  end;
-
 var
   I, LHdrEnd, LScanEnd, LLineEnd, LSpace1, LSpace2, LQPos: Integer;
   LLineStart, LColonPos, LValStart: Integer;
@@ -497,17 +616,10 @@ begin
   AHdrStart   := 0;
   AHdrEnd     := 0;
 
-  // Find CRLFCRLF
-  LHdrEnd  := -1;
-  LScanEnd := ABufLen - 4;
-  if LScanEnd > AMaxHeaderSize then LScanEnd := AMaxHeaderSize;
-  for I := 0 to LScanEnd do
-    if (ABuf[I] = CR) and (ABuf[I+1] = LF) and
-       (ABuf[I+2] = CR) and (ABuf[I+3] = LF) then
-    begin
-      LHdrEnd := I;
-      Break;
-    end;
+  // #79: Word-scan for CRLFCRLF
+  LScanEnd := ABufLen;
+  if LScanEnd > AMaxHeaderSize + 4 then LScanEnd := AMaxHeaderSize + 4;
+  LHdrEnd := _FindCRLFCRLF(@ABuf[0], LScanEnd);
 
   if LHdrEnd < 0 then
   begin
@@ -595,38 +707,36 @@ begin
       Inc(LValStart);
     LValLen := LLineEnd - LValStart;
 
-    // Check critical headers by byte match (no string allocation)
-    if ByteMatch(LLineStart, LColonPos - LLineStart, 'content-length') then
-    begin
-      // Parse integer from bytes
-      LCL := 0;
-      for I := LValStart to LLineEnd - 1 do
-      begin
-        if (ABuf[I] >= Ord('0')) and (ABuf[I] <= Ord('9')) then
-          LCL := LCL * 10 + (ABuf[I] - Ord('0'))
-        else
-          Break;
-      end;
-    end
-    else if ByteMatch(LLineStart, LColonPos - LLineStart, 'connection') then
-    begin
-      // Check for keep-alive or close by byte scan
-      if LValLen >= 5 then
-      begin
-        for I := LValStart to LLineEnd - 5 do
-          if (ABuf[I] or $20 = Ord('c')) and (ABuf[I+1] or $20 = Ord('l')) and
-             (ABuf[I+2] or $20 = Ord('o')) and (ABuf[I+3] or $20 = Ord('s')) and
-             (ABuf[I+4] or $20 = Ord('e')) then
-          begin AKeepAlive := False; Break; end;
-      end;
-    end
-    else if ByteMatch(LLineStart, LColonPos - LLineStart, 'transfer-encoding') then
-    begin
-      if LValLen >= 7 then
-        for I := LValStart to LLineEnd - 7 do
-          if (ABuf[I] or $20 = Ord('c')) and (ABuf[I+1] or $20 = Ord('h')) and
-             (ABuf[I+2] or $20 = Ord('u')) then
-          begin LIsChunked := True; Break; end;
+    // #76: perfect hash header identification (no string allocation)
+    case LookupHeaderId(@ABuf[LLineStart], LColonPos - LLineStart) of
+      hiContentLength:
+        begin
+          LCL := 0;
+          for I := LValStart to LLineEnd - 1 do
+          begin
+            if (ABuf[I] >= Ord('0')) and (ABuf[I] <= Ord('9')) then
+              LCL := LCL * 10 + (ABuf[I] - Ord('0'))
+            else
+              Break;
+          end;
+        end;
+      hiConnection:
+        begin
+          if LValLen >= 5 then
+            for I := LValStart to LLineEnd - 5 do
+              if (ABuf[I] or $20 = Ord('c')) and (ABuf[I+1] or $20 = Ord('l')) and
+                 (ABuf[I+2] or $20 = Ord('o')) and (ABuf[I+3] or $20 = Ord('s')) and
+                 (ABuf[I+4] or $20 = Ord('e')) then
+              begin AKeepAlive := False; Break; end;
+        end;
+      hiTransferEncoding:
+        begin
+          if LValLen >= 7 then
+            for I := LValStart to LLineEnd - 7 do
+              if (ABuf[I] or $20 = Ord('c')) and (ABuf[I+1] or $20 = Ord('h')) and
+                 (ABuf[I+2] or $20 = Ord('u')) then
+              begin LIsChunked := True; Break; end;
+        end;
     end;
 
     LLineStart := LLineEnd + 2;
@@ -715,5 +825,6 @@ end;
 
 initialization
   _InitLUT;
+  _InitHeaderHash;
 
 end.

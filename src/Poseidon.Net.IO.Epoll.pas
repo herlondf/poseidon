@@ -82,6 +82,13 @@ const
   SOCK_NONBLOCK = $800;
   SOCK_CLOEXEC  = $80000;
 
+  TCP_CORK         = 3;
+  SO_BUSY_POLL     = 46;
+  CBusyPollMicros  = 50;
+  SO_ZEROCOPY      = 60;
+  MSG_ZEROCOPY     = $4000000;
+  CZeroCopyThreshold = 10240;
+
   CListenSentinel = Pointer(1);
 
 type
@@ -197,6 +204,9 @@ procedure TEpollBackend.StartListening(const AHost: string; APort: Integer;
     if AFastOpen then
       _LinuxSetsockopt(Result, IPPROTO_TCP, 23 {TCP_FASTOPEN}, @LOne, SizeOf(LOne));
     _LinuxSetsockopt(Result, IPPROTO_TCP, 9 {TCP_DEFER_ACCEPT}, @LOne, SizeOf(LOne));
+
+    LOne := CBusyPollMicros;
+    _LinuxSetsockopt(Result, SOL_SOCKET, SO_BUSY_POLL, @LOne, SizeOf(LOne));
 
     FillChar(LAddr, SizeOf(LAddr), 0);
     LAddr.sin_family := AF_INET;
@@ -336,6 +346,7 @@ procedure TEpollBackend.PostSend(AConn: Pointer; const AData: TBytes;
 var
   LConn: TNativeConn absolute AConn;
   LSendLen: Integer;
+  LCork: Integer;
 begin
   LSendLen := AActualLen;
   if LSendLen = 0 then LSendLen := Length(AData);
@@ -345,6 +356,10 @@ begin
     FCallbacks.OnSendComplete(AConn);
     Exit;
   end;
+
+  // #71: TCP_CORK — accumulate data into one TCP segment
+  LCork := 1;
+  _LinuxSetsockopt(LConn.Socket, IPPROTO_TCP, TCP_CORK, @LCork, SizeOf(LCork));
 
   LConn.PendingSend       := AData;
   LConn.PendingSendActual := AActualLen;
@@ -367,6 +382,7 @@ var
   LConcat: TBytes;
   LTmpH: TBytes;
   LTmpB: TBytes;
+  LCork: Integer;
 begin
   LHLen := AHdrLen;
   if LHLen = 0 then LHLen := Length(AHeaders);
@@ -394,9 +410,15 @@ begin
     Inc(LCount);
   end;
 
+  // #71: TCP_CORK — accumulate data into one TCP segment
+  LCork := 1;
+  _LinuxSetsockopt(LConn.Socket, IPPROTO_TCP, TCP_CORK, @LCork, SizeOf(LCork));
+
   LN := _LinuxWritev(LConn.Socket, @LVec[0], LCount);
   if LN = LTotal then
   begin
+    LCork := 0;
+    _LinuxSetsockopt(LConn.Socket, IPPROTO_TCP, TCP_CORK, @LCork, SizeOf(LCork));
     LTmpH := AHeaders; TBufferPool.Release(LTmpH);
     LTmpB := ABody;    TBufferPool.Release(LTmpB);
     FCallbacks.OnSendComplete(AConn);
@@ -405,6 +427,8 @@ begin
 
   if (LN < 0) and (GetLastError <> EAGAIN) then
   begin
+    LCork := 0;
+    _LinuxSetsockopt(LConn.Socket, IPPROTO_TCP, TCP_CORK, @LCork, SizeOf(LCork));
     LTmpH := AHeaders; TBufferPool.Release(LTmpH);
     LTmpB := ABody;    TBufferPool.Release(LTmpB);
     FCallbacks.OnConnError(AConn);
@@ -451,6 +475,8 @@ var
   LN: NativeInt;
   LEv: epoll_event;
   LTotalSend: Integer;
+  LSendFlags: Integer;
+  LCork: Integer;
 begin
   LTotalSend := LConn.PendingSendActual;
   if LTotalSend = 0 then LTotalSend := Length(LConn.PendingSend);
@@ -458,8 +484,12 @@ begin
   while LConn.SentBytes < LTotalSend do
   begin
     LRemain := LTotalSend - LConn.SentBytes;
+    // #80: MSG_ZEROCOPY for large sends
+    LSendFlags := MSG_NOSIGNAL;
+    if LRemain >= CZeroCopyThreshold then
+      LSendFlags := LSendFlags or MSG_ZEROCOPY;
     LN := _LinuxSend(LConn.Socket,
-      @LConn.PendingSend[LConn.SentBytes], LRemain, MSG_NOSIGNAL);
+      @LConn.PendingSend[LConn.SentBytes], LRemain, LSendFlags);
     if LN > 0 then
       Inc(LConn.SentBytes, LN)
     else
@@ -476,6 +506,10 @@ begin
       Exit;
     end;
   end;
+
+  // #71: uncork after all bytes sent
+  LCork := 0;
+  _LinuxSetsockopt(LConn.Socket, IPPROTO_TCP, TCP_CORK, @LCork, SizeOf(LCork));
 
   TBufferPool.Release(LConn.PendingSend);
   LConn.PendingSendActual := 0;
@@ -558,6 +592,9 @@ begin
           LOne := 1;
           _LinuxSetsockopt(LNewFd, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
           _LinuxSetsockopt(LNewFd, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
+          _LinuxSetsockopt(LNewFd, SOL_SOCKET, SO_ZEROCOPY, @LOne, SizeOf(LOne));
+          LOne := CBusyPollMicros;
+          _LinuxSetsockopt(LNewFd, SOL_SOCKET, SO_BUSY_POLL, @LOne, SizeOf(LOne));
 
           LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
           // #66: set threadvar BEFORE OnNewConn so RegisterConn uses this core's epoll
