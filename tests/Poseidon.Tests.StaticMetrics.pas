@@ -64,7 +64,7 @@ begin
   try
     LMiddleware(LReq, LRes, LNext);
     Assert.AreEqual(200, LMockRes.SentStatusCode);
-    Assert.IsTrue(LMockRes.SentContent.Contains('pegasus_requests_total'),
+    Assert.IsTrue(LMockRes.SentContent.Contains('poseidon_requests_total'),
       'Response should be Prometheus text');
   finally
     LRes.Free; LReq.Free; LMockRes.Free; LMockReq.Free;
@@ -144,7 +144,7 @@ end;
 procedure TStaticTests.Setup;
 begin
   FTempDir := TPath.Combine(TPath.GetTempPath,
-    'pegasus_static_test_' + GUIDToString(TGUID.NewGuid).Replace('{','').Replace('}','').Substring(0, 8));
+    'poseidon_static_test_' + GUIDToString(TGUID.NewGuid).Replace('{','').Replace('}','').Substring(0, 8));
   TDirectory.CreateDirectory(FTempDir);
   TFile.WriteAllText(TPath.Combine(FTempDir, 'app.js'),
     'console.log("hello");', TEncoding.UTF8);

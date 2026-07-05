@@ -122,31 +122,31 @@ begin
   LPairs := AStore.Snapshot;
   LSB    := TStringBuilder.Create;
   try
-    LSB.AppendLine('# HELP pegasus_requests_total Total HTTP requests handled');
-    LSB.AppendLine('# TYPE pegasus_requests_total counter');
+    LSB.AppendLine('# HELP poseidon_requests_total Total HTTP requests handled');
+    LSB.AppendLine('# TYPE poseidon_requests_total counter');
     for LPair in LPairs do
-      LSB.AppendLine(Format('pegasus_requests_total{path="%s"} %d',
+      LSB.AppendLine(Format('poseidon_requests_total{path="%s"} %d',
         [LPair.Key, LPair.Value.Requests]));
 
-    LSB.AppendLine('# HELP pegasus_errors_total HTTP requests with status >= 400');
-    LSB.AppendLine('# TYPE pegasus_errors_total counter');
+    LSB.AppendLine('# HELP poseidon_errors_total HTTP requests with status >= 400');
+    LSB.AppendLine('# TYPE poseidon_errors_total counter');
     for LPair in LPairs do
       if LPair.Value.Errors > 0 then
-        LSB.AppendLine(Format('pegasus_errors_total{path="%s"} %d',
+        LSB.AppendLine(Format('poseidon_errors_total{path="%s"} %d',
           [LPair.Key, LPair.Value.Errors]));
 
-    LSB.AppendLine('# HELP pegasus_request_duration_ms Histogram of request durations in ms');
-    LSB.AppendLine('# TYPE pegasus_request_duration_ms histogram');
+    LSB.AppendLine('# HELP poseidon_request_duration_ms Histogram of request durations in ms');
+    LSB.AppendLine('# TYPE poseidon_request_duration_ms histogram');
     for LPair in LPairs do
     begin
       for I := 0 to 7 do
-        LSB.AppendLine(Format('pegasus_request_duration_ms_bucket{path="%s",le="%s"} %d',
+        LSB.AppendLine(Format('poseidon_request_duration_ms_bucket{path="%s",le="%s"} %d',
           [LPair.Key, BOUNDS_STR[I], LPair.Value.HistBuckets[I]]));
-      LSB.AppendLine(Format('pegasus_request_duration_ms_bucket{path="%s",le="+Inf"} %d',
+      LSB.AppendLine(Format('poseidon_request_duration_ms_bucket{path="%s",le="+Inf"} %d',
         [LPair.Key, LPair.Value.HistBuckets[8]]));
-      LSB.AppendLine(Format('pegasus_request_duration_ms_sum{path="%s"} %d',
+      LSB.AppendLine(Format('poseidon_request_duration_ms_sum{path="%s"} %d',
         [LPair.Key, LPair.Value.DurationSum]));
-      LSB.AppendLine(Format('pegasus_request_duration_ms_count{path="%s"} %d',
+      LSB.AppendLine(Format('poseidon_request_duration_ms_count{path="%s"} %d',
         [LPair.Key, LPair.Value.Requests]));
     end;
 
