@@ -27,14 +27,14 @@ type
 
   TWebSocketManager = class
   private
-    FWSHandlers:    TDictionary<string, TWSMessageCallback>;
-    FWSLock:        TCriticalSection;
+    FWSHandlers: TDictionary<string, TWSMessageCallback>;
+    FWSLock: TCriticalSection;
     FMaxWSFrameSize: Int64;
-    FSend:          TWSTransportSend;
-    FClose:         TWSTransportClose;
-    FRecv:          TWSTransportRecv;
+    FSend: TWSTransportSend;
+    FClose: TWSTransportClose;
+    FRecv: TWSTransportRecv;
     FBuildResponse: TWSBuildResponse;
-    FOnLog:         TOnPoseidonLog;
+    FOnLog: TOnPoseidonLog;
   public
     constructor Create(ASend: TWSTransportSend; AClose: TWSTransportClose;
       ARecv: TWSTransportRecv; ABuildResponse: TWSBuildResponse);
@@ -55,12 +55,12 @@ constructor TWebSocketManager.Create(ASend: TWSTransportSend;
   ABuildResponse: TWSBuildResponse);
 begin
   inherited Create;
-  FWSHandlers    := TDictionary<string, TWSMessageCallback>.Create;
-  FWSLock        := TCriticalSection.Create;
-  FMaxWSFrameSize := 16 * 1024 * 1024;  // 16MB default
-  FSend          := ASend;
-  FClose         := AClose;
-  FRecv          := ARecv;
+  FWSHandlers := TDictionary<string, TWSMessageCallback>.Create;
+  FWSLock := TCriticalSection.Create;
+  FMaxWSFrameSize := 16 * 1024 * 1024;  // 16 MB
+  FSend := ASend;
+  FClose := AClose;
+  FRecv := ARecv;
   FBuildResponse := ABuildResponse;
 end;
 
@@ -85,14 +85,14 @@ end;
 procedure TWebSocketManager.UpgradeToWS(AConn: Pointer;
   const AReq: TPoseidonNativeRequest);
 var
-  LConn:    TNativeConn;
-  LKey:     string;
-  LResp:    TBytes;
-  I:        Integer;
+  LConn: TNativeConn;
+  LKey: string;
+  LResp: TBytes;
+  I: Integer;
   LDeflate: Boolean;
 begin
-  LConn    := TNativeConn(AConn);
-  LKey     := '';
+  LConn := TNativeConn(AConn);
+  LKey := '';
   LDeflate := False;
   for I := 0 to High(AReq.Headers) do
   begin
@@ -110,12 +110,12 @@ begin
     Exit;
   end;
 
-  LResp           := TWebSocketUtils.BuildHandshakeResponse(LKey, LDeflate);
-  LConn.WSMode    := CM_WEBSOCKET;
-  LConn.WSPath    := AReq.Path;
+  LResp := TWebSocketUtils.BuildHandshakeResponse(LKey, LDeflate);
+  LConn.WSMode := CM_WEBSOCKET;
+  LConn.WSPath := AReq.Path;
   LConn.WSDeflate := LDeflate;
   LConn.KeepAlive := True;
-  LConn.AccumLen  := 0;
+  LConn.AccumLen := 0;
 
   LConn.WSConn := TPoseidonWSConn.Create(
     LConn.RemoteAddr,
@@ -136,16 +136,16 @@ end;
 
 function TWebSocketManager.DispatchFrames(AConn: Pointer): Boolean;
 var
-  LConn:       TNativeConn;
-  LFrame:      TWebSocketFrame;
-  LConsumed:   Integer;
-  LTotal:      Integer;
-  LOut:        TBytes;
-  LHandler:    TWSMessageCallback;
+  LConn: TNativeConn;
+  LFrame: TWebSocketFrame;
+  LConsumed: Integer;
+  LTotal: Integer;
+  LOut: TBytes;
+  LHandler: TWSMessageCallback;
   LHasHandler: Boolean;
 begin
   Result := True;
-  LConn  := TNativeConn(AConn);
+  LConn := TNativeConn(AConn);
   LTotal := 0;
   while TWebSocketUtils.ParseFrame(@LConn.AccumBuf[LTotal],
                                     LConn.AccumLen - LTotal,

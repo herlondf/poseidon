@@ -16,10 +16,10 @@ type
   TPoseidonResponse = class
   private
     FWebResponse: TWebResponse;
-    FRawBody:        TBytes;
+    FRawBody: TBytes;
     FRawContentType: string;
-    FHasRawBody:     Boolean;
-    FContent:        TObject;
+    FHasRawBody: Boolean;
+    FContent: TObject;
 
     function SerializeToJSON(AObject: TObject): TJSONObject;
   public
@@ -127,11 +127,11 @@ begin
   else
   begin
     // Fast path: encode to UTF-8 once and use RawBody to skip CommitResponse re-encoding
-    FRawBody        := TEncoding.UTF8.GetBytes(AContent);
+    FRawBody := TEncoding.UTF8.GetBytes(AContent);
     FRawContentType := FWebResponse.ContentType;
     if FRawContentType.IsEmpty then
       FRawContentType := 'text/html';
-    FHasRawBody     := True;
+    FHasRawBody := True;
     FWebResponse.Content := AContent; // Keep for middleware compatibility
   end;
   Result := Self;
@@ -181,8 +181,8 @@ end;
 
 function TPoseidonResponse.Json(AObject: TObject; AOwns: Boolean): TPoseidonResponse;
 var
-  LJSON:    TJSONObject;
-  LStr:     string;
+  LJSON: TJSONObject;
+  LStr: string;
 begin
   // Builds the JSON string once, then pre-encodes to UTF-8 bytes into the
   // RawBody fast path. FWebResponse.Content is also set so test mocks and
@@ -193,9 +193,9 @@ begin
     LStr := LJSON.ToString;
     FWebResponse.ContentType := TMimeType.ApplicationJSON;
     FWebResponse.Content := LStr;
-    FRawBody             := TEncoding.UTF8.GetBytes(LStr);
-    FRawContentType      := TMimeType.ApplicationJSON;
-    FHasRawBody          := True;
+    FRawBody := TEncoding.UTF8.GetBytes(LStr);
+    FRawContentType := TMimeType.ApplicationJSON;
+    FHasRawBody := True;
   finally
     LJSON.Free;
     if AOwns then
@@ -212,9 +212,9 @@ begin
     LStr := AValue.ToString;
     FWebResponse.ContentType := TMimeType.ApplicationJSON;
     FWebResponse.Content := LStr;
-    FRawBody             := TEncoding.UTF8.GetBytes(LStr);
-    FRawContentType      := TMimeType.ApplicationJSON;
-    FHasRawBody          := True;
+    FRawBody := TEncoding.UTF8.GetBytes(LStr);
+    FRawContentType := TMimeType.ApplicationJSON;
+    FHasRawBody := True;
   finally
     AValue.Free;
   end;
@@ -319,7 +319,7 @@ end;
 function TPoseidonResponse.Problem(AStatus: THTTPStatus; const ATitle, ADetail: string): TPoseidonResponse;
 var
   LProblem: TProblemDetail;
-  LJSON:    TJSONObject;
+  LJSON: TJSONObject;
 begin
   LProblem.TypeURI  := 'about:blank';
   LProblem.Status   := AStatus.ToInteger;
@@ -341,10 +341,10 @@ procedure TPoseidonResponse.Reinitialize(AWebResponse: TWebResponse);
 begin
   FWebResponse := AWebResponse;
   FWebResponse.StatusCode := THTTPStatus.Ok.ToInteger;
-  FRawBody        := nil;
+  FRawBody := nil;
   FRawContentType := '';
-  FHasRawBody     := False;
-  FContent        := nil;  // do not free — caller owns Content objects
+  FHasRawBody := False;
+  FContent := nil;  // do not free — caller owns Content objects
 end;
 
 { W4: raw-bytes body helpers }
@@ -352,9 +352,9 @@ end;
 function TPoseidonResponse.RawSend(const ABytes: TBytes;
   const AContentType: string): TPoseidonResponse;
 begin
-  FRawBody        := ABytes;
+  FRawBody := ABytes;
   FRawContentType := AContentType;
-  FHasRawBody     := True;
+  FHasRawBody := True;
   Result := Self;
 end;
 
@@ -451,7 +451,7 @@ end;
 function TPoseidonResponse.Content(const AContent: TObject): TPoseidonResponse;
 begin
   FContent := AContent;
-  Result   := Self;
+  Result := Self;
 end;
 
 end.

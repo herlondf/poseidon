@@ -25,8 +25,8 @@ uses
 type
   TPoseidonServer = class
   private
-    FServer:  TPoseidonNativeServer;
-    FRouter:  TNativeRouter;
+    FServer: TPoseidonNativeServer;
+    FRouter: TNativeRouter;
     FRunning: Boolean;
     FShutdownEvent: TEvent;
 
@@ -111,10 +111,10 @@ function TPoseidonServer.AddRoute(const AMethod, APath: string;
 var
   LEntry: TNativeRouteEntry;
 begin
-  LEntry.Handler     := AHandler;
+  LEntry.Handler := AHandler;
   LEntry.HandlerFunc := AHandlerFunc;
   LEntry.Middlewares := nil;
-  LEntry.ParamNames  := nil;
+  LEntry.ParamNames := nil;
   FRouter.AddRoute(AMethod, APath, LEntry);
   Result := Self;
 end;
@@ -158,8 +158,8 @@ var
   LEntry: TNativeMiddlewareEntry;
 begin
   LEntry.MethodPtr := AMiddleware;
-  LEntry.FuncPtr   := nil;
-  LEntry.IsFunc    := False;
+  LEntry.FuncPtr := nil;
+  LEntry.IsFunc := False;
   FRouter.AddGlobalMiddleware(LEntry);
   Result := Self;
 end;
@@ -169,8 +169,8 @@ var
   LEntry: TNativeMiddlewareEntry;
 begin
   LEntry.MethodPtr := nil;
-  LEntry.FuncPtr   := AMiddleware;
-  LEntry.IsFunc    := True;
+  LEntry.FuncPtr := AMiddleware;
+  LEntry.IsFunc := True;
   FRouter.AddGlobalMiddleware(LEntry);
   Result := Self;
 end;
@@ -183,42 +183,38 @@ procedure TPoseidonServer.HandleRequest(const AReq: TPoseidonNativeRequest;
   out AStatus: Integer; out AContentType: string;
   out ABody: TBytes; out AExtraHeaders: TArray<TPair<string,string>>);
 var
-  LCtx:   TNativeRequestContext;
+  LCtx: TNativeRequestContext;
   LRoute: PNativeRouteEntry;
 begin
-  // Initialize context — shared references, no copy
-  LCtx.Method       := AReq.Method;
-  LCtx.Path         := AReq.Path;
-  LCtx.QueryString  := AReq.QueryString;
-  LCtx.RemoteAddr   := AReq.RemoteAddr;
-  LCtx.RawBody      := AReq.RawBody;
-  LCtx.KeepAlive    := AReq.KeepAlive;
-  LCtx.Headers      := AReq.Headers;
-  LCtx.Params       := nil;
-  LCtx.Status       := 200;
-  LCtx.ContentType  := '';
-  LCtx.Body         := nil;
+  LCtx.Method := AReq.Method;
+  LCtx.Path := AReq.Path;
+  LCtx.QueryString := AReq.QueryString;
+  LCtx.RemoteAddr := AReq.RemoteAddr;
+  LCtx.RawBody := AReq.RawBody;
+  LCtx.KeepAlive := AReq.KeepAlive;
+  LCtx.Headers := AReq.Headers;
+  LCtx.Params := nil;
+  LCtx.Status := 200;
+  LCtx.ContentType := '';
+  LCtx.Body := nil;
   LCtx.ExtraHeaders := nil;
-  LCtx.Handled      := False;
+  LCtx.Handled := False;
 
-  // Router lookup — O(1) for static, O(n) for param
   LRoute := FRouter.Lookup(AReq.Method, AReq.Path, LCtx);
   if LRoute = nil then
   begin
-    AStatus      := 404;
+    AStatus := 404;
     AContentType := 'application/json';
-    ABody        := GNotFoundBody;
+    ABody := GNotFoundBody;
     AExtraHeaders := nil;
     Exit;
   end;
 
-  // Execute middleware chain + handler
   ExecuteChain(LCtx, LRoute^.Middlewares, FRouter.GlobalMiddlewares, LRoute);
 
-  // Copy results out
-  AStatus       := LCtx.Status;
-  AContentType  := LCtx.ContentType;
-  ABody         := LCtx.Body;
+  AStatus := LCtx.Status;
+  AContentType := LCtx.ContentType;
+  ABody := LCtx.Body;
   AExtraHeaders := LCtx.ExtraHeaders;
 end;
 
@@ -226,34 +222,32 @@ end;
 // Middleware chain executor with Next() support
 // ---------------------------------------------------------------------------
 
-// Thread-local state for the chain executor (avoids per-request closure allocation)
 threadvar
-  GChainCtx:     Pointer;    // PNativeRequestContext
-  GChainRoute:   Pointer;    // PNativeRouteEntry
-  GChainGlobal:  Pointer;    // ^TArray<TNativeMiddlewareEntry>
-  GChainLocal:   Pointer;    // ^TArray<TNativeMiddlewareEntry>
-  GChainIdx:     Integer;    // current position in combined chain
-  GChainGlobalN: Integer;    // number of global middlewares
-  GChainLocalN:  Integer;    // number of route middlewares
+  GChainCtx: Pointer;
+  GChainRoute: Pointer;
+  GChainGlobal: Pointer;
+  GChainLocal: Pointer;
+  GChainIdx: Integer;
+  GChainGlobalN: Integer;
+  GChainLocalN: Integer;
 
 procedure _ChainNext; forward;
 
 procedure _ChainStep;
 var
-  LIdx:     Integer;
-  LGlobal:  TArray<TNativeMiddlewareEntry>;
-  LLocal:   TArray<TNativeMiddlewareEntry>;
-  LRoute:   PNativeRouteEntry;
-  LCtx:     PNativeRequestContext;
-  LEntry:   TNativeMiddlewareEntry;
+  LIdx: Integer;
+  LGlobal: TArray<TNativeMiddlewareEntry>;
+  LLocal: TArray<TNativeMiddlewareEntry>;
+  LRoute: PNativeRouteEntry;
+  LCtx: PNativeRequestContext;
+  LEntry: TNativeMiddlewareEntry;
 begin
-  LIdx    := GChainIdx;
-  LCtx    := PNativeRequestContext(GChainCtx);
-  LRoute  := PNativeRouteEntry(GChainRoute);
+  LIdx := GChainIdx;
+  LCtx := PNativeRequestContext(GChainCtx);
+  LRoute := PNativeRouteEntry(GChainRoute);
 
   if LCtx^.Handled then Exit;
 
-  // Global middlewares first, then route middlewares, then handler
   if LIdx < GChainGlobalN then
   begin
     LGlobal := TArray<TNativeMiddlewareEntry>(GChainGlobal);
@@ -276,7 +270,6 @@ begin
   end
   else
   begin
-    // End of chain — call handler
     if Assigned(LRoute^.Handler) then
       LRoute^.Handler(LCtx^)
     else if Assigned(LRoute^.HandlerFunc) then
@@ -297,35 +290,33 @@ var
   LSaveCtx, LSaveRoute, LSaveGlobal, LSaveLocal: Pointer;
   LSaveIdx, LSaveGN, LSaveLN: Integer;
 begin
-  // Save threadvar state (reentrant — nested dispatches)
-  LSaveCtx    := GChainCtx;
-  LSaveRoute  := GChainRoute;
+  // Save threadvar state — reentrant for nested dispatches
+  LSaveCtx := GChainCtx;
+  LSaveRoute := GChainRoute;
   LSaveGlobal := GChainGlobal;
-  LSaveLocal  := GChainLocal;
-  LSaveIdx    := GChainIdx;
-  LSaveGN     := GChainGlobalN;
-  LSaveLN     := GChainLocalN;
+  LSaveLocal := GChainLocal;
+  LSaveIdx := GChainIdx;
+  LSaveGN := GChainGlobalN;
+  LSaveLN := GChainLocalN;
 
-  // Set up chain state
-  GChainCtx     := @ACtx;
-  GChainRoute   := ARoute;
-  GChainGlobal  := Pointer(AGlobalMiddlewares);
-  GChainLocal   := Pointer(AMiddlewares);
-  GChainIdx     := 0;
+  GChainCtx := @ACtx;
+  GChainRoute := ARoute;
+  GChainGlobal := Pointer(AGlobalMiddlewares);
+  GChainLocal := Pointer(AMiddlewares);
+  GChainIdx := 0;
   GChainGlobalN := Length(AGlobalMiddlewares);
-  GChainLocalN  := Length(AMiddlewares);
+  GChainLocalN := Length(AMiddlewares);
 
   try
     _ChainStep;
   finally
-    // Restore threadvar state
-    GChainCtx     := LSaveCtx;
-    GChainRoute   := LSaveRoute;
-    GChainGlobal  := LSaveGlobal;
-    GChainLocal   := LSaveLocal;
-    GChainIdx     := LSaveIdx;
+    GChainCtx := LSaveCtx;
+    GChainRoute := LSaveRoute;
+    GChainGlobal := LSaveGlobal;
+    GChainLocal := LSaveLocal;
+    GChainIdx := LSaveIdx;
     GChainGlobalN := LSaveGN;
-    GChainLocalN  := LSaveLN;
+    GChainLocalN := LSaveLN;
   end;
 end;
 
@@ -355,7 +346,6 @@ begin
         AOnListen();
     end);
 
-  // Block main thread (console app pattern)
   if IsConsole then
     FShutdownEvent.WaitFor;
 end;

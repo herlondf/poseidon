@@ -139,10 +139,10 @@ end;
 
 procedure TCookieJar.Parse(const ACookieHeader: string);
 var
-  LPart:  string;
+  LPart: string;
   LParts: TArray<string>;
-  LEq:    Integer;
-  LName:  string;
+  LEq: Integer;
+  LName: string;
   LValue: string;
 begin
   FItems.Clear;
@@ -256,34 +256,34 @@ end;
 
 function HmacSha256(const ASecret, AData: TBytes): TBytes;
 const
-  BLOCK_SIZE = 64;
-  IPAD       = $36;
-  OPAD       = $5C;
+  CBlockSize = 64;
+  CIPad = $36;
+  COPad = $5C;
 var
-  LKey:      TBytes;
+  LKey: TBytes;
   LInnerKey: TBytes;
   LOuterKey: TBytes;
-  LInner:    TBytes;
-  LOuter:    TBytes;
-  I:         Integer;
+  LInner: TBytes;
+  LOuter: TBytes;
+  I: Integer;
 begin
   // Step 1: hash long keys down to block size
-  if Length(ASecret) > BLOCK_SIZE then
+  if Length(ASecret) > CBlockSize then
     LKey := Sha256Bytes(ASecret)
   else
     LKey := ASecret;
 
-  // Step 2: pad to BLOCK_SIZE with zeros (SetLength zero-fills new TBytes bytes)
-  if Length(LKey) < BLOCK_SIZE then
-    SetLength(LKey, BLOCK_SIZE);
+  // Step 2: pad to CBlockSize with zeros (SetLength zero-fills new TBytes bytes)
+  if Length(LKey) < CBlockSize then
+    SetLength(LKey, CBlockSize);
 
   // Step 3: build inner/outer XOR'd keys
-  SetLength(LInnerKey, BLOCK_SIZE);
-  SetLength(LOuterKey, BLOCK_SIZE);
-  for I := 0 to BLOCK_SIZE - 1 do
+  SetLength(LInnerKey, CBlockSize);
+  SetLength(LOuterKey, CBlockSize);
+  for I := 0 to CBlockSize - 1 do
   begin
-    LInnerKey[I] := LKey[I] xor IPAD;
-    LOuterKey[I] := LKey[I] xor OPAD;
+    LInnerKey[I] := LKey[I] xor CIPad;
+    LOuterKey[I] := LKey[I] xor COPad;
   end;
 
   // Step 4: inner = sha256(LInnerKey || data)
@@ -309,8 +309,8 @@ var
   LSig:      TBytes;
 begin
   LValBytes := TEncoding.UTF8.GetBytes(AValue);
-  LSig      := HmacSha256(TEncoding.UTF8.GetBytes(ASecret), LValBytes);
-  Result    := UrlSafeB64Encode(LValBytes) + '.' + UrlSafeB64Encode(LSig);
+  LSig := HmacSha256(TEncoding.UTF8.GetBytes(ASecret), LValBytes);
+  Result := UrlSafeB64Encode(LValBytes) + '.' + UrlSafeB64Encode(LSig);
 end;
 
 function ConstantTimeEqual(const A, B: TBytes): Boolean;
@@ -328,12 +328,12 @@ end;
 class function TCookieFormat.VerifySigned(const ASigned, ASecret: string;
   out AValue: string): Boolean;
 var
-  LDot:        Integer;
-  LValPart:    string;
-  LSigPart:    string;
-  LValBytes:   TBytes;
-  LSigBytes:   TBytes;
-  LExpected:   TBytes;
+  LDot: Integer;
+  LValPart: string;
+  LSigPart: string;
+  LValBytes: TBytes;
+  LSigBytes: TBytes;
+  LExpected: TBytes;
 begin
   Result := False;
   AValue := '';

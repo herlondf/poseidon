@@ -89,9 +89,9 @@ implementation
 
 constructor TPoseidonRequest.Create(AWebRequest: TWebRequest);
 begin
-  FWebRequest    := AWebRequest;
-  FSession       := nil;
-  FOwnsSession   := False;
+  FWebRequest := AWebRequest;
+  FSession := nil;
+  FOwnsSession := False;
 end;
 
 destructor TPoseidonRequest.Destroy;
@@ -408,9 +408,9 @@ begin
   // If a previous session was set and we own it, free it first
   if FOwnsSession and (FSession <> nil) and (FSession <> ASession) then
     FSession.Free;
-  FSession     := ASession;
+  FSession := ASession;
   FOwnsSession := True;
-  Result       := Self;
+  Result := Self;
 end;
 
 // --- Horse compatibility aliases ---

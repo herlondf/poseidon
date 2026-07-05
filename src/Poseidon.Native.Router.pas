@@ -16,25 +16,25 @@ uses
 type
   PNativeRouteEntry = ^TNativeRouteEntry;
   TNativeRouteEntry = record
-    Handler:     TNativeHandler;
+    Handler: TNativeHandler;
     HandlerFunc: TNativeHandlerFunc;
     Middlewares: TArray<TNativeMiddlewareEntry>;
-    ParamNames:  TArray<string>;  // e.g., ['id', 'name'] for /users/:id/:name
+    ParamNames: TArray<string>;
   end;
 
   TNativeParamRoute = record
-    Method:       string;
-    Segments:     TArray<string>;     // split by '/'
+    Method: string;
+    Segments: TArray<string>;
     SegmentCount: Integer;
-    Entry:        TNativeRouteEntry;
+    Entry: TNativeRouteEntry;
   end;
 
   TNativeRouter = class
   private
-    FStaticRoutes:      TDictionary<string, TNativeRouteEntry>;
-    FParamRoutes:       TList<TNativeParamRoute>;
+    FStaticRoutes: TDictionary<string, TNativeRouteEntry>;
+    FParamRoutes: TList<TNativeParamRoute>;
     FGlobalMiddlewares: TArray<TNativeMiddlewareEntry>;
-    FLastMatch:         TNativeRouteEntry;  // cache for Lookup result pointer
+    FLastMatch: TNativeRouteEntry;
 
     class function MakeKey(const AMethod, APath: string): string; static;
     function MatchParam(const ARoute: TNativeParamRoute; const APath: string;
@@ -63,7 +63,6 @@ implementation
 
 class function TNativeRouter.MakeKey(const AMethod, APath: string): string;
 begin
-  // Compact key: method + path (e.g., 'GET/ping')
   Result := AMethod + APath;
 end;
 
@@ -85,12 +84,11 @@ procedure TNativeRouter.AddRoute(const AMethod, APath: string;
   const AEntry: TNativeRouteEntry);
 var
   LParamRoute: TNativeParamRoute;
-  LSegments:   TArray<string>;
-  LNames:      TArray<string>;
-  I, LCount:   Integer;
-  LHasParam:   Boolean;
+  LSegments: TArray<string>;
+  LNames: TArray<string>;
+  I, LCount: Integer;
+  LHasParam: Boolean;
 begin
-  // Check if path has parameters
   LHasParam := Pos(':', APath) > 0;
 
   if not LHasParam then
@@ -99,7 +97,6 @@ begin
     Exit;
   end;
 
-  // Parameterized route — parse segments and extract param names
   LSegments := APath.Split(['/'], TStringSplitOptions.ExcludeEmpty);
   SetLength(LNames, 0);
   LCount := 0;
@@ -113,10 +110,10 @@ begin
     end;
   end;
 
-  LParamRoute.Method       := AMethod;
-  LParamRoute.Segments     := LSegments;
+  LParamRoute.Method := AMethod;
+  LParamRoute.Segments := LSegments;
   LParamRoute.SegmentCount := Length(LSegments);
-  LParamRoute.Entry        := AEntry;
+  LParamRoute.Entry := AEntry;
   LParamRoute.Entry.ParamNames := LNames;
   FParamRoutes.Add(LParamRoute);
 end;
@@ -134,9 +131,8 @@ function TNativeRouter.Lookup(const AMethod, APath: string;
   var ACtx: TNativeRequestContext): PNativeRouteEntry;
 var
   LEntry: TNativeRouteEntry;
-  I:      Integer;
+  I: Integer;
 begin
-  // Try static routes first (O(1))
   if FStaticRoutes.TryGetValue(MakeKey(AMethod, APath), LEntry) then
   begin
     FLastMatch := LEntry;
@@ -144,7 +140,6 @@ begin
     Exit;
   end;
 
-  // Try parameterized routes (O(n))
   for I := 0 to FParamRoutes.Count - 1 do
   begin
     if not SameText(FParamRoutes[I].Method, AMethod) then Continue;
@@ -161,9 +156,9 @@ end;
 function TNativeRouter.MatchParam(const ARoute: TNativeParamRoute;
   const APath: string; var ACtx: TNativeRequestContext): Boolean;
 var
-  LSegments:  TArray<string>;
-  I, LPIdx:   Integer;
-  LParams:    TArray<TPair<string,string>>;
+  LSegments: TArray<string>;
+  I, LPIdx: Integer;
+  LParams: TArray<TPair<string,string>>;
 begin
   Result := False;
   LSegments := APath.Split(['/'], TStringSplitOptions.ExcludeEmpty);

@@ -21,11 +21,11 @@ uses
 type
   TIOCPBackend = class(TInterfacedObject, IIOBackend)
   private
-    FIocp:        THandle;
+    FIocp: THandle;
     FListenSocket: TSocket;
-    FWorkers:     TArray<TThread>;
+    FWorkers: TArray<TThread>;
     FAcceptThread: TThread;
-    FCallbacks:   IIOCallbacks;
+    FCallbacks: IIOCallbacks;
     procedure _Accept;
     procedure _WorkerLoop;
   public
@@ -89,46 +89,46 @@ function _WsaListen(s: TSocket; backlog: Integer): Integer; stdcall;
 // ---------------------------------------------------------------------------
 
 const
-  RECV_BUF_SIZE = 32768;
+  CRecvBufSize = 32768;
 
 type
   TIocpAction = (iaRecv, iaSend, iaSendV);
 
   PRecvCtx = ^TRecvCtx;
   TRecvCtx = record
-    Ovl:    TOverlapped;            // MUST be first
+    Ovl: TOverlapped;               // MUST be first
     Action: TIocpAction;
-    Conn:   Pointer;
+    Conn: Pointer;
     WsaBuf: TWsaBuf;
-    Data:   array[0..RECV_BUF_SIZE - 1] of Byte;
+    Data: array[0..CRecvBufSize - 1] of Byte;
   end;
 
   PSendCtx = ^TSendCtx;
   TSendCtx = record
-    Ovl:       TOverlapped;         // MUST be first
-    Action:    TIocpAction;
-    Conn:      Pointer;
-    WsaBuf:    TWsaBuf;
-    SendBuf:   TBytes;
+    Ovl: TOverlapped;               // MUST be first
+    Action: TIocpAction;
+    Conn: Pointer;
+    WsaBuf: TWsaBuf;
+    SendBuf: TBytes;
     ActualLen: Integer;             // P-4: bytes to send; 0 = use Length(SendBuf)
   end;
 
   // #61: Vectored send context — 2 WSABUFs for headers + body
   PSendVCtx = ^TSendVCtx;
   TSendVCtx = record
-    Ovl:       TOverlapped;         // MUST be first
-    Action:    TIocpAction;
-    Conn:      Pointer;
-    WsaBufs:   array[0..1] of TWsaBuf;
+    Ovl: TOverlapped;               // MUST be first
+    Action: TIocpAction;
+    Conn: Pointer;
+    WsaBufs: array[0..1] of TWsaBuf;
     HeaderBuf: TBytes;
-    BodyBuf:   TBytes;
+    BodyBuf: TBytes;
   end;
 
   PIocpHdr = ^TIocpHdr;
   TIocpHdr = record
-    Ovl:    TOverlapped;
+    Ovl: TOverlapped;
     Action: TIocpAction;
-    Conn:   Pointer;
+    Conn: Pointer;
   end;
 
 // ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ type
 constructor TIOCPBackend.Create;
 begin
   inherited Create;
-  FIocp         := 0;
+  FIocp := 0;
   FListenSocket := INVALID_SOCKET;
 end;
 
@@ -151,10 +151,10 @@ procedure TIOCPBackend.StartListening(const AHost: string; APort: Integer;
   AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
   AAcceptThreads: Integer);
 var
-  LAddr:  TSockAddrIn;
-  LOne:   Integer;
+  LAddr: TSockAddrIn;
+  LOne: Integer;
   LWsaData: TWSAData;
-  I:      Integer;
+  I: Integer;
 begin
   FCallbacks := ACallbacks;
 
@@ -176,8 +176,6 @@ begin
   if AFastOpen then
     setsockopt(FListenSocket, IPPROTO_TCP, 15 {TCP_FASTOPEN},
       PAnsiChar(@LOne), SizeOf(LOne));
-  // Failure is silently ignored on older Windows
-
   FillChar(LAddr, SizeOf(LAddr), 0);
   LAddr.sin_family := AF_INET;
   LAddr.sin_port   := htons(APort);
@@ -254,10 +252,7 @@ var
   LConn: TNativeConn absolute AConn;
 begin
   if _IocpCreate(THandle(LConn.Socket), FIocp, 0, 0) = 0 then
-  begin
-    // Association failed — caller (_OnNewSocket) will close the conn
     raise Exception.Create('IOCP associate failed');
-  end;
   // #68: skip IOCP completion packet when WSASend/WSARecv completes synchronously.
   // Result is inline on the calling thread — avoids kernel→user transition.
   _SetFileCompletionNotificationModes(THandle(LConn.Socket),
@@ -266,16 +261,16 @@ end;
 
 procedure TIOCPBackend.PostRecv(AConn: Pointer);
 var
-  LConn:  TNativeConn absolute AConn;
-  LCtx:   PRecvCtx;
+  LConn: TNativeConn absolute AConn;
+  LCtx: PRecvCtx;
   LFlags: DWORD;
   LBytes: DWORD;
-  LRes:   Integer;
+  LRes: Integer;
 begin
   LCtx := AllocMem(SizeOf(TRecvCtx));
   LCtx^.Action     := iaRecv;
   LCtx^.Conn       := AConn;
-  LCtx^.WsaBuf.len := RECV_BUF_SIZE;
+  LCtx^.WsaBuf.len := CRecvBufSize;
   LCtx^.WsaBuf.buf := @LCtx^.Data[0];
   LFlags := 0;
   LBytes := 0;
@@ -295,10 +290,10 @@ end;
 procedure TIOCPBackend.PostSend(AConn: Pointer; const AData: TBytes;
   AActualLen: Integer);
 var
-  LConn:    TNativeConn absolute AConn;
-  LCtx:     PSendCtx;
-  LBytes:   DWORD;
-  LRes:     Integer;
+  LConn: TNativeConn absolute AConn;
+  LCtx: PSendCtx;
+  LBytes: DWORD;
+  LRes: Integer;
   LSendLen: Integer;
 begin
   LSendLen := AActualLen;
@@ -340,12 +335,12 @@ procedure TIOCPBackend.PostSendV(AConn: Pointer;
   const AHeaders: TBytes; AHdrLen: Integer;
   const ABody: TBytes; ABodyLen: Integer);
 var
-  LConn:  TNativeConn absolute AConn;
-  LCtx:   PSendVCtx;
+  LConn: TNativeConn absolute AConn;
+  LCtx: PSendVCtx;
   LBytes: DWORD;
-  LRes:   Integer;
-  LHLen:  Integer;
-  LBLen:  Integer;
+  LRes: Integer;
+  LHLen: Integer;
+  LBLen: Integer;
   LCount: DWORD;
 begin
   LHLen := AHdrLen;
@@ -410,11 +405,11 @@ end;
 
 procedure TIOCPBackend._Accept;
 var
-  LClient:   TSocket;
-  LAddr:     TSockAddrIn;
-  LAddrLen:  Integer;
+  LClient: TSocket;
+  LAddr: TSockAddrIn;
+  LAddrLen: Integer;
   LRemoteIP: AnsiString;
-  LOne:      Integer;
+  LOne: Integer;
 begin
   while True do
   begin
@@ -423,7 +418,6 @@ begin
     LClient := _WsaAccept(FListenSocket, @LAddr, @LAddrLen);
     if LClient = INVALID_SOCKET then Break;
 
-    // Apply per-connection socket options before handing off to server
     LOne := 1;
     setsockopt(LClient, IPPROTO_TCP, TCP_NODELAY,
       PAnsiChar(@LOne), SizeOf(LOne));
@@ -447,23 +441,23 @@ end;
 procedure TIOCPBackend._WorkerLoop;
 var
   LBytes: DWORD;
-  LKey:   NativeUInt;
-  LOvl:   Pointer;
-  LHdr:   PIocpHdr;
-  LConn:  TNativeConn;
-  LOK:    BOOL;
+  LKey: NativeUInt;
+  LOvl: Pointer;
+  LHdr: PIocpHdr;
+  LConn: TNativeConn;
+  LOK: BOOL;
 begin
   while True do
   begin
-    LOvl   := nil;
+    LOvl := nil;
     LBytes := 0;
-    LKey   := 0;
-    LOK    := _IocpGet(FIocp, @LBytes, @LKey, @LOvl, INFINITE);
+    LKey := 0;
+    LOK := _IocpGet(FIocp, @LBytes, @LKey, @LOvl, INFINITE);
 
-    if LOvl = nil then Break;  // shutdown pill
+    if LOvl = nil then Break;
 
     try
-      LHdr  := PIocpHdr(LOvl);
+      LHdr := PIocpHdr(LOvl);
       LConn := TNativeConn(LHdr^.Conn);
 
       if (not LOK) or (LBytes = 0) then

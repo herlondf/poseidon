@@ -22,9 +22,9 @@ type
 
   TPoseidonBrotli = class
   private
-    class var FLock:    TCriticalSection;
-    class var FLibEnc:  NativeUInt;
-    class var FLibDec:  NativeUInt;
+    class var FLock: TCriticalSection;
+    class var FLibEnc: NativeUInt;
+    class var FLibDec: NativeUInt;
     class var FInitDone: Boolean;
 
     // BrotliEncoderCompress(quality, lgwin, mode, input_size, input_buf,
@@ -72,9 +72,9 @@ const
 
 class constructor TPoseidonBrotli.Create;
 begin
-  FLock     := TCriticalSection.Create;
-  FLibEnc   := 0;
-  FLibDec   := 0;
+  FLock := TCriticalSection.Create;
+  FLibEnc := 0;
+  FLibDec := 0;
   FInitDone := False;
 end;
 

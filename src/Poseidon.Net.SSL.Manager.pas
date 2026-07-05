@@ -20,10 +20,10 @@ const
 type
   TSSLManager = class
   private
-    FSSLProvider:   ISSLProvider;
-    FSSLCtx:        Pointer;
+    FSSLProvider: ISSLProvider;
+    FSSLCtx: Pointer;
     FCertCtxByHost: TDictionary<string, Pointer>;
-    FSSLEnabled:    Boolean;
+    FSSLEnabled: Boolean;
     FMinTLSVersion: Integer;
   public
     constructor Create(ASSLProvider: ISSLProvider);
@@ -53,9 +53,9 @@ implementation
 
 function SSLManagerSNICallback(ASSL: Pointer; AD: PInteger; AArg: Pointer): Integer; cdecl;
 var
-  LMgr:  TSSLManager;
+  LMgr: TSSLManager;
   LHost: string;
-  LCtx:  Pointer;
+  LCtx: Pointer;
 begin
   Result := SSL_TLSEXT_ERR_NOACK;
   if AArg = nil then Exit;
@@ -73,10 +73,10 @@ end;
 constructor TSSLManager.Create(ASSLProvider: ISSLProvider);
 begin
   inherited Create;
-  FSSLProvider   := ASSLProvider;
-  FSSLCtx        := nil;
+  FSSLProvider := ASSLProvider;
+  FSSLCtx := nil;
   FCertCtxByHost := nil;
-  FSSLEnabled    := False;
+  FSSLEnabled := False;
   FMinTLSVersion := $0303;  // TLS 1.2
 end;
 

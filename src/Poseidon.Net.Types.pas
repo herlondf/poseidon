@@ -16,13 +16,13 @@ type
   // --------------------------------------------------------------------------
 
   TPoseidonNativeRequest = record
-    Method:      string;
-    Path:        string;
+    Method: string;
+    Path: string;
     QueryString: string;
-    RawBody:     TBytes;
-    RemoteAddr:  string;
-    KeepAlive:   Boolean;
-    Headers:     TArray<TPair<string,string>>;
+    RawBody: TBytes;
+    RemoteAddr: string;
+    KeepAlive: Boolean;
+    Headers: TArray<TPair<string,string>>;
   end;
 
   TOnNativeRequest = reference to procedure(
@@ -35,10 +35,10 @@ type
   // HTTP/2 server push resource — used with TPoseidonNativeServer.OnH2Push.
   // The server sends a PUSH_PROMISE + synthetic GET response for each resource.
   TPoseidonPushResource = record
-    Path:        string;    // e.g. '/styles.css'
+    Path: string;
     ContentType: string;
-    Body:        TBytes;
-    Extra:       TArray<TPair<string, string>>;
+    Body: TBytes;
+    Extra: TArray<TPair<string, string>>;
   end;
 
   // Called before the HTTP/2 response is sent.  Populate APushResources with
@@ -55,13 +55,13 @@ type
   TOnPoseidonLog = reference to procedure(ALevel: TLogLevel; const AMessage: string);
 
   TPoseidonRequestLogEvent = record
-    Method:     string;
-    Path:       string;
-    Status:     Integer;
+    Method: string;
+    Path: string;
+    Status: Integer;
     DurationMs: Int64;
     RemoteAddr: string;
-    RxBytes:    Int64;
-    TxBytes:    Int64;
+    RxBytes: Int64;
+    TxBytes: Int64;
   end;
   TOnPoseidonRequestLog = reference to procedure(
     const AEvent: TPoseidonRequestLogEvent);

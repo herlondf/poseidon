@@ -28,12 +28,12 @@ uses
 type
   TEpollBackend = class(TInterfacedObject, IIOBackend)
   private
-    FWorkers:       TArray<TThread>;
+    FWorkers: TArray<TThread>;
     FListenSockets: TArray<Integer>;
-    FEpollFds:      TArray<Integer>;      // #66: per-core epoll fds
+    FEpollFds: TArray<Integer>;           // #66: per-core epoll fds
     FShutdownPipes: TArray<array[0..1] of Integer>;
-    FCallbacks:     IIOCallbacks;
-    FShutdown:      Boolean;
+    FCallbacks: IIOCallbacks;
+    FShutdown: Boolean;
     procedure _CoreWorkerLoop(ACoreIdx: Integer);
     procedure _DoRecv(AConn: Pointer);
     procedure _FlushSend(AConn: Pointer);
@@ -64,8 +64,8 @@ implementation
 // ---------------------------------------------------------------------------
 
 const
-  RECV_BUF_SIZE = 32768;
-  MAX_EVENTS    = 256;
+  CRecvBufSize = 32768;
+  CMaxEvents   = 256;
   EPOLLIN      = $00000001;
   EPOLLOUT     = $00000004;
   EPOLLERR     = $00000008;
@@ -82,8 +82,7 @@ const
   SOCK_NONBLOCK = $800;
   SOCK_CLOEXEC  = $80000;
 
-  // Sentinel pointer for listen socket events
-  LISTEN_SENTINEL = Pointer(1);
+  CListenSentinel = Pointer(1);
 
 type
   epoll_data_t = record
@@ -142,8 +141,8 @@ type
   // #66: helper thread class to capture core index by value (avoids closure bug)
   TCoreWorkerThread = class(TThread)
   private
-    FBackend:  TEpollBackend;
-    FCoreIdx:  Integer;
+    FBackend: TEpollBackend;
+    FCoreIdx: Integer;
   protected
     procedure Execute; override;
   public
@@ -152,9 +151,9 @@ type
 
 constructor TCoreWorkerThread.Create(ABackend: TEpollBackend; ACoreIdx: Integer);
 begin
-  inherited Create(True);  // create suspended
-  FBackend  := ABackend;
-  FCoreIdx  := ACoreIdx;
+  inherited Create(True);
+  FBackend := ABackend;
+  FCoreIdx := ACoreIdx;
   FreeOnTerminate := False;
 end;
 
@@ -214,9 +213,9 @@ procedure TEpollBackend.StartListening(const AHost: string; APort: Integer;
   end;
 
 var
-  LEv:      epoll_event;
-  I:        Integer;
-  LCoreN:   Integer;
+  LEv: epoll_event;
+  I: Integer;
+  LCoreN: Integer;
 begin
   FCallbacks := ACallbacks;
   FShutdown  := False;
@@ -232,28 +231,23 @@ begin
 
   for I := 0 to LCoreN - 1 do
   begin
-    // Create listen socket with SO_REUSEPORT
     FListenSockets[I] := CreateListenSocket;
 
-    // Create per-core shutdown pipe
     if _LinuxPipe(@FShutdownPipes[I][0]) < 0 then
       raise Exception.Create('pipe() failed for core ' + IntToStr(I));
 
-    // Create per-core epoll
     FEpollFds[I] := epoll_create1(EPOLL_CLOEXEC);
     if FEpollFds[I] < 0 then
       raise Exception.Create('epoll_create1 failed for core ' + IntToStr(I));
 
-    // Register shutdown pipe with epoll
     FillChar(LEv, SizeOf(LEv), 0);
     LEv.events   := EPOLLIN;
-    LEv.data.ptr := nil;  // shutdown sentinel
+    LEv.data.ptr := nil;
     epoll_ctl(FEpollFds[I], EPOLL_CTL_ADD, FShutdownPipes[I][0], @LEv);
 
-    // Register listen socket with epoll — accept via epoll, not separate thread
     FillChar(LEv, SizeOf(LEv), 0);
     LEv.events   := EPOLLIN;
-    LEv.data.ptr := LISTEN_SENTINEL;
+    LEv.data.ptr := CListenSentinel;
     epoll_ctl(FEpollFds[I], EPOLL_CTL_ADD, FListenSockets[I], @LEv);
 
     // #66: use TCoreWorkerThread — captures core index by value (no closure bug)
@@ -284,7 +278,7 @@ end;
 
 procedure TEpollBackend.SignalWorkers;
 var
-  I:      Integer;
+  I: Integer;
   LDummy: Byte;
 begin
   LDummy := 0;
@@ -318,7 +312,6 @@ var
   LConn: TNativeConn absolute AConn;
   LEv:   epoll_event;
 begin
-  // #66: assign connection to the epoll of the thread that accepted it
   LConn.OwnerEpollFd := GCurrentEpollFd;
   FillChar(LEv, SizeOf(LEv), 0);
   LEv.events   := EPOLLIN or EPOLLONESHOT;
@@ -341,7 +334,7 @@ end;
 procedure TEpollBackend.PostSend(AConn: Pointer; const AData: TBytes;
   AActualLen: Integer);
 var
-  LConn:    TNativeConn absolute AConn;
+  LConn: TNativeConn absolute AConn;
   LSendLen: Integer;
 begin
   LSendLen := AActualLen;
@@ -364,16 +357,16 @@ procedure TEpollBackend.PostSendV(AConn: Pointer;
   const AHeaders: TBytes; AHdrLen: Integer;
   const ABody: TBytes; ABodyLen: Integer);
 var
-  LConn:    TNativeConn absolute AConn;
-  LVec:     array[0..1] of iovec;
-  LCount:   Integer;
-  LN:       NativeInt;
-  LTotal:   Integer;
-  LHLen:    Integer;
-  LBLen:    Integer;
-  LConcat:  TBytes;
-  LTmpH:    TBytes;
-  LTmpB:    TBytes;
+  LConn: TNativeConn absolute AConn;
+  LVec: array[0..1] of iovec;
+  LCount: Integer;
+  LN: NativeInt;
+  LTotal: Integer;
+  LHLen: Integer;
+  LBLen: Integer;
+  LConcat: TBytes;
+  LTmpH: TBytes;
+  LTmpB: TBytes;
 begin
   LHLen := AHdrLen;
   if LHLen = 0 then LHLen := Length(AHeaders);
@@ -453,10 +446,10 @@ end;
 
 procedure TEpollBackend._FlushSend(AConn: Pointer);
 var
-  LConn:      TNativeConn absolute AConn;
-  LRemain:    Integer;
-  LN:         NativeInt;
-  LEv:        epoll_event;
+  LConn: TNativeConn absolute AConn;
+  LRemain: Integer;
+  LN: NativeInt;
+  LEv: epoll_event;
   LTotalSend: Integer;
 begin
   LTotalSend := LConn.PendingSendActual;
@@ -496,10 +489,10 @@ end;
 procedure TEpollBackend._DoRecv(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
-  LBuf:  array[0..RECV_BUF_SIZE - 1] of Byte;
-  LN:    NativeInt;
+  LBuf: array[0..CRecvBufSize - 1] of Byte;
+  LN: NativeInt;
 begin
-  LN := _LinuxRecv(LConn.Socket, @LBuf[0], RECV_BUF_SIZE, 0);
+  LN := _LinuxRecv(LConn.Socket, @LBuf[0], CRecvBufSize, 0);
   if LN > 0 then
     FCallbacks.OnRecv(AConn, @LBuf[0], Cardinal(LN))
   else if LN = 0 then
@@ -516,18 +509,18 @@ end;
 
 procedure TEpollBackend._CoreWorkerLoop(ACoreIdx: Integer);
 var
-  LEvents:    array[0..MAX_EVENTS - 1] of epoll_event;
-  LN, I:      Integer;
-  LConn:      TNativeConn;
-  LDone:      Boolean;
-  LDummy:     Byte;
-  LEpollFd:   Integer;
-  LListenFd:  Integer;
-  LNewFd:     Integer;
-  LAddr:      sockaddr_in;
-  LAddrLen:   Cardinal;
-  LIP:        AnsiString;
-  LOne:       Integer;
+  LEvents:    array[0..CMaxEvents - 1] of epoll_event;
+  LN, I: Integer;
+  LConn: TNativeConn;
+  LDone: Boolean;
+  LDummy: Byte;
+  LEpollFd: Integer;
+  LListenFd: Integer;
+  LNewFd: Integer;
+  LAddr: sockaddr_in;
+  LAddrLen: Cardinal;
+  LIP: AnsiString;
+  LOne: Integer;
 begin
   LEpollFd  := FEpollFds[ACoreIdx];
   LListenFd := FListenSockets[ACoreIdx];
@@ -535,7 +528,7 @@ begin
 
   while not LDone do
   begin
-    LN := epoll_wait(LEpollFd, @LEvents[0], MAX_EVENTS, -1);
+    LN := epoll_wait(LEpollFd, @LEvents[0], CMaxEvents, -1);
     if LN < 0 then
     begin
       if GetLastError = EINTR then Continue;
@@ -544,7 +537,6 @@ begin
 
     for I := 0 to LN - 1 do
     begin
-      // Shutdown sentinel
       if LEvents[I].data.ptr = nil then
       begin
         _LinuxRead(FShutdownPipes[ACoreIdx][0], @LDummy, 1);
@@ -553,7 +545,7 @@ begin
       end;
 
       // #66: Listen socket ready — accept new connections inline
-      if LEvents[I].data.ptr = LISTEN_SENTINEL then
+      if LEvents[I].data.ptr = CListenSentinel then
       begin
         while not FShutdown do
         begin
@@ -580,7 +572,6 @@ begin
         Continue;
       end;
 
-      // Client socket event
       LConn := TNativeConn(LEvents[I].data.ptr);
       try
         if (LEvents[I].events and (EPOLLERR or EPOLLHUP)) <> 0 then

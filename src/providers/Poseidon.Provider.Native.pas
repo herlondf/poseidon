@@ -26,11 +26,11 @@ type
     DEFAULT_HOST = '0.0.0.0';
     DEFAULT_PORT = 9000;
   private
-    class var FPort:          Integer;
-    class var FHost:          string;
-    class var FRunning:       Boolean;
+    class var FPort: Integer;
+    class var FHost: string;
+    class var FRunning: Boolean;
     class var FShutdownEvent: TEvent;
-    class var FServer:        TPoseidonNativeServer;
+    class var FServer: TPoseidonNativeServer;
 
     class procedure HandleRequest(
       const AReq:          TPoseidonNativeRequest;
@@ -39,8 +39,8 @@ type
       out   ABody:         TBytes;
       out   AExtraHeaders: TArray<TPair<string,string>>);
   public
-    class property Port:      Integer read FPort      write FPort;
-    class property Host:      string  read FHost      write FHost;
+    class property Port: Integer read FPort write FPort;
+    class property Host: string read FHost write FHost;
     class property IsRunning: Boolean read FRunning;
 
     // v2-perf: dispatch on IO thread, skip worker pool.
@@ -98,37 +98,34 @@ class procedure TPoseidonProviderNative.HandleRequest(
   out   ABody:         TBytes;
   out   AExtraHeaders: TArray<TPair<string,string>>);
 var
-  LWebReq:      TNativeWebRequest;
-  LWebRes:      TNativeWebResponse;
-  LReq:         TPoseidonRequest;
-  LRes:         TPoseidonResponse;
-  LFlushed:     Boolean;
-  LStatus:      Integer;
+  LWebReq: TNativeWebRequest;
+  LWebRes: TNativeWebResponse;
+  LReq: TPoseidonRequest;
+  LRes: TPoseidonResponse;
+  LFlushed: Boolean;
+  LStatus: Integer;
   LContentType: string;
-  LBody:        TBytes;
-  LExtraHdrs:   TArray<TPair<string,string>>;
+  LBody: TBytes;
+  LExtraHdrs: TArray<TPair<string,string>>;
 begin
-  // Default error response — overwritten by CommitResponse on success
-  LStatus       := 500;
-  LContentType  := 'application/problem+json';
+  LStatus := 500;
+  LContentType := 'application/problem+json';
   LBody         := TEncoding.UTF8.GetBytes(
     '{"type":"about:blank","title":"Internal Server Error","status":500}');
   SetLength(LExtraHdrs, 0);
   LFlushed := False;
 
-  // Acquire adapter pair — pool reuse, zero heap alloc on hot path
-  // Note: closures cannot capture `out` parameters directly in Delphi;
-  //       local variables are used and then copied to out params at the end.
+  // Closures cannot capture `out` params directly — use locals, copy at end
   TNativeContextPool.Acquire(
     AReq,
     procedure(S: Integer; const CT: string; const B: TBytes;
       const EH: TArray<TPair<string,string>>)
     begin
-      LStatus      := S;
+      LStatus := S;
       LContentType := CT;
-      LBody        := B;
-      LExtraHdrs   := EH;
-      LFlushed     := True;
+      LBody := B;
+      LExtraHdrs := EH;
+      LFlushed := True;
     end,
     LWebReq, LWebRes);
 
@@ -161,12 +158,10 @@ begin
     end;
     if LRes.HasRawBody then
     begin
-      // W4: raw-bytes fast path — body is already UTF-8 encoded. Skip the
-      // CommitResponse path that would re-encode FWebResponse.Content from
-      // UTF-16 to UTF-8.
-      LStatus      := LWebRes.StatusCode;
+      // W4: skip CommitResponse re-encoding — body already UTF-8
+      LStatus := LWebRes.StatusCode;
       LContentType := LRes.RawContentType;
-      LBody        := LRes.RawBody;
+      LBody := LRes.RawBody;
       SetLength(LExtraHdrs, LWebRes.CustomHeaders.Count);
       var LExtraCount := 0;
       for var I := 0 to LWebRes.CustomHeaders.Count - 1 do
@@ -186,9 +181,9 @@ begin
     TNativeContextPool.Release(LWebReq, LWebRes);
   end;
 
-  AStatus      := LStatus;
+  AStatus := LStatus;
   AContentType := LContentType;
-  ABody        := LBody;
+  ABody := LBody;
   AExtraHeaders := LExtraHdrs;
 end;
 
@@ -231,9 +226,9 @@ end;
 class procedure TPoseidonProviderNative.Listen(APort: Integer;
   const AHost: string; AOnListen, AOnStop: TProc);
 begin
-  FPort        := APort;
-  FHost        := AHost;
-  OnListen     := AOnListen;
+  FPort := APort;
+  FHost := AHost;
+  OnListen := AOnListen;
   OnStopListen := AOnStop;
   Listen;
 end;

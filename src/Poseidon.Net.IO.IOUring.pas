@@ -19,11 +19,11 @@ unit Poseidon.Net.IO.IOUring;
 // user_data encoding in SQEs / CQEs:
 //   Recv:     UInt64(PRecvCtx)              — bit 0 = 0 (pool-allocated, 8-byte aligned)
 //   Send:     UInt64(TNativeConn) or $1     — bit 0 = 1
-//   Shutdown: UD_SHUTDOWN = $FFFFFFFFFFFFFFFF
+//   Shutdown: CUdShutdown = $FFFFFFFFFFFFFFFF
 //
-// v2 (#56): Recv contexts are pre-allocated in a contiguous pool (RECV_POOL_SIZE
+// v2 (#56): Recv contexts are pre-allocated in a contiguous pool (CRecvPoolSize
 // entries) at Create time, eliminating New/Dispose per recv operation.  Pool
-// exhaustion (should not happen — sized to RING_ENTRIES) falls back to heap.
+// exhaustion (should not happen — sized to CRingEntries) falls back to heap.
 
 {$IFNDEF MSWINDOWS}
 
@@ -47,40 +47,34 @@ uses
 type
   TIOUringBackend = class(TInterfacedObject, IIOBackend)
   private
-    FRingFd:       Integer;
-    // mmap'd ring regions
-    FSQRing:       Pointer;
-    FCQRing:       Pointer;
-    FSQEs:         Pointer;
-    FSQRingSize:   NativeUInt;
-    FCQRingSize:   NativeUInt;
-    FSQEsSize:     NativeUInt;
-    // resolved pointers into the SQ ring
-    FPSQHead:      PUInt32;
-    FPSQTail:      PUInt32;
-    FPSQMask:      PUInt32;
-    // resolved pointers into the CQ ring
-    FPCQHead:      PUInt32;
-    FPCQTail:      PUInt32;
-    FPCQMask:      PUInt32;
-    FPCQEs:        Pointer;   // base of CQE array
-    // threads
-    FAcceptThreads: TArray<TThread>;   // per-core accept threads (#58)
-    FCompThread:    TThread;
-    // infrastructure
-    FCallbacks:     IIOCallbacks;
-    FListenSockets: TArray<Integer>;   // per-core listen sockets (#58)
-    FSQLock:       TCriticalSection;
-    FShutdown:     Boolean;
-    FSQPoll:       Boolean;            // #60: kernel poll thread active
-    FPSQFlags:     PUInt32;            // #60: pointer to sq_off.flags for NEED_WAKEUP check
-    // Pre-allocated recv context pool (#56) — eliminates New/Dispose per recv
-    FRecvCtxPool:  Pointer;             // contiguous block: RECV_POOL_SIZE × SizeOf(TRecvCtx)
-    FRecvFreeIdx:  array of UInt16;     // free-list stack of pool indices
-    FRecvFreeTop:  Integer;             // top of free stack
-    FRecvPoolLock: TCriticalSection;    // protects free-list (separate from FSQLock)
-    FRecvPoolBase: PByte;              // cached base address for index calculation
-    FMultishotAccept: Boolean;   // #73: True when multishot accept is active
+    FRingFd: Integer;
+    FSQRing: Pointer;
+    FCQRing: Pointer;
+    FSQEs: Pointer;
+    FSQRingSize: NativeUInt;
+    FCQRingSize: NativeUInt;
+    FSQEsSize: NativeUInt;
+    FPSQHead: PUInt32;
+    FPSQTail: PUInt32;
+    FPSQMask: PUInt32;
+    FPCQHead: PUInt32;
+    FPCQTail: PUInt32;
+    FPCQMask: PUInt32;
+    FPCQEs: Pointer;
+    FAcceptThreads: TArray<TThread>;    // #58: per-core accept threads
+    FCompThread: TThread;
+    FCallbacks: IIOCallbacks;
+    FListenSockets: TArray<Integer>;    // #58: per-core listen sockets
+    FSQLock: TCriticalSection;
+    FShutdown: Boolean;
+    FSQPoll: Boolean;                   // #60: kernel poll thread active
+    FPSQFlags: PUInt32;                 // #60: sq_off.flags for NEED_WAKEUP check
+    FRecvCtxPool: Pointer;              // #56: contiguous recv context pool
+    FRecvFreeIdx: array of UInt16;
+    FRecvFreeTop: Integer;
+    FRecvPoolLock: TCriticalSection;
+    FRecvPoolBase: PByte;
+    FMultishotAccept: Boolean;          // #73: multishot accept active
     // helpers
     procedure _AcceptOn(AListenFd: Integer);
     procedure _CompletionLoop;
@@ -154,14 +148,13 @@ const
   IORING_OFF_CQ_RING = Int64($8000000);
   IORING_OFF_SQES    = Int64($10000000);
 
-  // user_data sentinels / tag bits
-  UD_TAG_SEND   = UInt64(1);                    // bit 0 = send completion
-  UD_TAG_ACCEPT = UInt64(2);                    // bit 1 = accept completion (#73)
-  UD_SHUTDOWN   = UInt64($FFFFFFFFFFFFFFFF);    // NOP shutdown sentinel
+  CUdTagSend   = UInt64(1);
+  CUdTagAccept = UInt64(2);                     // #73: accept completion
+  CUdShutdown  = UInt64($FFFFFFFFFFFFFFFF);
 
-  RECV_BUF_SIZE  = 32768;
-  RING_ENTRIES   = 512;
-  RECV_POOL_SIZE = RING_ENTRIES;  // one recv ctx per possible in-flight SQE
+  CRecvBufSize  = 32768;
+  CRingEntries  = 512;
+  CRecvPoolSize = CRingEntries;
 
   // io_uring_register opcodes
   IORING_REGISTER_PROBE = UInt32(8);   // added in kernel 5.6
@@ -266,7 +259,7 @@ type
   PRecvCtx = ^TRecvCtx;
   TRecvCtx = record
     Conn: TNativeConn;
-    Buf:  array[0..RECV_BUF_SIZE - 1] of Byte;
+    Buf:  array[0..CRecvBufSize - 1] of Byte;
   end;
 
 // ---------------------------------------------------------------------------
@@ -326,9 +319,9 @@ function _LinuxMunmap(addr: Pointer; length: NativeUInt): Integer; cdecl;
 constructor TIOUringBackend.Create;
 var
   LParams: TIOUringParams;
-  LFd:     Integer;
-  LProbe:  TIOUringProbe;
-  LI:      Integer;
+  LFd: Integer;
+  LProbe: TIOUringProbe;
+  LI: Integer;
 begin
   inherited Create;
 
@@ -379,12 +372,11 @@ begin
   FRecvPoolLock := TCriticalSection.Create;
   FShutdown     := False;
 
-  // Pre-allocate recv context pool — contiguous block for cache locality
-  FRecvCtxPool := AllocMem(RECV_POOL_SIZE * SizeOf(TRecvCtx));
+  FRecvCtxPool := AllocMem(CRecvPoolSize * SizeOf(TRecvCtx));
   FRecvPoolBase := PByte(FRecvCtxPool);
-  SetLength(FRecvFreeIdx, RECV_POOL_SIZE);
-  FRecvFreeTop := RECV_POOL_SIZE;
-  for LI := 0 to RECV_POOL_SIZE - 1 do
+  SetLength(FRecvFreeIdx, CRecvPoolSize);
+  FRecvFreeTop := CRecvPoolSize;
+  for LI := 0 to CRecvPoolSize - 1 do
     FRecvFreeIdx[LI] := UInt16(LI);
 end;
 
@@ -440,29 +432,27 @@ procedure TIOUringBackend.StartListening(const AHost: string; APort: Integer;
   end;
 
 var
-  LParams:   TIOUringParams;
-  LOne, I:   Integer;
-  LSQSize:   NativeUInt;
-  LCQSize:   NativeUInt;
-  LAcceptN:  Integer;
-  LFd:       Integer;
+  LParams: TIOUringParams;
+  LOne, I: Integer;
+  LSQSize: NativeUInt;
+  LCQSize: NativeUInt;
+  LAcceptN: Integer;
+  LFd: Integer;
 begin
   FCallbacks := ACallbacks;
   FShutdown  := False;
   LAcceptN   := AAcceptThreads;
   if LAcceptN < 1 then LAcceptN := 1;
 
-  // --- Per-core listen sockets (#58) ---
   SetLength(FListenSockets, LAcceptN);
   for I := 0 to LAcceptN - 1 do
     FListenSockets[I] := CreateListenSocket;
 
-  // --- io_uring ring ---
   // #60: try SQPOLL first (kernel 5.11+ or CAP_SYS_NICE); fall back silently
   FillChar(LParams, SizeOf(LParams), 0);
   LParams.flags          := IORING_SETUP_SQPOLL;
   LParams.sq_thread_idle := 10000;  // 10ms idle before kernel poller sleeps
-  FRingFd := _io_uring_setup(RING_ENTRIES, @LParams);
+  FRingFd := _io_uring_setup(CRingEntries, @LParams);
   if FRingFd >= 0 then
     FSQPoll := True
   else
@@ -470,12 +460,11 @@ begin
     // SQPOLL not available — normal mode
     FSQPoll := False;
     FillChar(LParams, SizeOf(LParams), 0);
-    FRingFd := _io_uring_setup(RING_ENTRIES, @LParams);
+    FRingFd := _io_uring_setup(CRingEntries, @LParams);
   end;
   if FRingFd < 0 then
     raise Exception.CreateFmt('io_uring_setup failed (errno %d)', [GetLastError]);
 
-  // mmap SQ ring
   LSQSize := NativeUInt(LParams.sq_off.array_) +
              NativeUInt(LParams.sq_entries) * SizeOf(UInt32);
   FSQRing := _LinuxMmap(nil, LSQSize, PROT_READ or PROT_WRITE,
@@ -484,7 +473,6 @@ begin
     raise Exception.Create('mmap(SQ ring) failed');
   FSQRingSize := LSQSize;
 
-  // mmap CQ ring — same mapping when IORING_FEAT_SINGLE_MMAP is set
   if (LParams.features and IORING_FEAT_SINGLE_MMAP) <> 0 then
   begin
     FCQRing     := FSQRing;
@@ -501,14 +489,12 @@ begin
     FCQRingSize := LCQSize;
   end;
 
-  // mmap SQE array
   FSQEsSize := NativeUInt(LParams.sq_entries) * SizeOf(TIOUringSQE);
   FSQEs     := _LinuxMmap(nil, FSQEsSize, PROT_READ or PROT_WRITE,
     MAP_SHARED, FRingFd, IORING_OFF_SQES);
   if FSQEs = MAP_FAILED then
     raise Exception.Create('mmap(SQEs) failed');
 
-  // Resolve pointers into the rings from the kernel-supplied byte offsets
   FPSQHead  := PUInt32(PByte(FSQRing) + LParams.sq_off.head);
   FPSQTail  := PUInt32(PByte(FSQRing) + LParams.sq_off.tail);
   FPSQMask  := PUInt32(PByte(FSQRing) + LParams.sq_off.ring_mask);
@@ -519,13 +505,10 @@ begin
   FPCQMask  := PUInt32(PByte(FCQRing) + LParams.cq_off.ring_mask);
   FPCQEs    := Pointer(PByte(FCQRing) + LParams.cq_off.cqes);
 
-  // Initialise SQ indirection array with the identity mapping (slot i → SQE i).
-  // This mapping is stable for the lifetime of the ring.
   for I := 0 to Integer(LParams.sq_entries) - 1 do
     PUInt32(PByte(FSQRing) + LParams.sq_off.array_ + NativeUInt(I) * SizeOf(UInt32))^
       := UInt32(I);
 
-  // --- Completion thread ---
   FCompThread := TThread.CreateAnonymousThread(procedure begin _CompletionLoop; end);
   FCompThread.FreeOnTerminate := False;
   FCompThread.Start;
@@ -591,11 +574,9 @@ end;
 
 procedure TIOUringBackend.SignalWorkers;
 begin
-  // Post a NOP SQE with the shutdown sentinel — the completion thread exits
-  // when it sees UD_SHUTDOWN.
   FSQLock.Acquire;
   try
-    _SubmitSQE(IORING_OP_NOP, -1, nil, 0, UD_SHUTDOWN);
+    _SubmitSQE(IORING_OP_NOP, -1, nil, 0, CUdShutdown);
     _io_uring_enter(FRingFd, 1, 0, 0);
   finally
     FSQLock.Release;
@@ -609,7 +590,6 @@ begin
     FCompThread.WaitFor;
     FreeAndNil(FCompThread);
   end;
-  // Unmap ring regions
   if (FSQEs <> nil) and (FSQEs <> MAP_FAILED) then
   begin
     _LinuxMunmap(FSQEs, FSQEsSize);
@@ -639,13 +619,12 @@ end;
 
 procedure TIOUringBackend.RegisterConn(AConn: Pointer);
 begin
-  // No registration step needed: io_uring identifies the fd in each individual SQE.
-  // The first recv is posted by PostRecv immediately after this call (server contract).
+  // io_uring identifies the fd in each individual SQE — no registration step needed
 end;
 
 procedure TIOUringBackend.PostRecv(AConn: Pointer);
 var
-  LCtx:  PRecvCtx;
+  LCtx: PRecvCtx;
   LConn: TNativeConn absolute AConn;
 begin
   LCtx := _RecvPoolAcquire;
@@ -654,7 +633,7 @@ begin
   FSQLock.Acquire;
   try
     if not _SubmitSQE(IORING_OP_RECV, LConn.Socket,
-      @LCtx^.Buf[0], RECV_BUF_SIZE, UInt64(LCtx)) then
+      @LCtx^.Buf[0], CRecvBufSize, UInt64(LCtx)) then
     begin
       // Ring full — cancel the ref we just took and signal an error so the
       // server closes the connection instead of leaving it orphaned forever.
@@ -672,7 +651,7 @@ end;
 procedure TIOUringBackend.PostSend(AConn: Pointer; const AData: TBytes;
   AActualLen: Integer);
 var
-  LConn:    TNativeConn absolute AConn;
+  LConn: TNativeConn absolute AConn;
   LSendLen: Integer;
 begin
   LSendLen := AActualLen;
@@ -696,8 +675,8 @@ procedure TIOUringBackend.PostSendV(AConn: Pointer;
   const AHeaders: TBytes; AHdrLen: Integer;
   const ABody: TBytes; ABodyLen: Integer);
 var
-  LHLen:   Integer;
-  LBLen:   Integer;
+  LHLen: Integer;
+  LBLen: Integer;
   LConcat: TBytes;
 begin
   LHLen := AHdrLen;
@@ -747,18 +726,16 @@ begin
   finally
     FRecvPoolLock.Release;
   end;
-  // Pool exhausted (should not happen — pool sized to RING_ENTRIES) — heap fallback
   New(Result);
 end;
 
 procedure TIOUringBackend._RecvPoolRelease(ACtx: Pointer);
 var
   LOffset: NativeUInt;
-  LIdx:    Integer;
+  LIdx: Integer;
 begin
   LOffset := NativeUInt(PByte(ACtx)) - NativeUInt(FRecvPoolBase);
-  // Check if the pointer belongs to our pool
-  if LOffset < NativeUInt(RECV_POOL_SIZE) * SizeOf(TRecvCtx) then
+  if LOffset < NativeUInt(CRecvPoolSize) * SizeOf(TRecvCtx) then
   begin
     LIdx := Integer(LOffset div SizeOf(TRecvCtx));
     FRecvPoolLock.Acquire;
@@ -770,7 +747,6 @@ begin
     end;
   end
   else
-    // Heap-allocated fallback context
     Dispose(ACtx);
 end;
 
@@ -801,11 +777,10 @@ function TIOUringBackend._SubmitSQE(AOpcode: Byte; AFd: Integer;
   ABuf: Pointer; ALen: UInt32; AUserData: UInt64): Boolean;
 var
   LTail, LIdx: UInt32;
-  LSQE:        PIOUringSQE;
+  LSQE: PIOUringSQE;
 begin
   LTail := FPSQTail^;
 
-  // Ring is full when distance from head equals ring capacity
   if LTail - FPSQHead^ >= FPSQMask^ + 1 then
   begin
     Result := False;
@@ -821,8 +796,7 @@ begin
   LSQE^.len       := ALen;
   LSQE^.user_data := AUserData;
 
-  // Advance the SQ tail.  The subsequent io_uring_enter syscall acts as a
-  // full memory barrier, so a plain store here is sufficient on x86-64 TSO.
+  // x86-64 TSO: plain store sufficient; io_uring_enter acts as full barrier
   FPSQTail^ := LTail + 1;
 
   Result := True;
@@ -845,7 +819,7 @@ begin
   try
     if not _SubmitSQE(IORING_OP_SEND, AConn.Socket,
       @AConn.PendingSend[AConn.SentBytes], UInt32(LRemain),
-      UInt64(AConn) or UD_TAG_SEND) then
+      UInt64(AConn) or CUdTagSend) then
     begin
       AConn.Release;  // op not posted — drop the ref we just took
       FCallbacks.OnConnError(AConn);
@@ -865,7 +839,7 @@ end;
 function TIOUringBackend._SubmitAcceptMultishot(AListenFd: Integer): Boolean;
 var
   LTail, LIdx: UInt32;
-  LSQE:        PIOUringSQE;
+  LSQE: PIOUringSQE;
 begin
   LTail := FPSQTail^;
   if LTail - FPSQHead^ >= FPSQMask^ + 1 then
@@ -881,9 +855,7 @@ begin
   LSQE^.fd        := AListenFd;
   LSQE^.ioprio    := IOSQE_ACCEPT_MULTISHOT;  // multishot: one SQE → many CQEs
   LSQE^.op_flags  := UInt32(SOCK_NONBLOCK or SOCK_CLOEXEC);  // accept4 flags
-  LSQE^.user_data := UD_TAG_ACCEPT;
-  // addr=0, len=0: we don't need the remote address from the kernel
-  // (we get it via getpeername later if needed)
+  LSQE^.user_data := CUdTagAccept;
 
   FPSQTail^ := LTail + 1;
   Result := True;
@@ -892,31 +864,28 @@ end;
 procedure TIOUringBackend._ProcessCQE(AUserData: UInt64; ARes: Int32;
   AFlags: UInt32);
 var
-  LCtx:       PRecvCtx;
-  LConn:      TNativeConn;
-  LRecvConn:  TNativeConn;
-  LTotal:     Integer;
-  LOne:       Integer;
-  LAddr:      sockaddr_in;
-  LAddrLen:   Cardinal;
-  LIP:        AnsiString;
+  LCtx: PRecvCtx;
+  LConn: TNativeConn;
+  LRecvConn: TNativeConn;
+  LTotal: Integer;
+  LOne: Integer;
+  LAddr: sockaddr_in;
+  LAddrLen: Cardinal;
+  LIP: AnsiString;
 begin
-  if AUserData = UD_SHUTDOWN then
+  if AUserData = CUdShutdown then
   begin
     FShutdown := True;
     Exit;
   end;
 
-  // #73: multishot accept completion
-  if (AUserData and UD_TAG_ACCEPT) <> 0 then
+  if (AUserData and CUdTagAccept) <> 0 then
   begin
     if ARes >= 0 then
     begin
-      // ARes = new socket fd
       LOne := 1;
       _LinuxSetsockopt(ARes, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
       _LinuxSetsockopt(ARes, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
-      // Get peer address
       FillChar(LAddr, SizeOf(LAddr), 0);
       LAddrLen := SizeOf(LAddr);
       getpeername(ARes, sockaddr(LAddr), LAddrLen);
@@ -928,22 +897,18 @@ begin
         _LinuxClose(ARes);
       end;
     end;
-    // Multishot: if IORING_CQE_F_MORE is NOT set, the kernel cancelled the accept
-    // (e.g., listen socket closed). We don't need to resubmit.
+    // #73: if IORING_CQE_F_MORE not set, kernel cancelled the multishot accept
     if (AFlags and IORING_CQE_F_MORE) = 0 then
       FMultishotAccept := False;
     Exit;
   end;
 
-  if (AUserData and UD_TAG_SEND) <> 0 then
+  if (AUserData and CUdTagSend) <> 0 then
   begin
-    // --- Send completion ---
-    // user_data encodes the connection pointer with bit 0 set as the send tag.
-    LConn := TNativeConn(Pointer(UInt64(AUserData and not UD_TAG_SEND)));
+    LConn := TNativeConn(Pointer(UInt64(AUserData and not CUdTagSend)));
 
     if ARes <= 0 then
     begin
-      // Error or connection closed by peer during send
       FCallbacks.OnConnError(LConn);
       LConn.Release;  // #43: drop send-op ref (AddRef was in _ResubmitSend)
       Exit;
@@ -971,9 +936,8 @@ begin
   end
   else
   begin
-    // --- Recv completion ---
-    LCtx      := PRecvCtx(Pointer(AUserData));
-    LRecvConn := LCtx^.Conn;  // save before releasing ctx back to pool
+    LCtx := PRecvCtx(Pointer(AUserData));
+    LRecvConn := LCtx^.Conn;
     try
       if ARes > 0 then
         FCallbacks.OnRecv(LRecvConn, @LCtx^.Buf[0], Cardinal(ARes))
@@ -997,14 +961,12 @@ end;
 procedure TIOUringBackend._CompletionLoop;
 var
   LHead, LMask: UInt32;
-  LCQE:         PIOUringCQE;
+  LCQE: PIOUringCQE;
 begin
   while not FShutdown do
   begin
-    // Block until the kernel has at least one completion ready
     _io_uring_enter(FRingFd, 0, 1, IORING_ENTER_GETEVENTS);
 
-    // Drain all currently available CQEs in one pass
     LMask := FPCQMask^;
     LHead := FPCQHead^;
     while LHead <> FPCQTail^ do
@@ -1018,7 +980,6 @@ begin
           Writeln(ErrOutput, '[io_uring] CQE_EX [', E.ClassName, ']: ', E.Message);
       end;
       Inc(LHead);
-      // Advance CQ head immediately so the kernel can reuse the slot
       FPCQHead^ := LHead;
     end;
   end;
@@ -1030,11 +991,11 @@ end;
 
 procedure TIOUringBackend._AcceptOn(AListenFd: Integer);
 var
-  LFd:      Integer;
-  LAddr:    sockaddr_in;
+  LFd: Integer;
+  LAddr: sockaddr_in;
   LAddrLen: Cardinal;
-  LIP:      AnsiString;
-  LOne:     Integer;
+  LIP: AnsiString;
+  LOne: Integer;
 begin
   while True do
   begin

@@ -25,15 +25,15 @@ type
 
   THTTP2Manager = class
   private
-    FH2Enabled:             Boolean;
+    FH2Enabled: Boolean;
     FH2MaxConcurrentStreams: Cardinal;
-    FH2InitialWindowSize:   Cardinal;
-    FOnH2Push:              TOnH2Push;
-    FOnRequest:             TOnNativeRequest;
-    FInFlightCount:         PInt64;
-    FSend:                  TH2TransportSend;
-    FClose:                 TH2TransportClose;
-    FRecv:                  TH2TransportRecv;
+    FH2InitialWindowSize: Cardinal;
+    FOnH2Push: TOnH2Push;
+    FOnRequest: TOnNativeRequest;
+    FInFlightCount: PInt64;
+    FSend: TH2TransportSend;
+    FClose: TH2TransportClose;
+    FRecv: TH2TransportRecv;
   public
     constructor Create(ASend: TH2TransportSend; AClose: TH2TransportClose;
       ARecv: TH2TransportRecv);
@@ -65,24 +65,24 @@ constructor THTTP2Manager.Create(ASend: TH2TransportSend;
   AClose: TH2TransportClose; ARecv: TH2TransportRecv);
 begin
   inherited Create;
-  FSend                  := ASend;
-  FClose                 := AClose;
-  FRecv                  := ARecv;
-  FH2Enabled             := False;
+  FSend := ASend;
+  FClose := AClose;
+  FRecv := ARecv;
+  FH2Enabled := False;
   FH2MaxConcurrentStreams := 100;
-  FH2InitialWindowSize   := 65535;
-  FOnH2Push              := nil;
-  FOnRequest             := nil;
-  FInFlightCount         := nil;
+  FH2InitialWindowSize := 65535;
+  FOnH2Push := nil;
+  FOnRequest := nil;
+  FInFlightCount := nil;
 end;
 
 procedure THTTP2Manager.UpgradeToH2C(AConn: Pointer;
   const AReq: TPoseidonNativeRequest);
 var
-  LConn:   TNativeConn;
-  LResp:   TBytes;
-  LH2Req:  TH2RequestData;
-  I:       Integer;
+  LConn: TNativeConn;
+  LResp: TBytes;
+  LH2Req: TH2RequestData;
+  I: Integer;
 begin
   LConn := TNativeConn(AConn);
 
@@ -94,7 +94,7 @@ begin
   LConn.H2Conn := TH2Conn.Create(AConn, H2Send, H2Close, H2OnRequest,
     FH2MaxConcurrentStreams, FH2InitialWindowSize);
   LConn.KeepAlive := True;
-  LConn.AccumLen  := 0;
+  LConn.AccumLen := 0;
 
   FSend(AConn, LResp);
   LConn.H2Conn.SendInitialSettings;
@@ -134,31 +134,31 @@ procedure THTTP2Manager.H2OnRequest(const AReq: TH2RequestData;
   var APushResources: TArray<TPoseidonPushResource>);
 var
   LNativeReq: TPoseidonNativeRequest;
-  LQPos:      Integer;
-  LStatus:    Integer;
-  LCT:        string;
-  LBody:      TBytes;
-  LExtra:     TArray<TPair<string,string>>;
+  LQPos: Integer;
+  LStatus: Integer;
+  LCT: string;
+  LBody: TBytes;
+  LExtra: TArray<TPair<string,string>>;
 begin
   LQPos := Pos('?', AReq.Path);
   if LQPos > 0 then
   begin
-    LNativeReq.Path        := Copy(AReq.Path, 1, LQPos - 1);
+    LNativeReq.Path := Copy(AReq.Path, 1, LQPos - 1);
     LNativeReq.QueryString := Copy(AReq.Path, LQPos + 1, MaxInt);
   end else
   begin
-    LNativeReq.Path        := AReq.Path;
+    LNativeReq.Path := AReq.Path;
     LNativeReq.QueryString := AReq.QueryString;
   end;
-  LNativeReq.Method     := AReq.Method;
-  LNativeReq.RawBody    := AReq.Body;
+  LNativeReq.Method := AReq.Method;
+  LNativeReq.RawBody := AReq.Body;
   LNativeReq.RemoteAddr := AReq.RemoteAddr;
-  LNativeReq.KeepAlive  := True;
-  LNativeReq.Headers    := AReq.Headers;
+  LNativeReq.KeepAlive := True;
+  LNativeReq.Headers := AReq.Headers;
 
   LStatus := 500;
-  LCT     := 'application/json';
-  LBody   := DefaultErrorBody;
+  LCT := 'application/json';
+  LBody := DefaultErrorBody;
   SetLength(LExtra, 0);
   if FInFlightCount <> nil then
     TInterlocked.Increment(FInFlightCount^);
@@ -170,7 +170,7 @@ begin
       on E: Exception do
       begin
         LStatus := 500;
-        LCT     := 'application/problem+json';
+        LCT := 'application/problem+json';
         LBody   := TEncoding.UTF8.GetBytes(
           '{"type":"about:blank","title":"Internal Server Error",' +
           '"status":500,"detail":"' + E.Message + '"}');
@@ -182,10 +182,10 @@ begin
       TInterlocked.Decrement(FInFlightCount^);
   end;
 
-  AStatus      := LStatus;
+  AStatus := LStatus;
   AContentType := LCT;
-  ABody        := LBody;
-  AExtra       := LExtra;
+  ABody := LBody;
+  AExtra := LExtra;
 
   if Assigned(FOnH2Push) then
     FOnH2Push(LNativeReq, APushResources);

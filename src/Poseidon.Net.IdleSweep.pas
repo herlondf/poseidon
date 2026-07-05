@@ -43,7 +43,7 @@ type
 implementation
 
 const
-  SWEEP_INTERVAL_MS = 1000;
+  CSweepIntervalMs = 1000;
 
 constructor TIdleSweepManager.Create(AConnManager: TConnectionManager;
   AIOBackend: IIOBackend; AActive: PBoolean);
@@ -91,7 +91,7 @@ var
 begin
   while FActive^ do
   begin
-    FStopEvent.WaitFor(SWEEP_INTERVAL_MS);
+    FStopEvent.WaitFor(CSweepIntervalMs);
     if not FActive^ then Break;
     if FIdleTimeoutMs <= 0 then Continue;
 

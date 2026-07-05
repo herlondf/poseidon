@@ -79,7 +79,7 @@ type
 implementation
 
 const
-  PEGASUS_VERSION = '0.1.0';
+  CPoseidonVersion = '0.1.0';
 
 { TPoseidonCore }
 
@@ -124,7 +124,7 @@ end;
 
 class function TPoseidonCore.Version: string;
 begin
-  Result := PEGASUS_VERSION;
+  Result := CPoseidonVersion;
 end;
 
 class function TPoseidonCore.WrapReqRes(ACallback: TPoseidonCallbackReqRes): TPoseidonCallback;

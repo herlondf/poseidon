@@ -18,11 +18,11 @@ uses
 
 type
   TMultipartPart = record
-    Name:        string;
-    FileName:    string;
+    Name: string;
+    FileName: string;
     ContentType: string;
-    Data:        TBytes;
-    Headers:     TArray<TPair<string,string>>;
+    Data: TBytes;
+    Headers: TArray<TPair<string,string>>;
   end;
 
   TMultipartParser = class
@@ -68,20 +68,20 @@ end;
 class procedure TMultipartParser.ParseHeaders(const AHdr: TBytes;
   var APart: TMultipartPart);
 var
-  LData:   string;
-  LLines:  TArray<string>;
-  LLine:   string;
-  LColon:  Integer;
-  LName:   string;
-  LValue:  string;
-  LSemi:   Integer;
+  LData: string;
+  LLines: TArray<string>;
+  LLine: string;
+  LColon: Integer;
+  LName: string;
+  LValue: string;
+  LSemi: Integer;
   LParams: TArray<string>;
-  LParam:  string;
-  LTrim:   string;
-  LCount:  Integer;
+  LParam: string;
+  LTrim: string;
+  LCount: Integer;
 begin
-  APart.Name        := '';
-  APart.FileName    := '';
+  APart.Name := '';
+  APart.FileName := '';
   APart.ContentType := 'text/plain';
   SetLength(APart.Headers, 0);
   LCount := 0;
@@ -94,11 +94,11 @@ begin
     if LLine.IsEmpty then Continue;
     LColon := Pos(':', LLine);
     if LColon <= 0 then Continue;
-    LName  := Trim(Copy(LLine, 1, LColon - 1));
+    LName := Trim(Copy(LLine, 1, LColon - 1));
     LValue := Trim(Copy(LLine, LColon + 1, MaxInt));
 
     SetLength(APart.Headers, LCount + 1);
-    APart.Headers[LCount].Key   := LName;
+    APart.Headers[LCount].Key := LName;
     APart.Headers[LCount].Value := LValue;
     Inc(LCount);
 
@@ -127,11 +127,11 @@ end;
 
 class function TMultipartParser.ExtractBoundary(const AContentType: string): string;
 const
-  PREFIX = 'boundary=';
+  CPrefix = 'boundary=';
 var
   LParts: TArray<string>;
-  LP:     string;
-  LT:     string;
+  LP: string;
+  LT: string;
 begin
   Result := '';
   if AContentType.IsEmpty then Exit;
@@ -139,9 +139,9 @@ begin
   for LP in LParts do
   begin
     LT := Trim(LP);
-    if LT.ToLower.StartsWith(PREFIX) then
+    if LT.ToLower.StartsWith(CPrefix) then
     begin
-      Result := StripQuotes(Copy(LT, Length(PREFIX) + 1, MaxInt));
+      Result := StripQuotes(Copy(LT, Length(CPrefix) + 1, MaxInt));
       Exit;
     end;
   end;
@@ -150,20 +150,20 @@ end;
 class function TMultipartParser.Parse(const ABody: TBytes;
   const ABoundary: string): TArray<TMultipartPart>;
 var
-  LFirst:  TBytes;  // --boundary
-  LDelim:  TBytes;  // \r\n--boundary
+  LFirst: TBytes;
+  LDelim: TBytes;
   LPos, LNext: Integer;
   LHdrEnd: Integer;
-  LPart:   TMultipartPart;
-  LCount:  Integer;
-  LHdr:    TBytes;
+  LPart: TMultipartPart;
+  LCount: Integer;
+  LHdr: TBytes;
   LHdrLen: Integer;
   LDataStart, LDataLen: Integer;
   LBodyLen: Integer;
   I: Integer;
 begin
   SetLength(Result, 0);
-  LCount   := 0;
+  LCount := 0;
   LBodyLen := Length(ABody);
   if ABoundary.IsEmpty or (LBodyLen = 0) then Exit;
 
