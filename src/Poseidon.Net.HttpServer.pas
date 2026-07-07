@@ -77,7 +77,6 @@ type
     // R-6: injected dependencies (DIP) — nil = use DefaultXxx singleton
     FBufferPool:      IBufferPool;
     FSSLProvider:     ISSLProvider;
-    FCompression:     ICompressionProvider;
 
     procedure SetSyncDispatch(AValue: Boolean);
     function  GetMaxConnections: Integer;
@@ -122,12 +121,11 @@ type
     function  _DispatchWSFrames(AConn: Pointer): Boolean;
     procedure _Log(ALevel: TLogLevel; const AMessage: string);
   public
-    // ABufferPool, ASSLProvider, ACompression: nil selects the built-in default
+    // ABufferPool, ASSLProvider: nil selects the built-in default
     // (backward-compatible — existing code that calls Create without args unchanged).
     constructor Create(
-      ABufferPool:  IBufferPool          = nil;
-      ASSLProvider: ISSLProvider         = nil;
-      ACompression: ICompressionProvider = nil); overload;
+      ABufferPool:  IBufferPool  = nil;
+      ASSLProvider: ISSLProvider = nil); overload;
     destructor  Destroy; override;
     procedure ConfigureSSL(const ACertFile, AKeyFile: string);
     procedure AddSSLCert(const AHostName, ACertFile, AKeyFile: string);
@@ -873,8 +871,7 @@ end;
 
 constructor TPoseidonNativeServer.Create(
   ABufferPool:  IBufferPool;
-  ASSLProvider: ISSLProvider;
-  ACompression: ICompressionProvider);
+  ASSLProvider: ISSLProvider);
 begin
   inherited Create;
   // R-6: wire injected dependencies; nil = built-in defaults
@@ -882,8 +879,6 @@ begin
                           else FBufferPool  := DefaultBufferPool;
   if ASSLProvider <> nil then FSSLProvider := ASSLProvider
                           else FSSLProvider := DefaultSSLProvider;
-  if ACompression <> nil then FCompression := ACompression
-                          else FCompression := DefaultCompressionProvider;
   FConnManager             := TConnectionManager.Create;  // #84
   FSSLManager              := TSSLManager.Create(FSSLProvider);  // #85
   FIdleTimeoutMs           := 10000;

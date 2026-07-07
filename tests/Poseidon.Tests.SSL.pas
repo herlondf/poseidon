@@ -12,7 +12,7 @@ unit Poseidon.Tests.SSL;
 //   - IsAvailable=False prevents ConfigureSSL from loading
 //   - AddSNICertificate calls the correct provider methods
 //   - Constructor with nil provider falls back to DefaultSSLProvider
-//   - Custom IBufferPool and ICompressionProvider are stored (R-6 DIP)
+//   - Custom IBufferPool is stored (R-6 DIP)
 //
 // Port: none — these are pure unit tests (no Listen call).
 
@@ -87,7 +87,7 @@ uses
 function MakeConfigured(ASpy: TSpySSLProvider;
   AH2: Boolean = False): TPoseidonNativeServer;
 begin
-  Result := TPoseidonNativeServer.Create(nil, ASpy, nil);
+  Result := TPoseidonNativeServer.Create(nil, ASpy);
   Result.HTTP2Enabled := AH2;
   Result.ConfigureSSL('fake.crt', 'fake.key');
 end;
@@ -253,7 +253,7 @@ const
   TLS13_VERSION = $0304;  // 772
 begin
   LSpy    := TSpySSLProvider.Create;
-  LServer := TPoseidonNativeServer.Create(nil, LSpy, nil);
+  LServer := TPoseidonNativeServer.Create(nil, LSpy);
   try
     LServer.MinTLSVersion := TLS13_VERSION;
     LServer.ConfigureSSL('fake.crt', 'fake.key');
@@ -303,7 +303,7 @@ var
   LRaised: Boolean;
 begin
   LSpy    := TSpySSLProvider.Create;
-  LServer := TPoseidonNativeServer.Create(nil, LSpy, nil);
+  LServer := TPoseidonNativeServer.Create(nil, LSpy);
   LRaised := False;
   try
     try
@@ -326,7 +326,7 @@ var
 begin
   LSpy           := TSpySSLProvider.Create;
   LSpy.Available := False;
-  LServer := TPoseidonNativeServer.Create(nil, LSpy, nil);
+  LServer := TPoseidonNativeServer.Create(nil, LSpy);
   LRaised := False;
   try
     try

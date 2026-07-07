@@ -27,7 +27,6 @@ uses
   Poseidon.Response,
   Poseidon.Callback,
   Poseidon.Exception,
-  Poseidon.Validation,
   Poseidon.Provider.Indy,
   Poseidon.Provider.IndyDirect
 {$IF DEFINED(MSWINDOWS) OR DEFINED(LINUX)}
@@ -56,14 +55,6 @@ type
   // Route groups
   TPoseidonGroup      = Poseidon.Core.Group.TPoseidonGroup;
   TPoseidonGroupBlock = Poseidon.Core.Group.TPoseidonGroupBlock;
-
-  // Validation attributes (re-exported for use without extra unit)
-  RequiredAttribute  = Poseidon.Validation.RequiredAttribute;
-  MinLengthAttribute = Poseidon.Validation.MinLengthAttribute;
-  MaxLengthAttribute = Poseidon.Validation.MaxLengthAttribute;
-  EmailAttribute     = Poseidon.Validation.EmailAttribute;
-  RangeAttribute     = Poseidon.Validation.RangeAttribute;
-  PatternAttribute   = Poseidon.Validation.PatternAttribute;
 
   // Default provider: Native (IOCP/epoll) on Windows+Linux, Indy elsewhere
 {$IF DEFINED(MSWINDOWS) OR DEFINED(LINUX)}

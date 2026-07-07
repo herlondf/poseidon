@@ -10,7 +10,7 @@ unit Poseidon.Mock.SSLProvider;
 //   var LSpy := TSpySSLProvider.Create;
 //   LSpy.HandshakeResult := 1;          // 1 = success, -1 = error
 //   LSpy.HandshakeErrorCode := 0;       // SSL_ERROR_NONE
-//   var LServer := TPoseidonNativeServer.Create(nil, LSpy, nil);
+//   var LServer := TPoseidonNativeServer.Create(nil, LSpy);
 //   LServer.ConfigureSSL('cert.crt', 'cert.key');  // calls recorded
 //   Assert.Contains(LSpy.CallLog, 'EnsureLoaded');
 //

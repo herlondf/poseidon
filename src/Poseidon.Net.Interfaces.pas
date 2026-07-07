@@ -2,19 +2,17 @@ unit Poseidon.Net.Interfaces;
 
 // R-6: Dependency-Inversion contracts for TPoseidonNativeServer.
 //
-// Defines three injectable interfaces that decouple the server from its
+// Defines two injectable interfaces that decouple the server from its
 // concrete dependencies. Each interface has a default implementation backed
 // by the real class; passing nil to the server constructor selects the default.
 //
 // Interfaces:
-//   IBufferPool          — acquire/release pooled TBytes buffers
-//   ICompressionProvider — negotiate and apply content-encoding (gzip etc.)
-//   ISSLProvider         — create/configure SSL_CTX and SSL objects
+//   IBufferPool   — acquire/release pooled TBytes buffers
+//   ISSLProvider  — create/configure SSL_CTX and SSL objects
 //
 // Default implementations (returned by Default* functions):
-//   TDefaultBufferPool          — wraps TBufferPool class methods
-//   TDefaultCompressionProvider — wraps TZCompressionStream (ZLib)
-//   TDefaultSSLProvider         — wraps TPoseidonSSL class methods
+//   TDefaultBufferPool   — wraps TBufferPool class methods
+//   TDefaultSSLProvider  — wraps TPoseidonSSL class methods
 
 interface
 
@@ -30,23 +28,6 @@ type
     ['{A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D}']
     function  Acquire(ASize: Integer = 0): TBytes;
     procedure Release(var ABuf: TBytes);
-  end;
-
-  // -----------------------------------------------------------------------
-  // ICompressionProvider — optional response body compression
-  // -----------------------------------------------------------------------
-  ICompressionProvider = interface
-    ['{B2C3D4E5-F6A7-4B5C-9D0E-1F2A3B4C5D6E}']
-    // Returns True if the runtime compression library is available.
-    function IsAvailable: Boolean;
-    // Attempts to compress AInput using a format acceptable to the client.
-    // AAcceptEncoding is the raw value of the Accept-Encoding request header.
-    // On success: AOutput = compressed bytes, AEncoding = 'gzip'/'br'/etc.
-    // Returns False when compression is unavailable or not accepted.
-    function TryCompress(const AInput: TBytes;
-      const AAcceptEncoding: string;
-      out   AOutput:   TBytes;
-      out   AEncoding: string): Boolean;
   end;
 
   // -----------------------------------------------------------------------
@@ -107,14 +88,12 @@ type
 // ---------------------------------------------------------------------------
 
 function DefaultBufferPool: IBufferPool;
-function DefaultCompressionProvider: ICompressionProvider;
 function DefaultSSLProvider: ISSLProvider;
 
 implementation
 
 uses
   System.Classes,
-  System.ZLib,
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.SSL;
 
@@ -137,56 +116,6 @@ end;
 procedure TDefaultBufferPool.Release(var ABuf: TBytes);
 begin
   TBufferPool.Release(ABuf);
-end;
-
-// ===========================================================================
-// TDefaultCompressionProvider
-// ===========================================================================
-
-type
-  TDefaultCompressionProvider = class(TInterfacedObject, ICompressionProvider)
-  public
-    function IsAvailable: Boolean;
-    function TryCompress(const AInput: TBytes;
-      const AAcceptEncoding: string;
-      out   AOutput:   TBytes;
-      out   AEncoding: string): Boolean;
-  end;
-
-function TDefaultCompressionProvider.IsAvailable: Boolean;
-begin
-  Result := True;  // ZLib is always bundled with Delphi RTL
-end;
-
-function TDefaultCompressionProvider.TryCompress(const AInput: TBytes;
-  const AAcceptEncoding: string;
-  out   AOutput:   TBytes;
-  out   AEncoding: string): Boolean;
-var
-  LDest: TBytesStream;
-  LZip:  TZCompressionStream;
-begin
-  Result    := False;
-  AOutput   := nil;
-  AEncoding := '';
-  if AInput = nil then Exit;
-  if Pos('gzip', LowerCase(AAcceptEncoding)) = 0 then Exit;
-
-  LDest := TBytesStream.Create(nil);
-  try
-    LZip := TZCompressionStream.Create(LDest, zcDefault, 31);  // 31 = gzip wrapper
-    try
-      LZip.WriteBuffer(AInput[0], Length(AInput));
-    finally
-      LZip.Free;
-    end;
-    AOutput   := LDest.Bytes;
-    SetLength(AOutput, LDest.Size);
-    AEncoding := 'gzip';
-    Result    := True;
-  finally
-    LDest.Free;
-  end;
 end;
 
 // ===========================================================================
@@ -362,7 +291,6 @@ end;
 
 var
   GBufferPool:  IBufferPool;
-  GCompression: ICompressionProvider;
   GSSLProvider: ISSLProvider;
 
 function DefaultBufferPool: IBufferPool;
@@ -370,13 +298,6 @@ begin
   if GBufferPool = nil then
     GBufferPool := TDefaultBufferPool.Create;
   Result := GBufferPool;
-end;
-
-function DefaultCompressionProvider: ICompressionProvider;
-begin
-  if GCompression = nil then
-    GCompression := TDefaultCompressionProvider.Create;
-  Result := GCompression;
 end;
 
 function DefaultSSLProvider: ISSLProvider;
@@ -388,12 +309,10 @@ end;
 
 initialization
   GBufferPool  := nil;
-  GCompression := nil;
   GSSLProvider := nil;
 
 finalization
   GBufferPool  := nil;
-  GCompression := nil;
   GSSLProvider := nil;
 
 end.

@@ -433,12 +433,25 @@ begin
 end;
 
 function TPoseidonResponse.Send<T>(AContent: T): TPoseidonResponse;
+var
+  LStream: TStream;
 begin
   // Horse's Send<T> serializes the object to JSON and frees it.
   // Detect TJSONValue subclasses (TJSONArray, TJSONObject) and use the
   // TJSONValue overload to avoid RTTI serialization (which causes stack overflow).
+  // Detect TStream subclasses and send raw bytes via ContentStream instead of
+  // RTTI serialization (which would emit FCapacity/FSize/FPosition fields).
   if TObject(AContent) is TJSONValue then
     Result := Json(TJSONValue(TObject(AContent)))
+  else if TObject(AContent) is TStream then
+  begin
+    LStream := TStream(TObject(AContent));
+    LStream.Position := 0;
+    FWebResponse.FreeContentStream := False;
+    FWebResponse.ContentLength := LStream.Size;
+    FWebResponse.ContentStream := LStream;
+    Result := Self;
+  end
   else
     Result := Json(TObject(AContent));
 end;

@@ -19,7 +19,6 @@ uses
   Poseidon.Tests.SSL,
   // Poseidon.Tests.Brotli,  // #83: disabled — references removed server properties
   Poseidon.Tests.HPACK,
-  Poseidon.Tests.Metrics,
   Poseidon.Tests.Dispatcher,
   Poseidon.Tests.WebAdapters,
   Poseidon.Tests.Connection,
