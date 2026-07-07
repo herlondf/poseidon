@@ -58,22 +58,11 @@
     <DCCReference Include="Poseidon.Tests.Brotli.pas"/>
     <DCCReference Include="Poseidon.Tests.HPACK.pas"/>
     <DCCReference Include="Poseidon.Tests.Dispatcher.pas"/>
-    <DCCReference Include="Poseidon.Tests.WebAdapters.pas"/>
     <DCCReference Include="Poseidon.Tests.Connection.pas"/>
     <DCCReference Include="Poseidon.Tests.Workers.pas"/>
-    <DCCReference Include="Poseidon.Tests.PoolNative.pas"/>
-    <DCCReference Include="Poseidon.Tests.Router.pas"/>
     <DCCReference Include="Poseidon.Tests.Validation.pas"/>
-    <DCCReference Include="Poseidon.Tests.Middleware.pas"/>
-    <DCCReference Include="Poseidon.Tests.OpenAPI.pas"/>
     <DCCReference Include="Poseidon.Tests.Problem.pas"/>
-    <DCCReference Include="Poseidon.Tests.SerializerCookies.pas"/>
-    <DCCReference Include="Poseidon.Tests.StabilityMiddleware.pas"/>
-    <DCCReference Include="Poseidon.Tests.StaticMetrics.pas"/>
-    <DCCReference Include="Poseidon.Tests.HorseCompat.pas"/>
     <DCCReference Include="mocks\Poseidon.Mock.SSLProvider.pas"/>
-    <DCCReference Include="mocks\Poseidon.Mock.WebRequest.pas"/>
-    <DCCReference Include="mocks\Poseidon.Mock.WebResponse.pas"/>
   </ItemGroup>
   <ProjectExtensions>
     <Borland.Personality>Delphi.Personality.12</Borland.Personality>

@@ -1,8 +1,8 @@
-﻿program Poseidon.Sample.BasicHttp;
+program Poseidon.Sample.BasicHttp;
 
-// Sample 01 — Basic HTTP Server
-// Demonstrates the minimal setup to run TPoseidonNativeServer.
-// Covers: server creation, Listen, graceful Stop on Enter.
+// Sample 01 — Basic HTTP Server (Native API)
+// Demonstrates the minimal setup with TPoseidonServer.
+// Covers: route registration, params, middleware, graceful Stop.
 //
 // Run:
 //   Poseidon.Sample.BasicHttp.exe
@@ -13,69 +13,50 @@
 
 uses
   System.SysUtils,
-  System.StrUtils,
-  System.Generics.Collections,
-  Poseidon.Net.HttpServer;
+  Poseidon.Native.Types,
+  Poseidon.Native.Server;
 
 const
-  SERVER_PORT = 9001;
-
-procedure HandleRequest(
-  const AReq:          TPoseidonNativeRequest;
-  out   AStatus:       Integer;
-  out   AContentType:  string;
-  out   ABody:         TBytes;
-  out   AExtraHeaders: TArray<TPair<string, string>>);
-var
-  LPath: string;
-  LJson: string;
-begin
-  AExtraHeaders := [];
-  LPath := AReq.Path;
-
-  if LPath = '/ping' then
-  begin
-    AStatus      := 200;
-    AContentType := 'application/json';
-    LJson        := '{"message":"pong"}';
-    ABody        := TEncoding.UTF8.GetBytes(LJson);
-  end
-  else if StartsText('/hello/', LPath) then
-  begin
-    AStatus      := 200;
-    AContentType := 'application/json';
-    LJson        := '{"hello":"' + Copy(LPath, Length('/hello/') + 1, MaxInt) + '"}';
-    ABody        := TEncoding.UTF8.GetBytes(LJson);
-  end
-  else
-  begin
-    AStatus      := 404;
-    AContentType := 'application/json';
-    LJson        := '{"error":"not found","path":"' + LPath + '"}';
-    ABody        := TEncoding.UTF8.GetBytes(LJson);
-  end;
-end;
+  CServerPort = 9001;
 
 var
-  LServer: TPoseidonNativeServer;
+  App: TPoseidonServer;
 begin
-  LServer := TPoseidonNativeServer.Create;
+  App := TPoseidonServer.Create;
   try
-    Writeln('Poseidon Sample 01 — Basic HTTP Server');
-    Writeln('Listening on http://0.0.0.0:', SERVER_PORT);
-    Writeln('  GET /ping        → {"message":"pong"}');
-    Writeln('  GET /hello/:name → {"hello":"<name>"}');
+    App.Get('/ping',
+      procedure(var Ctx: TNativeRequestContext)
+      begin
+        Ctx.Status := 200;
+        Ctx.ContentType := 'application/json';
+        Ctx.Body := TEncoding.UTF8.GetBytes('{"message":"pong"}');
+      end);
+
+    App.Get('/hello/:name',
+      procedure(var Ctx: TNativeRequestContext)
+      var
+        LName: string;
+      begin
+        LName := Ctx.Param('name');
+        Ctx.Status := 200;
+        Ctx.ContentType := 'application/json';
+        Ctx.Body := TEncoding.UTF8.GetBytes('{"hello":"' + LName + '"}');
+      end);
+
+    Writeln('Poseidon Sample 01 — Basic HTTP Server (Native API)');
+    Writeln('Listening on http://0.0.0.0:', CServerPort);
+    Writeln('  GET /ping        -> {"message":"pong"}');
+    Writeln('  GET /hello/:name -> {"hello":"<name>"}');
     Writeln;
 
-    LServer.Listen('0.0.0.0', SERVER_PORT,
-      HandleRequest,
+    App.Listen(CServerPort, '0.0.0.0',
       procedure
       begin
         Writeln('Server ready. Press Enter to stop...');
         Readln;
-        LServer.Stop;
+        App.Stop;
       end);
   finally
-    LServer.Free;
+    App.Free;
   end;
 end.

@@ -4,7 +4,7 @@ interface
 
 uses
   System.SysUtils,
-  Poseidon.Commons;
+  Poseidon.Status;
 
 type
   EPoseidonException = class(Exception)

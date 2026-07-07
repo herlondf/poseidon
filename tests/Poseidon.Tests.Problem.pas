@@ -7,7 +7,7 @@ uses
   System.JSON,
   Poseidon.Problem,
   Poseidon.Exception,
-  Poseidon.Commons;
+  Poseidon.Status;
 
 type
   [TestFixture]

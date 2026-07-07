@@ -1,4 +1,4 @@
-﻿program Poseidon.Tests;
+program Poseidon.Tests;
 
 {$APPTYPE CONSOLE}
 
@@ -17,29 +17,13 @@ uses
   Poseidon.Tests.ResponseBuilder,
   Poseidon.Tests.ProxyProtocol,
   Poseidon.Tests.SSL,
-  // Poseidon.Tests.Brotli,  // #83: disabled — references removed server properties
   Poseidon.Tests.HPACK,
   Poseidon.Tests.Dispatcher,
-  Poseidon.Tests.WebAdapters,
   Poseidon.Tests.Connection,
   Poseidon.Tests.Workers,
-  Poseidon.Tests.PoolNative,
-  // Framework tests (ex-Pegasus)
-  Poseidon.Tests.Router,
-  Poseidon.Tests.Validation,
-  Poseidon.Tests.Middleware,
-  // Poseidon.Tests.OpenAPI,  // #83: disabled — unit Poseidon.OpenAPI not found
   Poseidon.Tests.Problem,
-  Poseidon.Tests.SerializerCookies,
-  Poseidon.Tests.StabilityMiddleware,
-  Poseidon.Tests.StaticMetrics,
-  // Horse compatibility tests
-  Poseidon.Tests.HorseCompat,
-  // Poseidon.Tests.MiddlewareIntegration — disabled: requires Horse unit
-  // Mocks
-  Poseidon.Mock.SSLProvider,
-  Poseidon.Mock.WebRequest,
-  Poseidon.Mock.WebResponse;
+  Poseidon.Tests.Validation,
+  Poseidon.Mock.SSLProvider;
 
 var
   LRunner:  ITestRunner;

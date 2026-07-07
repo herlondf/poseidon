@@ -2,8 +2,10 @@ unit Poseidon.Native.Router;
 
 // #93: Native router — hash-map for static routes, linear scan for param routes.
 //
-// Static routes: O(1) lookup via TDictionary (key = 'GET/ping').
+// Static routes: O(1) lookup via TDictionary (key = 'GET/ping') → index into
+//   FStaticEntries list. Returns stable pointer via List[I].
 // Param routes: O(n) linear scan with segment-count filter (n = param routes, <20).
+//   Path is split once before the loop to avoid repeated allocations.
 // Each route entry has a pre-compiled middleware array + handler pointer.
 
 interface
@@ -31,31 +33,26 @@ type
 
   TNativeRouter = class
   private
-    FStaticRoutes: TDictionary<string, TNativeRouteEntry>;
+    FStaticIndex: TDictionary<string, Integer>;
+    FStaticEntries: TList<TNativeRouteEntry>;
     FParamRoutes: TList<TNativeParamRoute>;
     FGlobalMiddlewares: TArray<TNativeMiddlewareEntry>;
-    FLastMatch: TNativeRouteEntry;
 
     class function MakeKey(const AMethod, APath: string): string; static;
-    function MatchParam(const ARoute: TNativeParamRoute; const APath: string;
+    function MatchParam(const ARoute: TNativeParamRoute;
+      const ASegments: TArray<string>;
       var ACtx: TNativeRequestContext): Boolean;
   public
     constructor Create;
     destructor Destroy; override;
 
-    // Register a static or parameterized route
     procedure AddRoute(const AMethod, APath: string;
       const AEntry: TNativeRouteEntry);
-
-    // Register a global middleware
     procedure AddGlobalMiddleware(const AEntry: TNativeMiddlewareEntry);
 
-    // Lookup: returns pointer to route entry, nil if not found.
-    // For param routes, populates ACtx.Params.
     function Lookup(const AMethod, APath: string;
       var ACtx: TNativeRequestContext): PNativeRouteEntry;
 
-    // Global middlewares (read-only)
     property GlobalMiddlewares: TArray<TNativeMiddlewareEntry> read FGlobalMiddlewares;
   end;
 
@@ -69,14 +66,16 @@ end;
 constructor TNativeRouter.Create;
 begin
   inherited Create;
-  FStaticRoutes := TDictionary<string, TNativeRouteEntry>.Create;
-  FParamRoutes  := TList<TNativeParamRoute>.Create;
+  FStaticIndex := TDictionary<string, Integer>.Create;
+  FStaticEntries := TList<TNativeRouteEntry>.Create;
+  FParamRoutes := TList<TNativeParamRoute>.Create;
 end;
 
 destructor TNativeRouter.Destroy;
 begin
   FreeAndNil(FParamRoutes);
-  FreeAndNil(FStaticRoutes);
+  FreeAndNil(FStaticEntries);
+  FreeAndNil(FStaticIndex);
   inherited Destroy;
 end;
 
@@ -88,12 +87,22 @@ var
   LNames: TArray<string>;
   I, LCount: Integer;
   LHasParam: Boolean;
+  LKey: string;
+  LIdx: Integer;
 begin
   LHasParam := Pos(':', APath) > 0;
 
   if not LHasParam then
   begin
-    FStaticRoutes.AddOrSetValue(MakeKey(AMethod, APath), AEntry);
+    LKey := MakeKey(AMethod, APath);
+    if FStaticIndex.TryGetValue(LKey, LIdx) then
+      FStaticEntries[LIdx] := AEntry
+    else
+    begin
+      LIdx := FStaticEntries.Count;
+      FStaticEntries.Add(AEntry);
+      FStaticIndex.Add(LKey, LIdx);
+    end;
     Exit;
   end;
 
@@ -130,23 +139,30 @@ end;
 function TNativeRouter.Lookup(const AMethod, APath: string;
   var ACtx: TNativeRequestContext): PNativeRouteEntry;
 var
-  LEntry: TNativeRouteEntry;
+  LIdx: Integer;
   I: Integer;
+  LSegments: TArray<string>;
+  LSegCount: Integer;
 begin
-  if FStaticRoutes.TryGetValue(MakeKey(AMethod, APath), LEntry) then
+  if FStaticIndex.TryGetValue(MakeKey(AMethod, APath), LIdx) then
   begin
-    FLastMatch := LEntry;
-    Result := @FLastMatch;
+    Result := @FStaticEntries.List[LIdx];
     Exit;
   end;
 
-  for I := 0 to FParamRoutes.Count - 1 do
+  if FParamRoutes.Count > 0 then
   begin
-    if not SameText(FParamRoutes[I].Method, AMethod) then Continue;
-    if MatchParam(FParamRoutes[I], APath, ACtx) then
+    LSegments := APath.Split(['/'], TStringSplitOptions.ExcludeEmpty);
+    LSegCount := Length(LSegments);
+    for I := 0 to FParamRoutes.Count - 1 do
     begin
-      Result := @FParamRoutes.List[I].Entry;
-      Exit;
+      if not SameText(FParamRoutes[I].Method, AMethod) then Continue;
+      if FParamRoutes[I].SegmentCount <> LSegCount then Continue;
+      if MatchParam(FParamRoutes[I], LSegments, ACtx) then
+      begin
+        Result := @FParamRoutes.List[I].Entry;
+        Exit;
+      end;
     end;
   end;
 
@@ -154,16 +170,13 @@ begin
 end;
 
 function TNativeRouter.MatchParam(const ARoute: TNativeParamRoute;
-  const APath: string; var ACtx: TNativeRequestContext): Boolean;
+  const ASegments: TArray<string>;
+  var ACtx: TNativeRequestContext): Boolean;
 var
-  LSegments: TArray<string>;
   I, LPIdx: Integer;
   LParams: TArray<TPair<string,string>>;
 begin
   Result := False;
-  LSegments := APath.Split(['/'], TStringSplitOptions.ExcludeEmpty);
-  if Length(LSegments) <> ARoute.SegmentCount then Exit;
-
   LPIdx := 0;
   SetLength(LParams, Length(ARoute.Entry.ParamNames));
   for I := 0 to ARoute.SegmentCount - 1 do
@@ -171,10 +184,10 @@ begin
     if ARoute.Segments[I].StartsWith(':') then
     begin
       LParams[LPIdx] := TPair<string,string>.Create(
-        ARoute.Entry.ParamNames[LPIdx], LSegments[I]);
+        ARoute.Entry.ParamNames[LPIdx], ASegments[I]);
       Inc(LPIdx);
     end
-    else if not SameText(ARoute.Segments[I], LSegments[I]) then
+    else if not SameText(ARoute.Segments[I], ASegments[I]) then
       Exit;
   end;
 

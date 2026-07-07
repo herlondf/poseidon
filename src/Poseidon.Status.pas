@@ -1,13 +1,11 @@
-unit Poseidon.Commons;
+unit Poseidon.Status;
+
+// HTTP status codes and MIME type constants.
+// Zero external dependencies — no Web.HTTPApp, no WebBroker.
 
 interface
 
-uses
-  Web.HTTPApp;
-
 type
-  TMethodType = Web.HTTPApp.TMethodType;
-
   THTTPStatus = record
   private
     FCode: Integer;
@@ -55,11 +53,10 @@ type
     class var TextPlain: string;
     class var TextHTML: string;
     class var ApplicationOctetStream: string;
+    class var ApplicationProblemJSON: string;
   end;
 
 implementation
-
-{ THTTPStatus }
 
 constructor THTTPStatus.Create(ACode: Integer);
 begin
@@ -75,8 +72,6 @@ class operator THTTPStatus.Implicit(AStatus: THTTPStatus): Integer;
 begin
   Result := AStatus.FCode;
 end;
-
-{ TMimeType }
 
 initialization
   THTTPStatus.Continue := THTTPStatus.Create(100);
@@ -115,5 +110,6 @@ initialization
   TMimeType.TextPlain := 'text/plain';
   TMimeType.TextHTML := 'text/html';
   TMimeType.ApplicationOctetStream := 'application/octet-stream';
+  TMimeType.ApplicationProblemJSON := 'application/problem+json';
 
 end.

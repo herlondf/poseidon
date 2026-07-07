@@ -1,72 +1,71 @@
 unit Poseidon;
 
 // Poseidon — REST framework for Delphi 11+
-// Inspired by Horse (HashLoad/horse), built from scratch.
+// Built for performance: zero-copy native API with IOCP/epoll.
 //
-// Quick start:
+// Quick start (native API — recommended):
 //   uses Poseidon;
 //
+//   var
+//     App: TPoseidonServer;
 //   begin
-//     TPoseidon.Get('/ping',
-//       procedure(Req: TPoseidonRequest; Res: TPoseidonResponse)
-//       begin
-//         Res.Send('pong');
-//       end);
-//     TPoseidon.Listen(9000);
+//     App := TPoseidonServer.Create;
+//     try
+//       App.Get('/ping',
+//         procedure(var Ctx: TNativeRequestContext)
+//         begin
+//           Ctx.Status := 200;
+//           Ctx.ContentType := 'text/plain';
+//           Ctx.Body := TEncoding.UTF8.GetBytes('pong');
+//         end);
+//       App.Listen(9000);
+//     finally
+//       App.Free;
+//     end;
 //   end.
 
 interface
 
 uses
-  Poseidon.Commons,
-  Poseidon.Proc,
-  Poseidon.Core,
-  Poseidon.Core.RouterTree,
-  Poseidon.Core.Group,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Callback,
+  Poseidon.Status,
+  Poseidon.Native.Types,
+  Poseidon.Native.Server,
+  Poseidon.Native.Group,
+  Poseidon.Net.WebSocket,
+  Poseidon.Net.Types,
   Poseidon.Exception,
-  Poseidon.Provider.Indy,
-  Poseidon.Provider.IndyDirect
-{$IF DEFINED(MSWINDOWS) OR DEFINED(LINUX)}
-  ,Poseidon.Provider.Native
-{$ENDIF}
-  ;
+  Poseidon.Problem;
 
 type
-  // Core types exposed at top level
-  THTTPStatus   = Poseidon.Commons.THTTPStatus;
-  TMethodType   = Poseidon.Commons.TMethodType;
-  TMimeType     = Poseidon.Commons.TMimeType;
-  TNextProc     = Poseidon.Proc.TNextProc;
-  TProc         = Poseidon.Proc.TProc;
+  // Primary API — native zero-copy
+  TPoseidonServer = Poseidon.Native.Server.TPoseidonServer;
+  TNativeRequestContext = Poseidon.Native.Types.TNativeRequestContext;
+  PNativeRequestContext = Poseidon.Native.Types.PNativeRequestContext;
+  TNativeHandler = Poseidon.Native.Types.TNativeHandler;
+  TNativeHandlerFunc = Poseidon.Native.Types.TNativeHandlerFunc;
+  TNativeMiddleware = Poseidon.Native.Types.TNativeMiddleware;
+  TNativeMiddlewareFunc = Poseidon.Native.Types.TNativeMiddlewareFunc;
+  TNativeGroup = Poseidon.Native.Group.TNativeGroup;
+  TNativeGroupBlock = Poseidon.Native.Group.TNativeGroupBlock;
 
-  TPoseidonRequest    = Poseidon.Request.TPoseidonRequest;
-  TPoseidonResponse   = Poseidon.Response.TPoseidonResponse;
-  TPoseidonCallback   = Poseidon.Callback.TPoseidonCallback;
-  TPoseidonCallbackReqRes = Poseidon.Callback.TPoseidonCallbackReqRes;
-  TPoseidonCallbackReq    = Poseidon.Callback.TPoseidonCallbackReq;
+  // WebSocket
+  IPoseidonWSConn = Poseidon.Net.WebSocket.IPoseidonWSConn;
+  TWSMessageCallback = Poseidon.Net.WebSocket.TWSMessageCallback;
 
-  EPoseidonException          = Poseidon.Exception.EPoseidonException;
+  // Error handling
+  EPoseidonException = Poseidon.Exception.EPoseidonException;
   EPoseidonCallbackInterrupted = Poseidon.Exception.EPoseidonCallbackInterrupted;
-  EPoseidonValidation         = Poseidon.Exception.EPoseidonValidation;
+  EPoseidonValidation = Poseidon.Exception.EPoseidonValidation;
+  TProblemDetail = Poseidon.Problem.TProblemDetail;
 
-  // Route groups
-  TPoseidonGroup      = Poseidon.Core.Group.TPoseidonGroup;
-  TPoseidonGroupBlock = Poseidon.Core.Group.TPoseidonGroupBlock;
+  // HTTP status and MIME types
+  THTTPStatus = Poseidon.Status.THTTPStatus;
+  TMimeType = Poseidon.Status.TMimeType;
 
-  // Default provider: Native (IOCP/epoll) on Windows+Linux, Indy elsewhere
-{$IF DEFINED(MSWINDOWS) OR DEFINED(LINUX)}
-  TPoseidon = class(TPoseidonProviderNative);
-{$ELSE}
-  TPoseidon = class(TPoseidonProviderIndy);
-{$ENDIF}
-
-  // Alternative providers — available for explicit use
-  // (CrossSocket: add Poseidon.Provider.CrossSocket to your uses clause manually)
-  TPoseidonIndy       = class(TPoseidonProviderIndy);
-  TPoseidonIndyDirect = class(TPoseidonProviderIndyDirect);
+  // Server types
+  TLogLevel = Poseidon.Net.Types.TLogLevel;
+  TOnPoseidonLog = Poseidon.Net.Types.TOnPoseidonLog;
+  TOnPoseidonRequestLog = Poseidon.Net.Types.TOnPoseidonRequestLog;
 
 implementation
 
