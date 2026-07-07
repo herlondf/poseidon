@@ -32,6 +32,7 @@ type
     FGroups: TObjectList<TNativeGroup>;
     FRunning: Boolean;
     FShutdownEvent: TEvent;
+    FPIDFile: string;
 
     procedure HandleRequest(const AReq: TPoseidonNativeRequest;
       out AStatus: Integer; out AContentType: string;
@@ -139,6 +140,7 @@ type
     property PerCoreAccept: Boolean read GetPerCoreAccept write SetPerCoreAccept;
     property SyncDispatch: Boolean read GetSyncDispatch write SetSyncDispatch;
     property OnH2Push: TOnH2Push read GetOnH2Push write SetOnH2Push;
+    property PIDFile: string read FPIDFile write FPIDFile;
     property OnLog: TOnPoseidonLog read GetOnLog write SetOnLog;
     property OnRequestLog: TOnPoseidonRequestLog read GetOnRequestLog write SetOnRequestLog;
   end;
@@ -148,7 +150,8 @@ implementation
 uses
   System.JSON,
   Poseidon.Problem,
-  Poseidon.Exception;
+  Poseidon.Exception,
+  Poseidon.GracefulReload;
 
 const
   CAllMethods: array[0..6] of string = (
@@ -501,6 +504,7 @@ begin
     end,
     procedure
     begin
+      WritePIDFile(FPIDFile);
       if Assigned(AOnListen) then
         AOnListen();
     end);
@@ -514,6 +518,7 @@ begin
   if not FRunning then Exit;
   FRunning := False;
   FServer.Stop;
+  RemovePIDFile(FPIDFile);
   FShutdownEvent.SetEvent;
 end;
 
