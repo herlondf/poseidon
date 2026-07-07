@@ -1,10 +1,8 @@
-﻿program Poseidon.Sample.HTTP2;
+program Poseidon.Sample.HTTP2;
 
-// Sample 04 — HTTP/2 (h2 via ALPN)
+// Sample 04 — HTTP/2 (h2 via ALPN) (Native API)
 // Demonstrates HTTP/2 enabled via ALPN negotiation over TLS.
-// Requires ConfigureSSL to be called before EnableHTTP2.
-// HTTP/1.1 clients on the same port still work transparently
-// (ALPN falls back when client doesn't advertise h2).
+// HTTP/1.1 clients on the same port still work transparently.
 //
 // Prerequisites:
 //   OpenSSL libssl / libcrypto in PATH.
@@ -20,51 +18,44 @@
 
 uses
   System.SysUtils,
-  System.Generics.Collections,
-  Poseidon.Net.HttpServer;
+  Poseidon.Native.Types,
+  Poseidon.Native.Server;
 
 const
-  SERVER_PORT  = 9444;
-  SERVER_CERT  = 'server.crt';
-  SERVER_KEY   = 'server.key';
-
-procedure HandleRequest(
-  const AReq:          TPoseidonNativeRequest;
-  out   AStatus:       Integer;
-  out   AContentType:  string;
-  out   ABody:         TBytes;
-  out   AExtraHeaders: TArray<TPair<string, string>>);
-begin
-  AExtraHeaders := [];
-  AStatus       := 200;
-  AContentType  := 'application/json';
-
-  ABody := TEncoding.UTF8.GetBytes(
-    Format('{"path":"%s","tls":true}', [AReq.Path]));
-end;
+  CServerPort = 9444;
+  CServerCert = 'server.crt';
+  CServerKey = 'server.key';
 
 var
-  LServer: TPoseidonNativeServer;
+  App: TPoseidonServer;
 begin
-  LServer := TPoseidonNativeServer.Create;
+  App := TPoseidonServer.Create;
   try
-    // Order: ConfigureSSL → HTTP2Enabled → Listen
-    LServer.ConfigureSSL(SERVER_CERT, SERVER_KEY);
-    LServer.HTTP2Enabled := True;
+    App.ConfigureSSL(CServerCert, CServerKey);
+    App.EnableHTTP2;
+
+    App.Get('/ping',
+      procedure(var Ctx: TNativeRequestContext)
+      begin
+        Ctx.Status := 200;
+        Ctx.ContentType := 'application/json';
+        Ctx.Body := TEncoding.UTF8.GetBytes(
+          Format('{"path":"%s","h2":true}', [Ctx.Path]));
+      end);
 
     Writeln('Poseidon Sample 04 — HTTP/2');
-    Writeln('Listening on https://0.0.0.0:', SERVER_PORT, '  (h2 + http/1.1)');
+    Writeln('Listening on https://0.0.0.0:', CServerPort, '  (h2 + http/1.1)');
+    Writeln('  GET /ping -> {"path":"/ping","h2":true}');
     Writeln;
 
-    LServer.Listen('0.0.0.0', SERVER_PORT,
-      HandleRequest,
+    App.Listen(CServerPort, '0.0.0.0',
       procedure
       begin
         Writeln('Server ready. Press Enter to stop...');
         Readln;
-        LServer.Stop;
+        App.Stop;
       end);
   finally
-    LServer.Free;
+    App.Free;
   end;
 end.

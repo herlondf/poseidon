@@ -77,6 +77,8 @@ type
     procedure SetPerCoreAccept(AValue: Boolean);
     function GetSyncDispatch: Boolean;
     procedure SetSyncDispatch(AValue: Boolean);
+    function GetOnH2Push: TOnH2Push;
+    procedure SetOnH2Push(AValue: TOnH2Push);
   public
     constructor Create;
     destructor Destroy; override;
@@ -136,6 +138,7 @@ type
     property TCPFastOpen: Boolean read GetTCPFastOpen write SetTCPFastOpen;
     property PerCoreAccept: Boolean read GetPerCoreAccept write SetPerCoreAccept;
     property SyncDispatch: Boolean read GetSyncDispatch write SetSyncDispatch;
+    property OnH2Push: TOnH2Push read GetOnH2Push write SetOnH2Push;
     property OnLog: TOnPoseidonLog read GetOnLog write SetOnLog;
     property OnRequestLog: TOnPoseidonRequestLog read GetOnRequestLog write SetOnRequestLog;
   end;
@@ -637,6 +640,12 @@ begin Result := FServer.SyncDispatch; end;
 
 procedure TPoseidonServer.SetSyncDispatch(AValue: Boolean);
 begin FServer.SyncDispatch := AValue; end;
+
+function TPoseidonServer.GetOnH2Push: TOnH2Push;
+begin Result := FServer.OnH2Push; end;
+
+procedure TPoseidonServer.SetOnH2Push(AValue: TOnH2Push);
+begin FServer.OnH2Push := AValue; end;
 
 initialization
   GNotFoundBody := TEncoding.UTF8.GetBytes(

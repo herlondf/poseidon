@@ -1,9 +1,8 @@
 program Poseidon.Sample.Security;
 
-// Sample 06 — Security hardening
-// Demonstrates the security properties added in the S-* and A-* roadmap items:
+// Sample 06 — Security Hardening (Native API)
+// Demonstrates the security properties:
 //
-//   S-1  AllowedMethods       — reject verbs not in the allowlist (405)
 //   S-2  IsPathSafe           — reject path-traversal attempts (400, auto)
 //   S-4  Request smuggling    — reject CL + TE:chunked (400, auto)
 //   R-4  MaxRequestSize       — reject oversized bodies (413)
@@ -14,83 +13,62 @@ program Poseidon.Sample.Security;
 //
 // Run:
 //   Poseidon.Sample.Security.exe
-//   curl http://localhost:9006/ping                      → 200 OK
-//   curl -X DELETE http://localhost:9006/ping            → 405 (not in allowlist)
-//   curl http://localhost:9006/../etc/passwd             → 400 (path traversal)
-//   curl -v http://localhost:9006/ping 2>&1 | grep -i server  → no Server: header
+//   curl http://localhost:9006/ping                      -> 200 OK
+//   curl http://localhost:9006/../etc/passwd             -> 400 (path traversal)
+//   curl -v http://localhost:9006/ping 2>&1 | grep -i server  -> no Server: header
 
 {$APPTYPE CONSOLE}
 
 uses
   System.SysUtils,
-  System.Generics.Collections,
-  Poseidon.Net.HttpServer;
+  Poseidon.Native.Types,
+  Poseidon.Native.Server;
 
 const
-  SERVER_PORT     = 9006;
-  MAX_BODY_BYTES  = 1 * 1024 * 1024;  // 1 MB
-  MAX_HEADER_KB   = 16 * 1024;         // 16 KB
-  MAX_QUEUE       = 200;
-
-procedure HandleRequest(
-  const AReq:          TPoseidonNativeRequest;
-  out   AStatus:       Integer;
-  out   AContentType:  string;
-  out   ABody:         TBytes;
-  out   AExtraHeaders: TArray<TPair<string, string>>);
-var
-  LJson: string;
-begin
-  AExtraHeaders := [];
-  AStatus       := 200;
-  AContentType  := 'application/json';
-  LJson := Format(
-    '{"path":"%s","method":"%s","remote":"%s"}',
-    [AReq.Path, AReq.Method, AReq.RemoteAddr]);
-  ABody := TEncoding.UTF8.GetBytes(LJson);
-end;
+  CServerPort = 9006;
+  CMaxBodyBytes = 1 * 1024 * 1024;
+  CMaxHeaderBytes = 16 * 1024;
+  CMaxQueue = 200;
 
 var
-  LServer: TPoseidonNativeServer;
+  App: TPoseidonServer;
 begin
-  LServer := TPoseidonNativeServer.Create;
+  App := TPoseidonServer.Create;
   try
-    // S-1: reject verbs not in this list
-    LServer.AllowedMethods := ['GET', 'POST', 'HEAD', 'OPTIONS'];
+    App.MaxRequestSize := CMaxBodyBytes;
+    App.MaxHeaderSize := CMaxHeaderBytes;
+    App.MaxQueueDepth := CMaxQueue;
+    App.SecureHeadersEnabled := True;
+    App.ServerBanner := '';
 
-    // R-4: size limits
-    LServer.MaxRequestSize := MAX_BODY_BYTES;
-    LServer.MaxHeaderSize  := MAX_HEADER_KB;
+    App.Get('/ping',
+      procedure(var Ctx: TNativeRequestContext)
+      begin
+        Ctx.Status := 200;
+        Ctx.ContentType := 'application/json';
+        Ctx.Body := TEncoding.UTF8.GetBytes(
+          Format('{"path":"%s","method":"%s","remote":"%s"}',
+            [Ctx.Path, Ctx.Method, Ctx.RemoteAddr]));
+      end);
 
-    // R-5: backpressure — 503 when more than MAX_QUEUE requests are in-flight
-    LServer.MaxQueueDepth := MAX_QUEUE;
-
-    // A-1: inject security headers
-    LServer.SecureHeadersEnabled := True;
-
-    // A-2: suppress the Server: header
-    LServer.ServerBanner := '';
-
-    Writeln('Poseidon Sample 06 — Security hardening');
-    Writeln(Format('Listening on http://0.0.0.0:%d', [SERVER_PORT]));
+    Writeln('Poseidon Sample 06 — Security Hardening');
+    Writeln(Format('Listening on http://0.0.0.0:%d', [CServerPort]));
     Writeln;
-    Writeln('Allowed methods : GET, POST, HEAD, OPTIONS');
-    Writeln('Max request     : ', MAX_BODY_BYTES div 1024, ' KB');
-    Writeln('Max headers     : ', MAX_HEADER_KB  div 1024, ' KB');
-    Writeln('Max queue depth : ', MAX_QUEUE);
+    Writeln('Max request     : ', CMaxBodyBytes div 1024, ' KB');
+    Writeln('Max headers     : ', CMaxHeaderBytes div 1024, ' KB');
+    Writeln('Max queue depth : ', CMaxQueue);
     Writeln('Secure headers  : enabled');
     Writeln('Server banner   : suppressed');
     Writeln;
 
-    LServer.Listen('0.0.0.0', SERVER_PORT,
-      HandleRequest,
+    App.Listen(CServerPort, '0.0.0.0',
       procedure
       begin
         Writeln('Server ready. Press Enter to stop...');
         Readln;
-        LServer.Stop;
+        App.Stop;
       end);
   finally
-    LServer.Free;
+    App.Free;
   end;
 end.

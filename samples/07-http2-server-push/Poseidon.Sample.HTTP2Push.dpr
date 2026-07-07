@@ -1,6 +1,7 @@
 program Poseidon.Sample.HTTP2Push;
 
-// HTTP/2 Server Push — demonstrates proactive asset delivery via OnH2Push.
+// Sample 07 — HTTP/2 Server Push (Native API)
+// Demonstrates proactive asset delivery via OnH2Push.
 //
 // What this sample shows:
 //   - Registering an OnH2Push callback to push a CSS file with the main page
@@ -15,107 +16,88 @@ program Poseidon.Sample.HTTP2Push;
 //      that supports HTTP/2 and inspect the "Initiator" column in DevTools
 //      to see /style.css loaded as "Push" instead of "Request".
 //
-// To test from the command line (requires curl ≥ 7.36 with nghttp2):
+// To test from the command line (requires curl >= 7.36 with nghttp2):
 //   curl --http2 -k -v https://localhost:9007/
 
 {$APPTYPE CONSOLE}
 
 uses
   System.SysUtils,
-  Poseidon.Net.HttpServer,
+  Poseidon.Native.Types,
+  Poseidon.Native.Server,
   Poseidon.Net.Types;
 
 const
-  PORT      = 9007;
-  CERT_FILE = '..\certs\test-server.crt';
-  KEY_FILE  = '..\certs\test-server.key';
+  CServerPort = 9007;
+  CCertFile = '..\certs\test-server.crt';
+  CKeyFile = '..\certs\test-server.key';
 
-// ---------------------------------------------------------------------------
-// Request handler — serves the HTML page and the stylesheet
-// ---------------------------------------------------------------------------
-
-procedure HandleRequest(
-  const AReq:          TPoseidonNativeRequest;
-  out   AStatus:       Integer;
-  out   AContentType:  string;
-  out   ABody:         TBytes;
-  out   AExtraHeaders: TArray<TPair<string,string>>);
-const
-  HTML_PAGE =
+  CHtmlPage =
     '<!DOCTYPE html><html>' +
     '<head><title>HTTP/2 Push Demo</title>' +
     '<link rel="stylesheet" href="/style.css"></head>' +
     '<body><h1>Hello from HTTP/2 with Server Push!</h1>' +
     '<p>Check DevTools Network tab — style.css should show Initiator: Push.</p>' +
     '</body></html>';
-  CSS_BODY  = 'body { font-family: sans-serif; background: #f0f4ff; color: #222; }' +
-              'h1 { color: #1a3a8f; }';
-begin
-  SetLength(AExtraHeaders, 0);
 
-  if AReq.Path = '/style.css' then
-  begin
-    // Serve the stylesheet normally for HTTP/1.1 clients or cache misses
-    AStatus      := 200;
-    AContentType := 'text/css';
-    ABody        := TEncoding.UTF8.GetBytes(CSS_BODY);
-  end
-  else
-  begin
-    AStatus      := 200;
-    AContentType := 'text/html; charset=utf-8';
-    ABody        := TEncoding.UTF8.GetBytes(HTML_PAGE);
-  end;
-end;
-
-// ---------------------------------------------------------------------------
-// Push callback — called by Poseidon before each HTTP/2 response
-// ---------------------------------------------------------------------------
-
-procedure HandlePush(
-  const AReq:           TPoseidonNativeRequest;
-  var   APushResources: TArray<TPoseidonPushResource>);
-const
-  CSS_BODY = 'body { font-family: sans-serif; background: #f0f4ff; color: #222; }' +
-             'h1 { color: #1a3a8f; }';
-var
-  LCss: TPoseidonPushResource;
-begin
-  // Only push the stylesheet when the main page is requested.
-  // Push a resource whose path the client's <link> tag will later request.
-  if AReq.Path = '/' then
-  begin
-    LCss.Path        := '/style.css';
-    LCss.ContentType := 'text/css';
-    LCss.Body        := TEncoding.UTF8.GetBytes(CSS_BODY);
-    LCss.Extra       := [];
-    APushResources   := [LCss];
-  end;
-end;
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
+  CCssBody =
+    'body { font-family: sans-serif; background: #f0f4ff; color: #222; }' +
+    'h1 { color: #1a3a8f; }';
 
 var
-  LServer: TPoseidonNativeServer;
+  App: TPoseidonServer;
 begin
-  LServer := TPoseidonNativeServer.Create;
+  App := TPoseidonServer.Create;
   try
-    LServer.HTTP2Enabled := True;
-    LServer.ConfigureSSL(CERT_FILE, KEY_FILE);
-    LServer.OnH2Push := HandlePush;
+    App.ConfigureSSL(CCertFile, CKeyFile);
+    App.EnableHTTP2;
 
-    LServer.Listen('0.0.0.0', PORT, HandleRequest,
-      procedure
+    App.OnH2Push :=
+      procedure(const AReq: TPoseidonNativeRequest;
+        var APushResources: TArray<TPoseidonPushResource>)
+      var
+        LCss: TPoseidonPushResource;
       begin
-        Writeln('HTTP/2 + Server Push listening on https://localhost:', PORT, '/');
-        Writeln('Press Enter to stop...');
+        if AReq.Path = '/' then
+        begin
+          LCss.Path := '/style.css';
+          LCss.ContentType := 'text/css';
+          LCss.Body := TEncoding.UTF8.GetBytes(CCssBody);
+          LCss.Extra := [];
+          APushResources := [LCss];
+        end;
+      end;
+
+    App.Get('/style.css',
+      procedure(var Ctx: TNativeRequestContext)
+      begin
+        Ctx.Status := 200;
+        Ctx.ContentType := 'text/css';
+        Ctx.Body := TEncoding.UTF8.GetBytes(CCssBody);
       end);
 
-    Readln;
-    LServer.Stop;
+    App.Get('/',
+      procedure(var Ctx: TNativeRequestContext)
+      begin
+        Ctx.Status := 200;
+        Ctx.ContentType := 'text/html; charset=utf-8';
+        Ctx.Body := TEncoding.UTF8.GetBytes(CHtmlPage);
+      end);
+
+    Writeln('Poseidon Sample 07 — HTTP/2 Server Push');
+    Writeln('Listening on https://0.0.0.0:', CServerPort);
+    Writeln('  GET /          -> HTML page (pushes /style.css)');
+    Writeln('  GET /style.css -> CSS');
+    Writeln;
+
+    App.Listen(CServerPort, '0.0.0.0',
+      procedure
+      begin
+        Writeln('Server ready. Press Enter to stop...');
+        Readln;
+        App.Stop;
+      end);
   finally
-    LServer.Free;
+    App.Free;
   end;
 end.

@@ -1,6 +1,6 @@
-﻿program Poseidon.Sample.SSL;
+program Poseidon.Sample.SSL;
 
-// Sample 02 — SSL/TLS + SNI
+// Sample 02 — SSL/TLS + SNI (Native API)
 // Demonstrates HTTPS setup with a primary certificate and SNI-based
 // additional certificates for multiple hostnames on the same port.
 //
@@ -19,60 +19,49 @@
 
 uses
   System.SysUtils,
-  System.Generics.Collections,
-  Poseidon.Net.HttpServer;
+  Poseidon.Native.Types,
+  Poseidon.Native.Server;
 
 const
-  SERVER_PORT    = 9443;
-  DEFAULT_CERT   = 'default.crt';
-  DEFAULT_KEY    = 'default.key';
-  API_CERT       = 'api.crt';
-  API_KEY        = 'api.key';
-  API_HOSTNAME   = 'api.example.com';
-
-procedure HandleRequest(
-  const AReq:          TPoseidonNativeRequest;
-  out   AStatus:       Integer;
-  out   AContentType:  string;
-  out   ABody:         TBytes;
-  out   AExtraHeaders: TArray<TPair<string, string>>);
-var
-  LJson: string;
-begin
-  AExtraHeaders := [];
-  AStatus       := 200;
-  AContentType  := 'application/json';
-  LJson         := Format(
-    '{"path":"%s","method":"%s","tls":true}',
-    [AReq.Path, AReq.Method]);
-  ABody := TEncoding.UTF8.GetBytes(LJson);
-end;
+  CServerPort = 9443;
+  CDefaultCert = 'default.crt';
+  CDefaultKey = 'default.key';
+  CApiCert = 'api.crt';
+  CApiKey = 'api.key';
+  CApiHostname = 'api.example.com';
 
 var
-  LServer: TPoseidonNativeServer;
+  App: TPoseidonServer;
 begin
-  LServer := TPoseidonNativeServer.Create;
+  App := TPoseidonServer.Create;
   try
-    // Default certificate — used when no SNI matches or client sends no SNI
-    LServer.ConfigureSSL(DEFAULT_CERT, DEFAULT_KEY);
+    App.ConfigureSSL(CDefaultCert, CDefaultKey);
+    if FileExists(CApiCert) then
+      App.AddSSLCert(CApiHostname, CApiCert, CApiKey);
 
-    // Additional certificate for a specific hostname (SNI)
-    if FileExists(API_CERT) then
-      LServer.AddSSLCert(API_HOSTNAME, API_CERT, API_KEY);
+    App.Get('/ping',
+      procedure(var Ctx: TNativeRequestContext)
+      begin
+        Ctx.Status := 200;
+        Ctx.ContentType := 'application/json';
+        Ctx.Body := TEncoding.UTF8.GetBytes(
+          Format('{"path":"%s","method":"%s","tls":true}',
+            [Ctx.Path, Ctx.Method]));
+      end);
 
     Writeln('Poseidon Sample 02 — SSL/TLS + SNI');
-    Writeln('Listening on https://0.0.0.0:', SERVER_PORT);
+    Writeln('Listening on https://0.0.0.0:', CServerPort);
+    Writeln('  GET /ping -> {"path":"/ping","method":"GET","tls":true}');
     Writeln;
 
-    LServer.Listen('0.0.0.0', SERVER_PORT,
-      HandleRequest,
+    App.Listen(CServerPort, '0.0.0.0',
       procedure
       begin
         Writeln('Server ready. Press Enter to stop...');
         Readln;
-        LServer.Stop;
+        App.Stop;
       end);
   finally
-    LServer.Free;
+    App.Free;
   end;
 end.
