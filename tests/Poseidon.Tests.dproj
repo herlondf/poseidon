@@ -63,6 +63,26 @@
     <DCCReference Include="Poseidon.Tests.Validation.pas"/>
     <DCCReference Include="Poseidon.Tests.Problem.pas"/>
     <DCCReference Include="mocks\Poseidon.Mock.SSLProvider.pas"/>
+    <DCCReference Include="mocks\Poseidon.Mock.Context.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.CORS.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Security.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.BodyLimit.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.RequestID.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Timeout.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Guard.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Logger.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.RateLimit.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.CircuitBreaker.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Compression.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.JWT.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Metrics.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Validation.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.ProblemDetails.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.HealthCheck.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Digest.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Static.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Proxy.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.OpenAPI.pas"/>
   </ItemGroup>
   <ProjectExtensions>
     <Borland.Personality>Delphi.Personality.12</Borland.Personality>

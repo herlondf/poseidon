@@ -23,7 +23,27 @@ uses
   Poseidon.Tests.Workers,
   Poseidon.Tests.Problem,
   Poseidon.Tests.Validation,
-  Poseidon.Mock.SSLProvider;
+  Poseidon.Mock.SSLProvider,
+  Poseidon.Mock.Context,
+  Poseidon.Tests.Middleware.CORS,
+  Poseidon.Tests.Middleware.Security,
+  Poseidon.Tests.Middleware.BodyLimit,
+  Poseidon.Tests.Middleware.RequestID,
+  Poseidon.Tests.Middleware.Timeout,
+  Poseidon.Tests.Middleware.Guard,
+  Poseidon.Tests.Middleware.Logger,
+  Poseidon.Tests.Middleware.RateLimit,
+  Poseidon.Tests.Middleware.CircuitBreaker,
+  Poseidon.Tests.Middleware.Compression,
+  Poseidon.Tests.Middleware.JWT,
+  Poseidon.Tests.Middleware.Metrics,
+  Poseidon.Tests.Middleware.Validation,
+  Poseidon.Tests.Middleware.ProblemDetails,
+  Poseidon.Tests.Middleware.HealthCheck,
+  Poseidon.Tests.Middleware.Digest,
+  Poseidon.Tests.Middleware.Static,
+  Poseidon.Tests.Middleware.Proxy,
+  Poseidon.Tests.Middleware.OpenAPI;
 
 var
   LRunner:  ITestRunner;
