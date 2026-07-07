@@ -1,68 +1,128 @@
 # Poseidon
 
-> *Deus dos mares — poder bruto, velocidade incomparável.*
+> *Deus dos mares — poder bruto, velocidade incomparavel.*
 
 <p align="center">
   <img src="docs/logo.png" alt="Poseidon" width="320"/>
 </p>
 
 <p align="center">
-  Framework REST de alta performance para Delphi — IOCP no Windows, io_uring/epoll no Linux.<br/>
-  29k RPS com router e middleware. Zero erros com 200 usuários simultâneos. Substituto drop-in do Horse.
+  Framework HTTP de alta performance para Delphi — RIO/IOCP no Windows, io_uring/epoll no Linux.<br/>
+  128k RPS com arquitetura shared-nothing. Zero erros com 500 conexoes simultaneas.
 </p>
 
 ---
 
-## Início Rápido
+## Inicio Rapido
 
 ```pascal
-uses Poseidon;
+program MyServer;
+{$APPTYPE CONSOLE}
+uses
+  System.SysUtils,
+  Poseidon.Native.Types,
+  Poseidon.Native.Server;
 
+var
+  App: TPoseidonServer;
 begin
-  TPoseidon.Get('/ping',
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse)
-    begin
-      Res.Send('pong');
-    end);
+  App := TPoseidonServer.Create;
+  try
+    App.Get('/ping',
+      procedure(var Ctx: TNativeRequestContext)
+      begin
+        Ctx.Status := 200;
+        Ctx.ContentType := 'application/json';
+        Ctx.Body := TEncoding.UTF8.GetBytes('{"message":"pong"}');
+      end);
 
-  TPoseidon.Get('/users/:id',
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse)
-    begin
-      Res.Json(TJSONObject.Create.AddPair('id', Req.Params.Get('id')));
-    end);
+    App.Get('/hello/:name',
+      procedure(var Ctx: TNativeRequestContext)
+      begin
+        Ctx.Status := 200;
+        Ctx.ContentType := 'application/json';
+        Ctx.Body := TEncoding.UTF8.GetBytes('{"hello":"' + Ctx.Param('name') + '"}');
+      end);
 
-  TPoseidon.Listen(9000);
+    App.Listen(9000, '0.0.0.0',
+      procedure
+      begin
+        Writeln('Servidor pronto em http://localhost:9000');
+        Readln;
+        App.Stop;
+      end);
+  finally
+    App.Free;
+  end;
 end.
 ```
 
 ## Por que Poseidon
 
-| | Poseidon | Horse + Indy |
+| | Poseidon v2 | Horse Epoll 4.0 |
 |---|---|---|
-| **Throughput** (200 VUs, 2min) | 28.885 RPS | 2.091 RPS |
-| **Latência p95** | 22ms | 156ms |
-| **Erros** | 0% | 5-80% |
-| **HTTP/2** | Integrado | Não |
-| **WebSocket** | Integrado | Não |
+| **Throughput** (500 conn, 16 cores) | **127.532 RPS** | 3.780 RPS (61% erros) |
+| **Latencia p50** | **1,92ms** | 103ms |
+| **Latencia p99** | **5,51ms** | 287ms |
+| **Erros** | **0** | 35K+ Non-2xx |
+| **Arquitetura** | Shared-nothing per-core | Single epoll |
+| **HTTP/2** | Integrado | Nao |
+| **WebSocket** | Integrado | Nao |
 | **SSL/TLS** | OpenSSL nativo (SNI, mTLS, ALPN) | Via Indy |
-| **Middlewares** | 15 integrados | Comunidade |
-| **Validação** | `[Required]`, `[Email]`, `[Range]` | Manual |
-| **OpenAPI** | Swagger UI integrado | Comunidade |
+| **Middlewares** | 20 integrados | Comunidade |
+| **API Nativa** | Zero-copy, baseada em instancia | N/A |
+
+## Arquitetura: Shared-Nothing Per-Core
+
+```
+Kernel distribui via SO_REUSEPORT (hash de IP)
+              │
+    ┌─────────┼─────────┐
+    ▼         ▼         ▼
+┌────────┐ ┌────────┐ ┌────────┐
+│ Core 0 │ │ Core 1 │ │ Core N │
+│ listen │ │ listen │ │ listen │  ← socket proprio
+│ epoll  │ │ epoll  │ │ epoll  │  ← epoll fd proprio
+│ accept │ │ accept │ │ accept │
+│ recv   │ │ recv   │ │ recv   │  ← tudo inline
+│ parse  │ │ parse  │ │ parse  │
+│ handle │ │ handle │ │ handle │
+│ send   │ │ send   │ │ send   │
+└────────┘ └────────┘ └────────┘
+  ~170 conn  ~170 conn  ~170 conn
+```
+
+Cada core faz tudo: accept, recv, parse, executa handler, envia resposta. Sem filas, sem locks, sem contencao. Escalamento linear com o numero de cores.
+
+### Selecao de Backend de I/O
+
+O backend e selecionado **uma unica vez** na inicializacao, com fallback automatico:
+
+| Plataforma | Primario | Fallback | Forcar Fallback |
+|------------|----------|----------|-----------------|
+| **Windows** | RIO (Registered I/O) | IOCP | `{$DEFINE FORCE_IOCP}` |
+| **Linux** | io_uring (>= 5.6) | epoll | `{$DEFINE FORCE_EPOLL}` |
+
+- **RIO**: Filas de conclusao em memoria compartilhada, polling sem syscall, buffers pre-registrados
+- **IOCP**: I/O assincrono padrao do Windows com completion ports
+- **io_uring**: I/O assincrono do Linux com arquivos registrados (`IORING_REGISTER_FILES`)
+- **epoll**: Shared-nothing per-core com `SO_REUSEPORT`
+
+---
 
 ## Funcionalidades
 
 ### Framework
 | Funcionalidade | Status |
 |----------------|--------|
-| Router radix-tree com suporte a `:param` | ✅ |
+| Router hash-map com suporte a `:param` (lookup O(1)) | ✅ |
 | Pipeline de middleware (Use, Group, GroupBlock) | ✅ |
-| Request: Body, Query, Params, Headers, Cookie, Session | ✅ |
-| Response: Send, Json, Status, Header, Redirect, SendFile | ✅ |
-| Binding de DTO com atributos de validação | ✅ |
+| Registro fluente de rotas (Get, Post, Put, Delete, Patch, Head, All) | ✅ |
+| Contexto de requisicao stack-allocated (zero-copy) | ✅ |
+| Binding de DTO com atributos de validacao | ✅ |
 | OpenAPI 3.x + Swagger UI | ✅ |
 | RFC 7807 Problem Details | ✅ |
 | Cookies assinados (HMAC-SHA256) | ✅ |
-| Compatibilidade com API Horse (shim opt-in) | ✅ |
 
 ### Engine
 | Funcionalidade | Status |
@@ -71,17 +131,49 @@ end.
 | HTTPS (OpenSSL), SNI, mTLS | ✅ |
 | HTTP/2 (ALPN h2, h2c, server push, flow control) | ✅ |
 | WebSocket (RFC 6455, permessage-deflate) | ✅ |
-| Compressão gzip + Brotli | ✅ |
-| Rate limiting (por IP e global) | ✅ |
-| Métricas Prometheus | ✅ |
+| Compressao gzip + Brotli | ✅ |
 | Proxy Protocol v1/v2 | ✅ |
-| Headers de segurança, proteção path traversal e smuggling | ✅ |
-| Windows 64-bit (IOCP) | ✅ |
-| Linux 64-bit (io_uring ≥ 5.6, fallback epoll) | ✅ |
+| Graceful reload (PID file, SIGTERM, zero-downtime) | ✅ |
+| Windows 64-bit (RIO / IOCP) | ✅ |
+| Linux 64-bit (io_uring / epoll) | ✅ |
 
-### 15 Middlewares Integrados
+### Engenharia de Performance
+| Funcionalidade | Status |
+|----------------|--------|
+| Padding de cache-line em contadores atomicos | ✅ |
+| Pool de reciclagem de sockets via DisconnectEx (Windows) | ✅ |
+| Arquivos registrados no io_uring (Linux) | ✅ |
+| I/O vetorizado (writev / WSASend) | ✅ |
+| Arena de headers thread-local | ✅ |
+| io_uring multishot accept | ✅ |
+| Buffer pool (Acquire/Release, 8 KB) | ✅ |
 
-CORS, JWT, Logger, RateLimit, Compression, Timeout, BodyLimit, RequestID, CircuitBreaker, Metrics, Static, HealthCheck, Security, Proxy, Digest
+### 20 Middlewares Integrados
+
+| Middleware | Descricao |
+|-----------|-----------|
+| `Poseidon.Middleware.CORS` | Headers CORS |
+| `Poseidon.Middleware.JWT` | Validacao de token Bearer HMAC-SHA256 |
+| `Poseidon.Middleware.Logger` | Log de requisicoes |
+| `Poseidon.Middleware.RateLimit` | Rate limiter por IP (janela fixa) |
+| `Poseidon.Middleware.Compression` | Compressao gzip/deflate na resposta |
+| `Poseidon.Middleware.Timeout` | Timeout por requisicao → 503 |
+| `Poseidon.Middleware.BodyLimit` | Guarda de Content-Length → 413 |
+| `Poseidon.Middleware.RequestID` | Echo/geracao de X-Request-ID |
+| `Poseidon.Middleware.CircuitBreaker` | Circuit breaker com janela deslizante → 503 |
+| `Poseidon.Middleware.Metrics` | Endpoint Prometheus /metrics |
+| `Poseidon.Middleware.Static` | Servidor de arquivos estaticos (ETag, gzip, 304) |
+| `Poseidon.Middleware.HealthCheck` | Endpoint /health |
+| `Poseidon.Middleware.Security` | Headers de seguranca (HSTS, CSP, X-Frame) |
+| `Poseidon.Middleware.Proxy` | Proxy reverso HTTP |
+| `Poseidon.Middleware.Digest` | Autenticacao Digest (RFC 7616) |
+| `Poseidon.Middleware.Guard` | Guarda de IP whitelist/blacklist |
+| `Poseidon.Middleware.Validation` | Validacao de DTO com atributos |
+| `Poseidon.Middleware.ProblemDetails` | Formatacao de erros RFC 7807 |
+| `Poseidon.Middleware.OpenAPI` | Spec OpenAPI 3.x + Swagger UI |
+| `Poseidon.Middleware.Cache` | Cache de resposta em memoria (LRU, ETag, 304) |
+
+---
 
 ## Requisitos
 
@@ -89,98 +181,183 @@ CORS, JWT, Logger, RateLimit, Compression, Timeout, BodyLimit, RequestID, Circui
 - Windows 64-bit ou Linux 64-bit
 - OpenSSL no PATH (apenas para HTTPS/HTTP2)
 
-## Instalação
+## Instalacao
 
-Adicione `src/`, `src/providers/` e `middlewares/` ao search path do projeto:
+Adicione `src/` e `middlewares/` ao search path do projeto:
 
 ```
 <poseidon>\src
-<poseidon>\src\providers
 <poseidon>\middlewares
 ```
 
-## Exemplos
+## Exemplos de Uso
 
 ### Middleware
 
 ```pascal
-uses Poseidon, Poseidon.Middleware.CORS, Poseidon.Middleware.JWT;
+uses
+  Poseidon.Native.Types,
+  Poseidon.Native.Server,
+  Poseidon.Middleware.CORS,
+  Poseidon.Middleware.JWT,
+  Poseidon.Middleware.Logger;
 
-TPoseidon.Use(TPoseidonMiddlewareCORS.New);
-TPoseidon.Use('/api', TPoseidonMiddlewareJWT.New('meu-secret'));
+var
+  App: TPoseidonServer;
+begin
+  App := TPoseidonServer.Create;
 
-TPoseidon.Get('/api/data',
-  procedure(Req: TPoseidonRequest; Res: TPoseidonResponse)
-  begin
-    Res.Json(TJSONObject.Create.AddPair('user', Req.Session<TMinhaSessao>.Nome));
-  end);
+  App.Use(CORSMiddleware);
+  App.Use(LoggerMiddleware);
+  App.Use(JWTMiddleware('meu-segredo'));
 
-TPoseidon.Listen(9000);
-```
+  App.Get('/api/dados',
+    procedure(var Ctx: TNativeRequestContext)
+    begin
+      Ctx.Status := 200;
+      Ctx.ContentType := 'application/json';
+      Ctx.Body := TEncoding.UTF8.GetBytes('{"dados":"protegidos"}');
+    end);
 
-### Validação de DTO
-
-```pascal
-type
-  TCreateUserDTO = class
-    [Required] [MinLength(3)]
-    Name: string;
-    [Required] [Email]
-    Email: string;
-    [Range(1, 150)]
-    Age: Integer;
-  end;
-
-TPoseidon.Post('/users',
-  procedure(Req: TPoseidonRequest; Res: TPoseidonResponse)
-  var DTO: TCreateUserDTO;
-  begin
-    DTO := Req.BodyAs<TCreateUserDTO>;  // valida automaticamente, 422 se falhar
-    try
-      Res.Status(201).Json(DTO, False);
-    finally
-      DTO.Free;
-    end;
-  end);
-```
-
-### Migração do Horse
-
-Para migração gradual, crie um shim `Horse.pas` no seu projeto:
-
-```pascal
-unit Horse;
-interface
-uses Poseidon;
-type
-  THorse = TPoseidon;
-  THorseRequest = TPoseidonRequest;
-  THorseResponse = TPoseidonResponse;
-  // ... demais aliases
-implementation
+  App.Listen(9000);
 end.
 ```
 
-Código Horse existente compila sem alterações. Remova o shim após a migração.
+### Grupos de Rotas
 
-## Documentação
+```pascal
+App.GroupBlock('/api/v1',
+  procedure(G: TNativeGroup)
+  begin
+    G.Get('/users',
+      procedure(var Ctx: TNativeRequestContext)
+      begin
+        Ctx.Status := 200;
+        Ctx.ContentType := 'application/json';
+        Ctx.Body := TEncoding.UTF8.GetBytes('[]');
+      end);
+
+    G.Post('/users',
+      procedure(var Ctx: TNativeRequestContext)
+      begin
+        Ctx.Status := 201;
+        Ctx.ContentType := 'application/json';
+        Ctx.Body := TEncoding.UTF8.GetBytes('{"id":1}');
+      end);
+  end);
+```
+
+### WebSocket
+
+```pascal
+App.WebSocket('/ws',
+  procedure(Conn: IPoseidonWSConn; MsgType: Byte; Data: TBytes)
+  begin
+    Conn.Send(Data);  // echo
+  end);
+```
+
+### Graceful Reload (Linux)
+
+```pascal
+uses
+  Poseidon.Native.Types,
+  Poseidon.Native.Server,
+  Poseidon.GracefulReload;
+
+var
+  App: TPoseidonServer;
+begin
+  App := TPoseidonServer.Create;
+  App.PIDFile := '/run/poseidon.pid';
+  App.PerCoreAccept := True;
+  App.DrainTimeoutMs := 5000;
+
+  App.Get('/ping', MeuHandler);
+
+  InstallSignalHandler(procedure begin App.Stop; end);
+
+  App.Listen(8080);
+end.
+```
+
+Script de deploy:
+
+```bash
+OLD_PID=$(cat /run/poseidon.pid)
+./poseidon-novo &
+sleep 2
+kill -TERM $OLD_PID
+```
+
+### SSL/TLS
+
+```pascal
+App.ConfigureSSL('cert.pem', 'key.pem');
+App.AddSSLCert('api.exemplo.com', 'api-cert.pem', 'api-key.pem');  // SNI
+App.EnableHTTP2;
+App.Listen(443);
+```
+
+## Estrutura do Codigo
+
+```
+src/
+  Poseidon.Native.Server.pas          ← TPoseidonServer (API nativa, baseada em instancia)
+  Poseidon.Native.Router.pas          ← router hash-map O(1) para API nativa
+  Poseidon.Native.Types.pas           ← TNativeRequestContext, tipos de handler
+  Poseidon.Native.Group.pas           ← grupos de rotas
+  Poseidon.GracefulReload.pas         ← PID file + handler SIGTERM
+  Poseidon.Net.HttpServer.pas         ← orquestrador do servidor HTTP assincrono
+  Poseidon.Net.IO.Epoll.pas           ← shared-nothing per-core epoll
+  Poseidon.Net.IO.IOCP.pas            ← backend IOCP Windows + reciclagem DisconnectEx
+  Poseidon.Net.IO.IOUring.pas         ← backend io_uring Linux + arquivos registrados
+  Poseidon.Net.IO.RIO.pas             ← backend RIO Windows (polling sem syscall)
+  Poseidon.Net.Dispatcher.pas         ← pattern pipeline (9 etapas)
+  Poseidon.Net.Connection.pas         ← estado por conexao (com padding de cache-line)
+  Poseidon.Net.Connection.Manager.pas ← admissao de conexao, rastreamento por IP
+  Poseidon.Net.SSL.Manager.pas        ← contexto SSL, SNI, mTLS
+  Poseidon.Net.WebSocket.Manager.pas  ← handlers WS, upgrade, frames
+  Poseidon.Net.HTTP2.Manager.pas      ← upgrade H2C, streams, push
+  Poseidon.Net.IdleSweep.pas          ← timeout de conexao ociosa
+  Poseidon.Net.ResponseBuilder.pas    ← fragmentos pre-codificados + headers vetorizados
+  Poseidon.Net.Pool.Buffer.pas        ← buffer pool (8 KB, Acquire/Release)
+  Poseidon.Net.Pool.Arena.pas         ← arena de headers thread-local
+  Poseidon.Net.Pool.Socket.pas        ← reciclagem de sockets via DisconnectEx (Windows)
+  Poseidon.Net.Pool.Workers.pas       ← pool de worker threads adaptativo
+middlewares/
+  Poseidon.Middleware.*.pas           ← 20 middlewares prontos para producao
+samples/
+  01-basic-http-server/               ← setup minimo com TPoseidonServer
+  02-ssl-tls/                         ← HTTPS + SNI
+  03-websocket/                       ← WebSocket echo
+  04-http2/                           ← HTTP/2 com ALPN
+  06-security/                        ← hardening de seguranca
+  07-http2-server-push/               ← HTTP/2 server push
+  08-benchmark/                       ← setup de benchmark
+  09-graceful-reload/                 ← restart sem downtime
+tests/
+  Testes DUnitX                       ← engine + framework + 20 testes de middleware
+```
+
+## Documentacao
 
 - [Playbook (English)](docs/playbook/README.md)
-- [Playbook (Português)](docs/playbook_pt-br/README.md)
+- [Playbook (Portugues)](docs/playbook_pt-br/README.md)
 - [Contributing](docs/CONTRIBUTING.md)
 - [Como contribuir (pt-BR)](docs/CONTRIBUTING_pt-br.md)
 
-## A Família Olímpica
+## A Familia Olimpica
 
-| Projeto | Função |
+| Projeto | Funcao |
 |---------|--------|
-| **Poseidon** (este) | Framework REST + engine HTTP assíncrono |
-| [**Triton**](https://github.com/herlondf/triton) | Pool genérico de recursos (conexões, clientes) |
+| **Poseidon** (este) | Framework HTTP + engine assincrono |
+| [**Triton**](https://github.com/herlondf/triton) | Pool generico de recursos (conexoes, clientes) |
 | **Hermes** *(Redis4D)* | Cliente Redis (key-value, pub/sub) |
 
 ---
 
-## Licença
+## Licenca
 
 MIT
 

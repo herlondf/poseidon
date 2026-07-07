@@ -43,6 +43,85 @@ disponíveis e rearma o fd com `EPOLL_CTL_MOD`.
 
 `EPOLLONESHOT` garante que apenas um worker processe um dado fd por vez.
 
+## Selecao de Backend de I/O
+
+### Backends disponíveis
+
+**RIO — Registered I/O (Windows, preferido)**
+
+Mecanismo de alta performance introduzido no Windows 8 / Server 2012.
+Difere do IOCP porque usa polling direto sobre um buffer de conclusão
+compartilhado com o kernel — sem syscall `GetQueuedCompletionStatus` por
+evento. Buffers são pré-registrados via `RIORegisterBuffer`, eliminando
+cópias de kernel para userspace.
+
+Características:
+- Polling de completions sem syscall (leitura direta no ring buffer)
+- Buffers de send/recv pré-registrados — zero-copy de userspace para kernel
+- Latência p99 inferior ao IOCP em cargas de alta conexão simultânea
+
+**IOCP — I/O Completion Ports (Windows, fallback)**
+
+Backend padrão do Windows quando RIO não está disponível (ex.: VM sem suporte
+ao recurso). Usa a API clássica de completion ports. Totalmente suportado em
+todas as versões do Windows a partir do XP.
+
+**io_uring (Linux, preferido, kernel ≥ 5.1)**
+
+Ring assíncrono compartilhado entre userspace e kernel.
+O backend do Poseidon usa `IORING_REGISTER_FILES` para registrar file
+descriptors de socket no ring — evita uma lookup no kernel por operação.
+`IORING_OP_ACCEPT` no modo **multishot** mantém um único SQE de accept ativo
+que gera um CQE para cada nova conexão, sem precisar repostar o SQE.
+
+Características:
+- Arquivo registrado: elimina lookup fd→file por operação
+- Multishot accept: um SQE serve N conexões
+- Sends zero-copy via `IORING_OP_SEND`
+
+**epoll (Linux, fallback)**
+
+Modelo shared-nothing por core: cada worker thread mantém seu próprio fd epoll
+e escuta em um socket com `SO_REUSEPORT`. O kernel distribui conexões entre os
+workers sem contenção de lock. Cada fd é adicionado com `EPOLLONESHOT | EPOLLIN`
+para garantir processamento exclusivo por um único worker.
+
+### Seleção automática vs. forçada
+
+A seleção ocorre uma única vez na inicialização, no constructor de
+`TPoseidonNativeServer`. Não há decisão de backend por requisição.
+
+Ordem de preferência no Windows:
+1. RIO (se disponível no SO)
+2. IOCP (fallback)
+
+Ordem de preferência no Linux:
+1. io_uring (se `io_uring_setup` syscall 425 retornar sucesso)
+2. epoll (fallback silencioso em `ENOSYS` ou `EPERM`)
+
+Para forçar um backend específico, use as defines de compilação:
+
+| Define | Efeito |
+|--------|--------|
+| `FORCE_IOCP` | Pula RIO e usa IOCP diretamente (Windows) |
+| `FORCE_EPOLL` | Pula io_uring e usa epoll diretamente (Linux) |
+
+Exemplo no `.dproj` ou linha de compilação:
+
+```
+dcc64 MeuApp.dpr -dFORCE_EPOLL
+```
+
+Ou via `Project > Options > Delphi Compiler > Conditional defines`:
+
+```
+FORCE_IOCP
+```
+
+Use `FORCE_EPOLL` em ambientes Linux onde io_uring está disponível mas restrito
+por seccomp (ex.: alguns runtimes de container). Use `FORCE_IOCP` para
+reproduzir comportamento de VM sem suporte a RIO.
+
 ## Veja também
 
 - [Ciclo de vida da conexão](ciclo-vida-conexao.md)

@@ -1,4 +1,4 @@
-﻿# Poseidon — Playbook (Português)
+# Poseidon — Playbook (Português)
 
 Documentação técnica da biblioteca Poseidon.
 
@@ -11,3 +11,5 @@ Documentação técnica da biblioteca Poseidon.
 | [05 — Receitas](05-receitas/README.md) | Padrões executáveis para casos de uso comuns |
 | [06 — Providers](06-providers/README.md) | Integrações com frameworks (Horse, …) |
 | [07 — Benchmarking](07-benchmarking/README.md) | Benchmark de throughput, io_uring vs epoll |
+| [08 — API Nativa](08-api-nativa/README.md) | TPoseidonServer, rotas, cadeia de middleware, grupos |
+| [09 — Middlewares](09-middlewares/README.md) | Catálogo de middlewares integrados (20 middlewares) |

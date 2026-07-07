@@ -1,4 +1,4 @@
-﻿# Poseidon Playbook
+# Poseidon Playbook
 
 Technical documentation for the Poseidon library.
 
@@ -11,3 +11,5 @@ Technical documentation for the Poseidon library.
 | [05 — Recipes](05-recipes/README.md) | Runnable patterns for common use cases |
 | [06 — Providers](06-providers/README.md) | Framework integrations (Horse, …) |
 | [07 — Benchmarking](07-benchmarking/README.md) | Throughput benchmark, io_uring vs epoll |
+| [08 — Native API](08-native-api/README.md) | TPoseidonServer, routes, middleware chain, groups |
+| [09 — Middlewares](09-middlewares/README.md) | Built-in middleware catalog (20 middlewares) |
