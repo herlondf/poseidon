@@ -83,6 +83,7 @@
     <DCCReference Include="Poseidon.Tests.Middleware.Static.pas"/>
     <DCCReference Include="Poseidon.Tests.Middleware.Proxy.pas"/>
     <DCCReference Include="Poseidon.Tests.Middleware.OpenAPI.pas"/>
+    <DCCReference Include="Poseidon.Tests.Middleware.Cache.pas"/>
   </ItemGroup>
   <ProjectExtensions>
     <Borland.Personality>Delphi.Personality.12</Borland.Personality>

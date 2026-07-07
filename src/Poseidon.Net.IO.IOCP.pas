@@ -16,7 +16,8 @@ uses
   Winapi.Winsock2,
   Poseidon.Net.IO,
   Poseidon.Net.Connection,
-  Poseidon.Net.Pool.Buffer;
+  Poseidon.Net.Pool.Buffer,
+  Poseidon.Net.Pool.Socket;
 
 type
   TIOCPBackend = class(TInterfacedObject, IIOBackend)
@@ -188,6 +189,9 @@ begin
     RaiseLastOSError;
   if _WsaListen(FListenSocket, SOMAXCONN) = SOCKET_ERROR then
     RaiseLastOSError;
+
+  // #77: load DisconnectEx from the listen socket for socket recycling
+  TSocketPool.LoadDisconnectEx(FListenSocket);
 
   SetLength(FWorkers, AWorkerCount);
   for I := 0 to AWorkerCount - 1 do
@@ -396,7 +400,9 @@ var
 begin
   // R-6: TCP half-close — FIN before RST so the client receives the last bytes
   shutdown(LConn.Socket, SD_SEND);
-  closesocket(LConn.Socket);
+  // #77: try to recycle via DisconnectEx + TF_REUSE_SOCKET instead of closesocket
+  if not TSocketPool.Recycle(LConn.Socket) then
+    closesocket(LConn.Socket);
 end;
 
 // ---------------------------------------------------------------------------
@@ -429,7 +435,9 @@ begin
       FCallbacks.OnNewConn(NativeUInt(LClient),
         string(LRemoteIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
     except
-      closesocket(LClient);
+      // #77: try to recycle failed socket instead of closing
+      if not TSocketPool.Recycle(LClient) then
+        closesocket(LClient);
     end;
   end;
 end;

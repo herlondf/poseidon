@@ -34,6 +34,7 @@ type
   TNativeConn = class
   private
     FRefCount:     Integer;   // #43: atomic ref count; reaches 0 → Destroy
+    _PadRef:       array[0..14] of Integer; // #69: cache-line padding — isolate FRefCount
   public
 {$IFDEF MSWINDOWS}
     Socket:     TSocket;
@@ -46,6 +47,7 @@ type
     KeepAlive:     Boolean;
     LastActivityTick: UInt64;    // TThread.GetTickCount64 — drives idle-timeout
     InFlightPool:  Integer;      // atomic counter: >0 while pool lambdas hold this connection; idle-sweep skips it
+    _PadInflight:  array[0..14] of Integer; // #69: cache-line padding — isolate InFlightPool
     SSLHandle:     Pointer;    // SSL* (nil when plain HTTP)
     SSLReadBio:    Pointer;    // BIO* — encrypted bytes from network
     SSLWriteBio:   Pointer;    // BIO* — encrypted bytes to network

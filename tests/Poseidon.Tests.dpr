@@ -43,7 +43,8 @@ uses
   Poseidon.Tests.Middleware.Digest,
   Poseidon.Tests.Middleware.Static,
   Poseidon.Tests.Middleware.Proxy,
-  Poseidon.Tests.Middleware.OpenAPI;
+  Poseidon.Tests.Middleware.OpenAPI,
+  Poseidon.Tests.Middleware.Cache;
 
 var
   LRunner:  ITestRunner;

@@ -75,6 +75,14 @@ type
     FRecvPoolLock: TCriticalSection;
     FRecvPoolBase: PByte;
     FMultishotAccept: Boolean;          // #73: multishot accept active
+    // #75: registered files
+    FRegFiles: Boolean;                   // True if IORING_REGISTER_FILES succeeded
+    FRegFds: array of Int32;              // fd → index mapping table
+    FRegCount: Integer;                   // allocated slots
+    FRegLock: TCriticalSection;
+    function _RegFileIndex(AFd: Integer): Integer;
+    function _RegisterFd(AFd: Integer): Integer;
+    procedure _UnregisterFd(AFd: Integer);
     // helpers
     procedure _AcceptOn(AListenFd: Integer);
     procedure _CompletionLoop;
@@ -140,6 +148,9 @@ const
   // #73: multishot accept — one SQE generates multiple CQEs
   IOSQE_ACCEPT_MULTISHOT = UInt16(1 shl 0);  // ioprio flag for multishot accept
 
+  // SQE flags
+  IOSQE_FIXED_FILE = Byte(1 shl 0);  // #75: use registered file index instead of fd
+
   // CQE flags
   IORING_CQE_F_MORE = UInt32(1 shl 1);  // more CQEs to come from this SQE
 
@@ -157,7 +168,9 @@ const
   CRecvPoolSize = CRingEntries;
 
   // io_uring_register opcodes
-  IORING_REGISTER_PROBE = UInt32(8);   // added in kernel 5.6
+  IORING_REGISTER_FILES        = UInt32(2);   // #75: register fd array
+  IORING_REGISTER_FILES_UPDATE = UInt32(6);   // #75: update registered fds
+  IORING_REGISTER_PROBE        = UInt32(8);   // added in kernel 5.6
 
   // io_uring_probe_op flag — op is supported by this kernel
   IO_URING_OP_SUPPORTED = UInt16(1);
@@ -381,6 +394,11 @@ begin
   FRecvFreeTop := CRecvPoolSize;
   for LI := 0 to CRecvPoolSize - 1 do
     FRecvFreeIdx[LI] := UInt16(LI);
+
+  // #75: registered files — pre-allocate slot table
+  FRegLock := TCriticalSection.Create;
+  FRegFiles := False;
+  FRegCount := 0;
 end;
 
 destructor TIOUringBackend.Destroy;
@@ -391,6 +409,7 @@ begin
     FRecvCtxPool := nil;
   end;
   FreeAndNil(FRecvPoolLock);
+  FreeAndNil(FRegLock);
   FreeAndNil(FSQLock);
   inherited Destroy;
 end;
@@ -515,6 +534,23 @@ begin
     PUInt32(PByte(FSQRing) + LParams.sq_off.array_ + NativeUInt(I) * SizeOf(UInt32))^
       := UInt32(I);
 
+  // #75: Register an initial empty file table — allows later REGISTER_FILES_UPDATE
+  begin
+    var LInitFds: array of Int32;
+    SetLength(LInitFds, CRegFilesMax);
+    for I := 0 to CRegFilesMax - 1 do
+      LInitFds[I] := -1; // sparse table — all slots empty
+    if _io_uring_register(FRingFd, IORING_REGISTER_FILES,
+      @LInitFds[0], CRegFilesMax) >= 0 then
+    begin
+      FRegFiles := True;
+      SetLength(FRegFds, 65536);
+      for I := 0 to High(FRegFds) do
+        FRegFds[I] := -1;
+      FRegCount := 0;
+    end;
+  end;
+
   FCompThread := TThread.CreateAnonymousThread(procedure begin _CompletionLoop; end);
   FCompThread.FreeOnTerminate := False;
   FCompThread.Start;
@@ -624,8 +660,11 @@ end;
 // ---------------------------------------------------------------------------
 
 procedure TIOUringBackend.RegisterConn(AConn: Pointer);
+var
+  LConn: TNativeConn absolute AConn;
 begin
-  // io_uring identifies the fd in each individual SQE — no registration step needed
+  // #75: register the fd for IOSQE_FIXED_FILE (eliminates fget/fput per I/O)
+  _RegisterFd(LConn.Socket);
 end;
 
 procedure TIOUringBackend.PostRecv(AConn: Pointer);
@@ -707,6 +746,8 @@ procedure TIOUringBackend.SocketClose(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
 begin
+  // #75: unregister fd from the file table before closing
+  _UnregisterFd(LConn.Socket);
   // R-6: TCP half-close — FIN before full teardown so the client reads pending bytes
   shutdown(LConn.Socket, SHUT_WR);
   _LinuxClose(LConn.Socket);
@@ -757,6 +798,76 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
+// #75: Registered files — eliminates fget/fput atomic refcount per I/O op
+// ---------------------------------------------------------------------------
+
+const
+  CRegFilesMax = 4096;  // max registered fd slots
+
+function TIOUringBackend._RegFileIndex(AFd: Integer): Integer;
+begin
+  // Linear scan — FRegCount is typically small relative to hot-path savings
+  Result := -1;
+  if not FRegFiles then Exit;
+  FRegLock.Acquire;
+  try
+    if (AFd >= 0) and (AFd < Length(FRegFds)) and (FRegFds[AFd] >= 0) then
+      Result := FRegFds[AFd];
+  finally
+    FRegLock.Release;
+  end;
+end;
+
+function TIOUringBackend._RegisterFd(AFd: Integer): Integer;
+var
+  LUpdate: Int32;
+  LSlot: Integer;
+begin
+  Result := -1;
+  if not FRegFiles then Exit;
+  FRegLock.Acquire;
+  try
+    if AFd >= Length(FRegFds) then
+      SetLength(FRegFds, AFd + 256); // grow mapping table
+
+    LSlot := FRegCount;
+    if LSlot >= CRegFilesMax then Exit; // table full
+    Inc(FRegCount);
+
+    LUpdate := AFd;
+    if _io_uring_register(FRingFd, IORING_REGISTER_FILES_UPDATE,
+      @LUpdate, 1) >= 0 then
+    begin
+      FRegFds[AFd] := LSlot;
+      Result := LSlot;
+    end
+    else
+      Dec(FRegCount); // registration failed
+  finally
+    FRegLock.Release;
+  end;
+end;
+
+procedure TIOUringBackend._UnregisterFd(AFd: Integer);
+var
+  LSlot: Integer;
+  LUpdate: Int32;
+begin
+  if not FRegFiles then Exit;
+  FRegLock.Acquire;
+  try
+    if (AFd < 0) or (AFd >= Length(FRegFds)) then Exit;
+    LSlot := FRegFds[AFd];
+    if LSlot < 0 then Exit;
+    LUpdate := -1; // unregister slot
+    _io_uring_register(FRingFd, IORING_REGISTER_FILES_UPDATE, @LUpdate, 1);
+    FRegFds[AFd] := -1;
+  finally
+    FRegLock.Release;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
 // #60: Notify kernel about new SQEs.  In normal mode, calls io_uring_enter
 // with to_submit=1.  In SQPOLL mode, the kernel poller picks up SQEs
 // automatically; we only call io_uring_enter if it went idle (NEED_WAKEUP).
@@ -784,6 +895,7 @@ function TIOUringBackend._SubmitSQE(AOpcode: Byte; AFd: Integer;
 var
   LTail, LIdx: UInt32;
   LSQE: PIOUringSQE;
+  LRegIdx: Integer;
 begin
   LTail := FPSQTail^;
 
@@ -797,10 +909,19 @@ begin
   LSQE := PIOUringSQE(PByte(FSQEs) + NativeUInt(LIdx) * SizeOf(TIOUringSQE));
   FillChar(LSQE^, SizeOf(TIOUringSQE), 0);
   LSQE^.opcode    := AOpcode;
-  LSQE^.fd        := AFd;
   LSQE^.addr      := UInt64(ABuf);
   LSQE^.len       := ALen;
   LSQE^.user_data := AUserData;
+
+  // #75: use registered file index when available (eliminates fget/fput atomics)
+  LRegIdx := _RegFileIndex(AFd);
+  if LRegIdx >= 0 then
+  begin
+    LSQE^.fd    := LRegIdx;
+    LSQE^.flags := IOSQE_FIXED_FILE;
+  end
+  else
+    LSQE^.fd := AFd;
 
   // x86-64 TSO: plain store sufficient; io_uring_enter acts as full barrier
   FPSQTail^ := LTail + 1;

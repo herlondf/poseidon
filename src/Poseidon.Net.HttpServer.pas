@@ -48,6 +48,7 @@ type
     FActive:          Boolean;
     FConnManager:     TConnectionManager;  // #84: connection admission + tracking
     FInFlightCount:   Int64;
+    _PadInflight:     array[0..6] of Int64; // #69: cache-line padding — isolate FInFlightCount
     FIdleTimeoutMs:   Integer;     // 0 = disabled; default 10_000
     FIdleSweep:       TIdleSweepManager;  // #88: idle connection timeout (created in Listen)
     FSSLManager:      TSSLManager;     // #85: SSL config + context

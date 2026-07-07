@@ -99,6 +99,7 @@ type
 
     // R-2: active stream tracking for graceful GOAWAY drain
     FActiveStreams: Integer;
+    _PadStreams:    array[0..14] of Integer; // #69: cache-line padding
     FDeferClose:   Boolean;
 
     // Server push (RFC 7540 §8.2)

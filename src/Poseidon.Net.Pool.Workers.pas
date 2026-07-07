@@ -74,8 +74,11 @@ type
     FDeques:        array of TWorkerDeque;
     FDequeCount:    Integer;
     FNextDeque:     Integer;  // atomic round-robin counter for Post()
+    _PadNextDeque:  array[0..14] of Integer; // #69: cache-line padding
     FActiveWorkers: Integer;  // atomic — total alive threads (including idle)
+    _PadActive:     array[0..14] of Integer; // #69: cache-line padding
     FIdleWorkers:   Integer;  // atomic — threads blocked on semaphore
+    _PadIdle:       array[0..14] of Integer; // #69: cache-line padding
     FSemaphore:     TSemaphore;
     FShutdown:      Boolean;
     procedure _WorkerLoop(ADequeIdx: Integer);
