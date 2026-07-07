@@ -225,6 +225,7 @@ implementation
 // This is the only {$IFDEF} remaining in HttpServer — used solely to select the backend.
 {$IFDEF MSWINDOWS}
 uses
+  Poseidon.Net.IO.RIO,
   Poseidon.Net.IO.IOCP,
   Poseidon.Net.SSL,
   Poseidon.Net.Pool.Buffer,
@@ -910,10 +911,20 @@ begin
   // R-5: create the protocol dispatcher with a server-backed adapter
   FDispatcher              := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self), FSyncDispatch);
   // R-1: create platform IO backend — ONLY {$IFDEF} remaining in HttpServer.
-  // On Linux: try io_uring (kernel 5.1+) first; fall back to epoll silently.
-  // Define FORCE_EPOLL to skip io_uring (useful when io_uring is virtualized/slow).
+  // Windows: try RIO (Windows 8+) first; fall back to IOCP silently.
+  // Linux:   try io_uring (kernel 5.1+) first; fall back to epoll silently.
+  // Define FORCE_IOCP / FORCE_EPOLL to skip the modern backend.
 {$IFDEF MSWINDOWS}
+  {$IFDEF FORCE_IOCP}
   FIOBackend               := TIOCPBackend.Create;
+  {$ELSE}
+  try
+    FIOBackend             := TRIOBackend.Create;
+  except
+    on ENotSupportedException do
+      FIOBackend           := TIOCPBackend.Create;
+  end;
+  {$ENDIF}
 {$ELSE}
   {$IFDEF FORCE_EPOLL}
   FIOBackend               := TEpollBackend.Create;

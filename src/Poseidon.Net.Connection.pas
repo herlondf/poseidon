@@ -38,6 +38,7 @@ type
   public
 {$IFDEF MSWINDOWS}
     Socket:     TSocket;
+    RioRQ:      Pointer;     // #78: RIO request queue handle (nil when using IOCP)
 {$ELSE}
     Socket:     Integer;
 {$ENDIF}
@@ -94,6 +95,7 @@ constructor TNativeConn.Create(ASocket: NativeUInt; const AAddr: string);
 begin
 {$IFDEF MSWINDOWS}
   Socket       := TSocket(ASocket);
+  RioRQ        := nil;
 {$ELSE}
   Socket       := Integer(ASocket);
 {$ENDIF}
