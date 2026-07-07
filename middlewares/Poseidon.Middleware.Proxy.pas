@@ -1,111 +1,91 @@
 unit Poseidon.Middleware.Proxy;
 
+// Reverse proxy middleware.
+//
+// Usage:
+//   App.Use(ProxyMiddleware('http://backend:8080'));
+//   App.Use(ProxyMiddlewareWithPrefix('http://backend:8080', '/api'));
+
 interface
 
 uses
-  System.SysUtils,
-  System.Classes,
-  System.Net.HttpClient,
-  Poseidon.Proc,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Callback;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonMiddlewareProxy = class
-  private
-    class procedure _Execute(
-      const AUpstream, APrefix: string;
-      Req: TPoseidonRequest; Res: TPoseidonResponse); static;
-  public
-    class function New(const AUpstream: string): TPoseidonCallback; static;
-    class function NewWithPrefix(const AUpstream, APrefix: string): TPoseidonCallback; static;
-  end;
+function ProxyMiddleware(const AUpstream: string): TNativeMiddlewareFunc;
+function ProxyMiddlewareWithPrefix(const AUpstream, APrefix: string): TNativeMiddlewareFunc;
 
 implementation
 
 uses
-  Web.HTTPApp;
+  System.SysUtils,
+  System.Classes,
+  System.Net.HttpClient;
 
-class procedure TPoseidonMiddlewareProxy._Execute(
-  const AUpstream, APrefix: string;
-  Req: TPoseidonRequest; Res: TPoseidonResponse);
+procedure ExecuteProxy(const AUpstream, APrefix: string;
+  var ACtx: TNativeRequestContext);
 var
   LClient: TNetHTTPClient;
   LHTTPReq: TNetHTTPRequest;
   LResponse: IHTTPResponse;
-  LPath: string;
-  LTargetURL: string;
+  LPath, LTargetURL: string;
   LBodyStream: TBytesStream;
-  LContentLength: Int64;
-  LRawReq: TWebRequest;
-  LHeaderName, LHeaderValue: string;
-  LStatus: Integer;
   LContentType: string;
-  LBytes: TBytes;
   I: Integer;
-  LKnownHeaders: array[0..7] of string;
+const
+  CForwardHeaders: array[0..7] of string = (
+    'Authorization', 'Accept', 'Accept-Language', 'Accept-Encoding',
+    'Content-Type', 'Cache-Control', 'X-Forwarded-For', 'X-Request-Id');
 begin
-  LRawReq := Req.RawWebRequest;
-
-  LPath := Req.PathInfo;
+  LPath := ACtx.Path;
   if (APrefix <> '') and LPath.StartsWith(APrefix, True) then
     LPath := Copy(LPath, Length(APrefix) + 1, MaxInt);
   if LPath = '' then
     LPath := '/';
 
-  if LRawReq.QueryString <> '' then
-    LTargetURL := AUpstream + LPath + '?' + LRawReq.QueryString
+  if ACtx.QueryString <> '' then
+    LTargetURL := AUpstream + LPath + '?' + ACtx.QueryString
   else
     LTargetURL := AUpstream + LPath;
 
-  LClient  := TNetHTTPClient.Create(nil);
+  LClient := TNetHTTPClient.Create(nil);
   LHTTPReq := TNetHTTPRequest.Create(nil);
   LBodyStream := nil;
   try
     LHTTPReq.Client := LClient;
 
-    LKnownHeaders[0] := 'Authorization';
-    LKnownHeaders[1] := 'Accept';
-    LKnownHeaders[2] := 'Accept-Language';
-    LKnownHeaders[3] := 'Accept-Encoding';
-    LKnownHeaders[4] := 'Content-Type';
-    LKnownHeaders[5] := 'Cache-Control';
-    LKnownHeaders[6] := 'X-Forwarded-For';
-    LKnownHeaders[7] := 'X-Request-Id';
-
-    for I := 0 to High(LKnownHeaders) do
+    for I := 0 to High(CForwardHeaders) do
     begin
-      LHeaderName  := LKnownHeaders[I];
-      LHeaderValue := LRawReq.GetFieldByName(LHeaderName);
-      if LHeaderValue <> '' then
-        LHTTPReq.CustomHeaders[LHeaderName] := LHeaderValue;
+      var LVal := ACtx.Header(CForwardHeaders[I]);
+      if LVal <> '' then
+        LHTTPReq.CustomHeaders[CForwardHeaders[I]] := LVal;
     end;
 
-    LHTTPReq.CustomHeaders['X-Forwarded-Host'] := LRawReq.Host;
-
-    LContentLength := LRawReq.ContentLength;
-    if LContentLength > 0 then
+    if Length(ACtx.RawBody) > 0 then
     begin
-      LBodyStream := TBytesStream.Create(TEncoding.UTF8.GetBytes(Req.RawBody));
+      LBodyStream := TBytesStream.Create(ACtx.RawBody);
       LBodyStream.Position := 0;
     end;
 
     try
-      LResponse := LHTTPReq.Execute(LRawReq.Method, LTargetURL, LBodyStream);
+      LResponse := LHTTPReq.Execute(ACtx.Method, LTargetURL, LBodyStream);
 
-      LStatus      := LResponse.StatusCode;
+      ACtx.Status := LResponse.StatusCode;
       LContentType := LResponse.ContentType;
-      LBytes       := LResponse.ContentAsBytes;
-
       if LContentType = '' then
         LContentType := 'application/octet-stream';
-
-      Res.Status(LStatus).RawSend(LBytes, LContentType);
+      ACtx.ContentType := LContentType;
+      ACtx.Body := LResponse.ContentAsBytes;
     except
       on E: Exception do
-        Res.Status(502).Send('Bad Gateway: ' + E.Message);
+      begin
+        ACtx.Status := 502;
+        ACtx.ContentType := 'application/problem+json';
+        ACtx.Body := TEncoding.UTF8.GetBytes(
+          '{"type":"about:blank","title":"Bad Gateway","status":502,' +
+          '"detail":"' + E.Message + '"}');
+      end;
     end;
+    ACtx.Handled := True;
   finally
     LBodyStream.Free;
     LHTTPReq.Free;
@@ -113,26 +93,26 @@ begin
   end;
 end;
 
-class function TPoseidonMiddlewareProxy.New(const AUpstream: string): TPoseidonCallback;
+function ProxyMiddleware(const AUpstream: string): TNativeMiddlewareFunc;
 begin
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     begin
-      _Execute(AUpstream, '', Req, Res);
+      ExecuteProxy(AUpstream, '', ACtx);
     end;
 end;
 
-class function TPoseidonMiddlewareProxy.NewWithPrefix(const AUpstream, APrefix: string): TPoseidonCallback;
+function ProxyMiddlewareWithPrefix(const AUpstream, APrefix: string): TNativeMiddlewareFunc;
 begin
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     begin
-      if not Req.PathInfo.StartsWith(APrefix, True) then
+      if not ACtx.Path.StartsWith(APrefix, True) then
       begin
-        Next;
+        ANext();
         Exit;
       end;
-      _Execute(AUpstream, APrefix, Req, Res);
+      ExecuteProxy(AUpstream, APrefix, ACtx);
     end;
 end;
 

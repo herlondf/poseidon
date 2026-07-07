@@ -1,75 +1,66 @@
 unit Poseidon.Middleware.ProblemDetails;
 
-// Middleware que converte excecoes em respostas RFC 7807 Problem Details.
+// Converts exceptions to RFC 7807 Problem Details responses.
 //
-// Uso:
-//   TPoseidon.Use(TPoseidonProblemDetailsMiddleware.Handler);
-//
-// Captura EPoseidonException e Exception generica, converte para JSON
-// no formato Problem Details com type, title, status, detail.
+// Usage:
+//   App.Use(ProblemDetailsMiddleware);
 
 interface
 
 uses
-  Poseidon.Callback;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonProblemDetailsMiddleware = class
-  public
-    class function Handler: TPoseidonCallback;
-  end;
+function ProblemDetailsMiddleware: TNativeMiddlewareFunc;
 
 implementation
 
 uses
   System.SysUtils,
   System.JSON,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Proc,
   Poseidon.Exception,
   Poseidon.Problem;
 
-class function TPoseidonProblemDetailsMiddleware.Handler: TPoseidonCallback;
+function ProblemDetailsMiddleware: TNativeMiddlewareFunc;
 begin
-  Result := procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
-  var
-    LProblem: TProblemDetail;
-    LJson: TJSONObject;
-  begin
-    try
-      Next();
-    except
-      on E: EPoseidonException do
-      begin
-        LProblem := TProblemDetail.FromException(E, Req.PathInfo);
-        LJson := LProblem.ToJSON;
-        try
-          Res.Status(LProblem.Status)
-             .ContentType('application/problem+json')
-             .Send(LJson.ToJSON);
-        finally
-          LJson.Free;
+  Result :=
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
+    var
+      LProblem: TProblemDetail;
+      LJson: TJSONObject;
+    begin
+      try
+        ANext();
+      except
+        on E: EPoseidonException do
+        begin
+          LProblem := TProblemDetail.FromException(E, ACtx.Path);
+          LJson := LProblem.ToJSON;
+          try
+            ACtx.Status := LProblem.Status;
+            ACtx.ContentType := 'application/problem+json';
+            ACtx.Body := TEncoding.UTF8.GetBytes(LJson.ToJSON);
+          finally
+            LJson.Free;
+          end;
         end;
-      end;
-      on E: Exception do
-      begin
-        LProblem.TypeURI  := 'about:blank';
-        LProblem.Title    := 'Internal Server Error';
-        LProblem.Status   := 500;
-        LProblem.Detail   := E.Message;
-        LProblem.Instance := Req.PathInfo;
-        LJson := LProblem.ToJSON;
-        try
-          Res.Status(500)
-             .ContentType('application/problem+json')
-             .Send(LJson.ToJSON);
-        finally
-          LJson.Free;
+        on E: Exception do
+        begin
+          LProblem.TypeURI := 'about:blank';
+          LProblem.Title := 'Internal Server Error';
+          LProblem.Status := 500;
+          LProblem.Detail := E.Message;
+          LProblem.Instance := ACtx.Path;
+          LJson := LProblem.ToJSON;
+          try
+            ACtx.Status := 500;
+            ACtx.ContentType := 'application/problem+json';
+            ACtx.Body := TEncoding.UTF8.GetBytes(LJson.ToJSON);
+          finally
+            LJson.Free;
+          end;
         end;
       end;
     end;
-  end;
 end;
 
 end.

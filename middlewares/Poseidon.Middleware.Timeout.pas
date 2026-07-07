@@ -1,69 +1,43 @@
 unit Poseidon.Middleware.Timeout;
 
-// Aborts request handling after ATimeoutMs milliseconds.
-// Returns 503 application/problem+json if the handler takes too long.
+// Measures handler execution time. If it exceeds ATimeoutMs,
+// overrides the response with 504 Gateway Timeout.
+//
+// Note: this is a post-execution check, not a preemptive abort.
+// The handler runs to completion but the response is replaced if slow.
 
 interface
 
 uses
-  Poseidon.Callback,
-  Poseidon.Proc;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonMiddlewareTimeout = class
-  public
-    class function New(ATimeoutMs: Integer): TPoseidonCallback; static;
-  end;
+function TimeoutMiddleware(ATimeoutMs: Integer): TNativeMiddlewareFunc;
 
 implementation
 
 uses
   System.SysUtils,
-  System.Threading,
-  System.SyncObjs,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Commons;
+  System.Diagnostics;
 
-class function TPoseidonMiddlewareTimeout.New(ATimeoutMs: Integer): TPoseidonCallback;
+function TimeoutMiddleware(ATimeoutMs: Integer): TNativeMiddlewareFunc;
 begin
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     var
-      LTimedOut: Boolean;
-      LLock:     TCriticalSection;
-      LTask:     ITask;
+      LSW: TStopwatch;
     begin
-      LTimedOut := False;
-      LLock     := TCriticalSection.Create;
-      try
-        LTask := TTask.Run(
-          procedure
-          begin
-            try
-              Next();
-            except
-              // Surface exceptions after timeout check below
-            end;
-          end);
+      LSW := TStopwatch.StartNew;
+      ANext();
+      LSW.Stop;
 
-        if not LTask.Wait(ATimeoutMs) then
-        begin
-          LLock.Enter;
-          try
-            LTimedOut := True;
-          finally
-            LLock.Leave;
-          end;
-          Res.Status(THTTPStatus.ServiceUnavailable)
-             .Header('Content-Type', 'application/problem+json')
-             .Send(
-               '{"type":"about:blank","title":"Service Unavailable",' +
-               '"status":503,"detail":"Request timed out after ' +
-               ATimeoutMs.ToString + ' ms"}');
-        end;
-      finally
-        LLock.Free;
+      if LSW.ElapsedMilliseconds > ATimeoutMs then
+      begin
+        ACtx.Status := 504;
+        ACtx.ContentType := 'application/problem+json';
+        ACtx.Body := TEncoding.UTF8.GetBytes(
+          Format('{"type":"about:blank","title":"Gateway Timeout",' +
+            '"status":504,"detail":"Request processing exceeded %d ms"}',
+            [ATimeoutMs]));
       end;
     end;
 end;

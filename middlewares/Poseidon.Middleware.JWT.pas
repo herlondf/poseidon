@@ -1,91 +1,38 @@
 unit Poseidon.Middleware.JWT;
 
 // Validates Bearer JWT tokens (HMAC-SHA256 / HS256).
-// Sets the parsed claims object on the request body for downstream handlers.
+// Raises EPoseidonException(401) if invalid/missing/expired.
 //
 // Usage:
-//   TPoseidon.Use(TPoseidonMiddlewareJWT.New('my-secret-key'));
+//   App.Use(JWTMiddleware('my-secret-key'));
 //
-// In your handler:
-//   var Claims := Req.GetBody<TJWTClaims>;
-//   Writeln(Claims.Subject);
+// Token generation:
+//   var Token := JWTSign(Payload, 'my-secret-key');
 
 interface
 
 uses
   System.SysUtils,
   System.JSON,
-  System.NetEncoding,
-  System.Hash,
-  Poseidon.Proc,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Callback,
-  Poseidon.Commons,
-  Poseidon.Exception;
+  Poseidon.Native.Types;
 
-type
-  // Basic claims extracted from JWT payload
-  TJWTClaims = class
-  public
-    Subject: string;     // sub
-    Issuer: string;      // iss
-    Audience: string;    // aud
-    IssuedAt: Int64;     // iat
-    ExpiresAt: Int64;    // exp
-    RawPayload: TJSONObject;
+function JWTMiddleware(const ASecret: string;
+  const AUnauthorizedMsg: string = 'Unauthorized'): TNativeMiddlewareFunc;
 
-    constructor Create; virtual;
-    destructor Destroy; override;
-    function IsExpired: Boolean;
-  end;
-
-  TPoseidonMiddlewareJWT = class
-  private
-    class function Base64URLDecode(const AInput: string): string;
-    class function VerifySignature(const AHeader, APayload, ASignature, ASecret: string): Boolean;
-    class function ParseClaims(const APayloadJSON: string): TJWTClaims;
-  public
-    // Validates token from Authorization: Bearer <token> header.
-    // Raises EPoseidonException(401) if invalid/missing/expired.
-    class function New(const ASecret: string): TPoseidonCallback; overload;
-
-    // Same but with custom unauthorized message
-    class function New(const ASecret, AUnauthorizedMsg: string): TPoseidonCallback; overload;
-
-    // Sign a payload and return a JWT token (server-side token generation)
-    class function Sign(APayload: TJSONObject; const ASecret: string): string;
-  end;
+function JWTSign(APayload: TJSONObject; const ASecret: string): string;
 
 implementation
 
 uses
-  System.DateUtils;
+  System.NetEncoding,
+  System.Hash,
+  System.DateUtils,
+  Poseidon.Exception,
+  Poseidon.Status;
 
-{ TJWTClaims }
-
-constructor TJWTClaims.Create;
-begin
-  RawPayload := nil;
-end;
-
-destructor TJWTClaims.Destroy;
-begin
-  RawPayload.Free;
-  inherited;
-end;
-
-function TJWTClaims.IsExpired: Boolean;
-begin
-  Result := (ExpiresAt > 0) and (ExpiresAt < DateTimeToUnix(TTimeZone.Local.ToUniversalTime(Now)));
-end;
-
-{ TPoseidonMiddlewareJWT }
-
-class function TPoseidonMiddlewareJWT.Base64URLDecode(const AInput: string): string;
+function Base64URLDecode(const AInput: string): string;
 var
-  LPadded: string;
-  LBase64: string;
+  LPadded, LBase64: string;
   LBytes: TBytes;
 begin
   LBase64 := AInput.Replace('-', '+').Replace('_', '/');
@@ -99,10 +46,9 @@ begin
   Result := TEncoding.UTF8.GetString(LBytes);
 end;
 
-class function TPoseidonMiddlewareJWT.VerifySignature(const AHeader, APayload, ASignature, ASecret: string): Boolean;
+function VerifySignature(const AHeader, APayload, ASignature, ASecret: string): Boolean;
 var
-  LInput: string;
-  LExpected: string;
+  LInput, LExpected: string;
   LBytes: TBytes;
 begin
   LInput := AHeader + '.' + APayload;
@@ -114,44 +60,19 @@ begin
   Result := LExpected = ASignature;
 end;
 
-class function TPoseidonMiddlewareJWT.ParseClaims(const APayloadJSON: string): TJWTClaims;
-var
-  LJSON: TJSONObject;
-  LValue: TJSONValue;
-begin
-  Result := TJWTClaims.Create;
-  LJSON := TJSONObject.ParseJSONValue(APayloadJSON) as TJSONObject;
-  if LJSON = nil then
-    Exit;
-  Result.RawPayload := LJSON;
-  LValue := LJSON.GetValue('sub');
-  if LValue <> nil then Result.Subject := LValue.Value;
-  LValue := LJSON.GetValue('iss');
-  if LValue <> nil then Result.Issuer := LValue.Value;
-  LValue := LJSON.GetValue('aud');
-  if LValue <> nil then Result.Audience := LValue.Value;
-  LValue := LJSON.GetValue('iat');
-  if LValue <> nil then Result.IssuedAt := (LValue as TJSONNumber).AsInt64;
-  LValue := LJSON.GetValue('exp');
-  if LValue <> nil then Result.ExpiresAt := (LValue as TJSONNumber).AsInt64;
-end;
-
-class function TPoseidonMiddlewareJWT.New(const ASecret: string): TPoseidonCallback;
-begin
-  Result := New(ASecret, 'Unauthorized');
-end;
-
-class function TPoseidonMiddlewareJWT.New(const ASecret, AUnauthorizedMsg: string): TPoseidonCallback;
+function JWTMiddleware(const ASecret: string;
+  const AUnauthorizedMsg: string): TNativeMiddlewareFunc;
 begin
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     var
       LAuthHeader, LToken: string;
       LParts: TArray<string>;
-      LHeader, LPayload, LSignature: string;
-      LClaims: TJWTClaims;
+      LPayloadJSON: string;
+      LJSON: TJSONObject;
+      LExp: Int64;
     begin
-      LAuthHeader := Req.Headers.GetOrDefault('Authorization', '');
+      LAuthHeader := ACtx.Header('Authorization');
       if not LAuthHeader.StartsWith('Bearer ', True) then
         raise EPoseidonException.Create(AUnauthorizedMsg, THTTPStatus.Unauthorized);
 
@@ -160,35 +81,36 @@ begin
       if Length(LParts) <> 3 then
         raise EPoseidonException.Create(AUnauthorizedMsg, THTTPStatus.Unauthorized);
 
-      LHeader    := LParts[0];
-      LPayload   := LParts[1];
-      LSignature := LParts[2];
-
-      if not VerifySignature(LHeader, LPayload, LSignature, ASecret) then
+      if not VerifySignature(LParts[0], LParts[1], LParts[2], ASecret) then
         raise EPoseidonException.Create(AUnauthorizedMsg, THTTPStatus.Unauthorized);
 
-      LClaims := ParseClaims(Base64URLDecode(LPayload));
-      if LClaims.IsExpired then
-      begin
-        LClaims.Free;
-        raise EPoseidonException.Create('Token expired', THTTPStatus.Unauthorized);
+      LPayloadJSON := Base64URLDecode(LParts[1]);
+      LJSON := TJSONObject.ParseJSONValue(LPayloadJSON) as TJSONObject;
+      if LJSON = nil then
+        raise EPoseidonException.Create(AUnauthorizedMsg, THTTPStatus.Unauthorized);
+      try
+        if LJSON.TryGetValue<Int64>('exp', LExp) then
+        begin
+          if LExp < DateTimeToUnix(TTimeZone.Local.ToUniversalTime(Now)) then
+            raise EPoseidonException.Create('Token expired', THTTPStatus.Unauthorized);
+        end;
+      finally
+        LJSON.Free;
       end;
 
-      Req.SetBody(LClaims);  // Claims accessible via Req.GetBody<TJWTClaims>
-      Next;
+      ANext();
     end;
 end;
 
-class function TPoseidonMiddlewareJWT.Sign(APayload: TJSONObject; const ASecret: string): string;
+function JWTSign(APayload: TJSONObject; const ASecret: string): string;
 var
-  LHeaderJSON, LPayloadStr, LHeaderStr: string;
-  LInput: string;
+  LHeaderStr, LPayloadStr, LInput, LSignature: string;
   LBytes: TBytes;
-  LSignature: string;
 begin
-  LHeaderJSON := '{"alg":"HS256","typ":"JWT"}';
-  LHeaderStr  := TNetEncoding.Base64URL.EncodeBytesToString(TEncoding.UTF8.GetBytes(LHeaderJSON));
-  LPayloadStr := TNetEncoding.Base64URL.EncodeBytesToString(TEncoding.UTF8.GetBytes(APayload.ToString));
+  LHeaderStr := TNetEncoding.Base64URL.EncodeBytesToString(
+    TEncoding.UTF8.GetBytes('{"alg":"HS256","typ":"JWT"}'));
+  LPayloadStr := TNetEncoding.Base64URL.EncodeBytesToString(
+    TEncoding.UTF8.GetBytes(APayload.ToString));
 
   LInput := LHeaderStr + '.' + LPayloadStr;
   LBytes := THashSHA2.GetHMACAsBytes(

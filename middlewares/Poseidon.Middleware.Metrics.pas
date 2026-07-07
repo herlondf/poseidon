@@ -1,25 +1,18 @@
 unit Poseidon.Middleware.Metrics;
 
-// Prometheus-compatible metrics middleware for Poseidon.
-//
-// Collects per-path request counts, error counts and latency.
-// Exposes a /metrics (or custom path) endpoint in Prometheus text format.
+// Prometheus-compatible metrics middleware.
+// Collects per-path request counts, error counts and latency histogram.
 //
 // Usage:
-//   TPoseidon.Use(TPoseidonMiddlewareMetrics.New);            // serves GET /metrics
-//   TPoseidon.Use(TPoseidonMiddlewareMetrics.New('/internal/metrics'));
+//   App.Use(MetricsMiddleware);
+//   App.Use(MetricsMiddleware('/internal/metrics'));
 
 interface
 
 uses
-  Poseidon.Callback,
-  Poseidon.Proc;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonMiddlewareMetrics = class
-  public
-    class function New(const APath: string = '/metrics'): TPoseidonCallback; static;
-  end;
+function MetricsMiddleware(const APath: string = '/metrics'): TNativeMiddlewareFunc;
 
 implementation
 
@@ -28,35 +21,34 @@ uses
   System.Classes,
   System.SyncObjs,
   System.Generics.Collections,
-  System.Diagnostics,
-  Poseidon.Request,
-  Poseidon.Response;
+  System.Diagnostics;
 
 const
-  HIST_BOUNDS: array[0..7] of Int64 = (5, 10, 25, 50, 100, 250, 500, 1000);
+  CHistBounds: array[0..7] of Int64 = (5, 10, 25, 50, 100, 250, 500, 1000);
+  CHistBoundsStr: array[0..7] of string = ('5', '10', '25', '50', '100', '250', '500', '1000');
 
 type
   TMetricBucket = record
-    Requests:    Int64;
-    Errors:      Int64;
-    DurationSum: Int64;  // ms
-    HistBuckets: array[0..8] of Int64; // cumulative: 0..7 = HIST_BOUNDS, 8 = +Inf
+    Requests: Int64;
+    Errors: Int64;
+    DurationSum: Int64;
+    HistBuckets: array[0..8] of Int64;
   end;
 
   TMetricsStore = class
   private
-    FLock:    TCriticalSection;
+    FLock: TCriticalSection;
     FBuckets: TDictionary<string, TMetricBucket>;
   public
     constructor Create;
-    destructor  Destroy; override;
-    procedure   Record_(const AKey: string; ADurationMs: Int64; AIsError: Boolean);
-    function    Snapshot: TArray<TPair<string, TMetricBucket>>;
+    destructor Destroy; override;
+    procedure Record_(const AKey: string; ADurationMs: Int64; AIsError: Boolean);
+    function Snapshot: TArray<TPair<string, TMetricBucket>>;
   end;
 
 constructor TMetricsStore.Create;
 begin
-  FLock    := TCriticalSection.Create;
+  FLock := TCriticalSection.Create;
   FBuckets := TDictionary<string, TMetricBucket>.Create;
 end;
 
@@ -80,11 +72,10 @@ begin
     Inc(LBucket.DurationSum, ADurationMs);
     if AIsError then
       Inc(LBucket.Errors);
-    // Cumulative histogram: each bucket counts all requests <= its bound
     for I := 0 to 7 do
-      if ADurationMs <= HIST_BOUNDS[I] then
+      if ADurationMs <= CHistBounds[I] then
         Inc(LBucket.HistBuckets[I]);
-    Inc(LBucket.HistBuckets[8]); // +Inf always
+    Inc(LBucket.HistBuckets[8]);
     FBuckets.AddOrSetValue(AKey, LBucket);
   finally
     FLock.Leave;
@@ -111,16 +102,14 @@ begin
 end;
 
 function BuildPrometheusText(const AStore: TMetricsStore): string;
-const
-  BOUNDS_STR: array[0..7] of string = ('5', '10', '25', '50', '100', '250', '500', '1000');
 var
   LPairs: TArray<TPair<string, TMetricBucket>>;
-  LPair:  TPair<string, TMetricBucket>;
-  LSB:    TStringBuilder;
-  I:      Integer;
+  LPair: TPair<string, TMetricBucket>;
+  LSB: TStringBuilder;
+  I: Integer;
 begin
   LPairs := AStore.Snapshot;
-  LSB    := TStringBuilder.Create;
+  LSB := TStringBuilder.Create;
   try
     LSB.AppendLine('# HELP poseidon_requests_total Total HTTP requests handled');
     LSB.AppendLine('# TYPE poseidon_requests_total counter');
@@ -141,7 +130,7 @@ begin
     begin
       for I := 0 to 7 do
         LSB.AppendLine(Format('poseidon_request_duration_ms_bucket{path="%s",le="%s"} %d',
-          [LPair.Key, BOUNDS_STR[I], LPair.Value.HistBuckets[I]]));
+          [LPair.Key, CHistBoundsStr[I], LPair.Value.HistBuckets[I]]));
       LSB.AppendLine(Format('poseidon_request_duration_ms_bucket{path="%s",le="+Inf"} %d',
         [LPair.Key, LPair.Value.HistBuckets[8]]));
       LSB.AppendLine(Format('poseidon_request_duration_ms_sum{path="%s"} %d',
@@ -156,42 +145,39 @@ begin
   end;
 end;
 
-class function TPoseidonMiddlewareMetrics.New(const APath: string): TPoseidonCallback;
+function MetricsMiddleware(const APath: string): TNativeMiddlewareFunc;
 var
   LStore: TMetricsStore;
 begin
   LStore := TMetricsStore.Create;
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     var
-      LSW:      TStopwatch;
+      LSW: TStopwatch;
       LIsError: Boolean;
-      LKey:     string;
     begin
-      // Serve the metrics endpoint (any method)
-      if Req.PathInfo.TrimRight(['/']) = APath.TrimRight(['/']) then
+      if ACtx.Path.TrimRight(['/']) = APath.TrimRight(['/']) then
       begin
-        Res.Status(200)
-           .Header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
-           .Send(BuildPrometheusText(LStore));
+        ACtx.Status := 200;
+        ACtx.ContentType := 'text/plain; version=0.0.4; charset=utf-8';
+        ACtx.Body := TEncoding.UTF8.GetBytes(BuildPrometheusText(LStore));
+        ACtx.Handled := True;
         Exit;
       end;
 
-      // Collect metrics for all other requests
-      LKey     := Req.PathInfo;
-      LSW      := TStopwatch.StartNew;
+      LSW := TStopwatch.StartNew;
       LIsError := False;
       try
         try
-          Next();
-          LIsError := Res.RawWebResponse.StatusCode >= 400;
+          ANext();
+          LIsError := ACtx.Status >= 400;
         except
           LIsError := True;
           raise;
         end;
       finally
         LSW.Stop;
-        LStore.Record_(LKey, LSW.ElapsedMilliseconds, LIsError);
+        LStore.Record_(ACtx.Path, LSW.ElapsedMilliseconds, LIsError);
       end;
     end;
 end;

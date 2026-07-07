@@ -1,13 +1,20 @@
 unit Poseidon.Middleware.RateLimit;
 
-// Simple in-memory IP-based rate limiter (fixed window).
-// Thread-safe via critical section.
+// In-memory IP-based rate limiter (fixed window). Thread-safe.
 //
 // Usage:
-//   TPoseidon.Use(TPoseidonMiddlewareRateLimit.New(100, 60));
+//   App.Use(RateLimitMiddleware(100, 60));
 //   // max 100 requests per 60 seconds per IP
 
 interface
+
+uses
+  Poseidon.Native.Types;
+
+function RateLimitMiddleware(AMaxRequests: Integer; AWindowSeconds: Integer;
+  const AMessage: string = 'Too Many Requests'): TNativeMiddlewareFunc;
+
+implementation
 
 uses
   System.SysUtils,
@@ -15,27 +22,8 @@ uses
   System.DateUtils,
   System.Generics.Collections,
   System.SyncObjs,
-  Poseidon.Proc,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Callback,
-  Poseidon.Commons,
-  Poseidon.Exception;
-
-type
-  TPoseidonMiddlewareRateLimit = class
-  public
-    // AMaxRequests: max hits per window
-    // AWindowSeconds: rolling window size in seconds
-    // AMessage: optional custom message
-    class function New(
-      AMaxRequests: Integer;
-      AWindowSeconds: Integer;
-      const AMessage: string = 'Too Many Requests'
-    ): TPoseidonCallback;
-  end;
-
-implementation
+  Poseidon.Exception,
+  Poseidon.Status;
 
 type
   TWindowEntry = record
@@ -43,41 +31,38 @@ type
     WindowStart: TDateTime;
   end;
 
-// LTable and LLock are captured by the closure and live for the application
-// lifetime. They are intentionally not freed — the OS reclaims them at exit.
-// Stale entries are purged once per 60s (inside the lock) to prevent unbounded
-// memory growth under sustained traffic from many distinct IPs.
-class function TPoseidonMiddlewareRateLimit.New(AMaxRequests, AWindowSeconds: Integer;
-  const AMessage: string): TPoseidonCallback;
+function RateLimitMiddleware(AMaxRequests: Integer; AWindowSeconds: Integer;
+  const AMessage: string): TNativeMiddlewareFunc;
 var
-  LTable:       TDictionary<string, TWindowEntry>;
-  LLock:        TCriticalSection;
+  LTable: TDictionary<string, TWindowEntry>;
+  LLock: TCriticalSection;
   LLastCleanup: TDateTime;
 begin
-  LTable       := TDictionary<string, TWindowEntry>.Create(256);
-  LLock        := TCriticalSection.Create;
+  LTable := TDictionary<string, TWindowEntry>.Create(256);
+  LLock := TCriticalSection.Create;
   LLastCleanup := Now;
 
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     var
-      LIP:       string;
-      LEntry:    TWindowEntry;
-      LNow:      TDateTime;
-      LElapsed:  Int64;
+      LIP: string;
+      LEntry: TWindowEntry;
+      LNow: TDateTime;
+      LElapsed: Int64;
       LRemaining: Integer;
-      LStale:    TArray<string>;
-      LIdx:      Integer;
-      LPair:     TPair<string, TWindowEntry>;
+      LStale: TArray<string>;
+      LIdx: Integer;
+      LPair: TPair<string, TWindowEntry>;
+      LLen: Integer;
     begin
-      LIP := Req.Headers.GetOrDefault('X-Forwarded-For',
-               Req.RawWebRequest.RemoteAddr);
+      LIP := ACtx.Header('X-Forwarded-For');
+      if LIP = '' then
+        LIP := ACtx.RemoteAddr;
       LIP := LIP.Split([','])[0].Trim;
 
       LNow := Now;
       LLock.Enter;
       try
-        // Purge entries whose window expired more than 2× ago (once per 60s).
         if SecondsBetween(LNow, LLastCleanup) >= 60 then
         begin
           SetLength(LStale, 0);
@@ -116,13 +101,17 @@ begin
         LLock.Leave;
       end;
 
-      Res.Header('X-RateLimit-Limit', AMaxRequests.ToString)
-         .Header('X-RateLimit-Remaining', IntToStr(Max(0, LRemaining)));
+      LLen := Length(ACtx.ExtraHeaders);
+      SetLength(ACtx.ExtraHeaders, LLen + 2);
+      ACtx.ExtraHeaders[LLen] := TPair<string,string>.Create(
+        'X-RateLimit-Limit', IntToStr(AMaxRequests));
+      ACtx.ExtraHeaders[LLen + 1] := TPair<string,string>.Create(
+        'X-RateLimit-Remaining', IntToStr(Max(0, LRemaining)));
 
       if LRemaining < 0 then
         raise EPoseidonException.Create(AMessage, THTTPStatus.TooManyRequests);
 
-      Next;
+      ANext();
     end;
 end;
 

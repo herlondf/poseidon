@@ -1,82 +1,78 @@
 unit Poseidon.Middleware.Guard;
 
-// Middleware de protecao de requests: method whitelist, path traversal,
-// request smuggling detection.
+// Request guard: method whitelist, path traversal, request smuggling.
 //
-// Uso:
-//   TPoseidon.Use(TPoseidonGuardMiddleware.Handler);
-//   TPoseidon.Use(TPoseidonGuardMiddleware.Handler(['GET', 'POST']));
-//
-// Verifica antes de chegar ao handler:
-//   - Path traversal (../, %2e%2e, backslash, NUL)
-//   - Request smuggling (Content-Length + Transfer-Encoding)
-//   - Method whitelist (se configurado)
+// Usage:
+//   App.Use(GuardMiddleware);
+//   App.Use(GuardMiddleware(['GET', 'POST']));
 
 interface
 
 uses
-  Poseidon.Callback;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonGuardMiddleware = class
-  public
-    class function Handler: TPoseidonCallback; overload;
-    class function Handler(const AAllowedMethods: TArray<string>): TPoseidonCallback; overload;
-  end;
+function GuardMiddleware: TNativeMiddlewareFunc; overload;
+function GuardMiddleware(const AAllowedMethods: TArray<string>): TNativeMiddlewareFunc; overload;
 
 implementation
 
 uses
   System.SysUtils,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Proc,
   Poseidon.Net.Security;
 
-class function TPoseidonGuardMiddleware.Handler: TPoseidonCallback;
+function GuardMiddleware: TNativeMiddlewareFunc;
 begin
-  Result := Handler([]);
+  Result := GuardMiddleware([]);
 end;
 
-class function TPoseidonGuardMiddleware.Handler(const AAllowedMethods: TArray<string>): TPoseidonCallback;
+function GuardMiddleware(const AAllowedMethods: TArray<string>): TNativeMiddlewareFunc;
 var
   LMethods: TArray<string>;
 begin
   LMethods := AAllowedMethods;
-  Result := procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
-  var
-    LMethod, LTE: string;
-    LHasCL: Boolean;
-  begin
-    // Method whitelist
-    if Length(LMethods) > 0 then
+  Result :=
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
+    var
+      LHasCL: Boolean;
+      LTE: string;
     begin
-      LMethod := Req.RawWebRequest.Method;
-      if not IsMethodAllowed(LMethod, LMethods) then
+      if Length(LMethods) > 0 then
       begin
-        Res.Status(405).Send('Method Not Allowed');
+        if not IsMethodAllowed(ACtx.Method, LMethods) then
+        begin
+          ACtx.Status := 405;
+          ACtx.ContentType := 'application/problem+json';
+          ACtx.Body := TEncoding.UTF8.GetBytes(
+            '{"type":"about:blank","title":"Method Not Allowed","status":405}');
+          ACtx.Handled := True;
+          Exit;
+        end;
+      end;
+
+      if not IsPathSafe(ACtx.Path) then
+      begin
+        ACtx.Status := 400;
+        ACtx.ContentType := 'application/problem+json';
+        ACtx.Body := TEncoding.UTF8.GetBytes(
+          '{"type":"about:blank","title":"Bad Request","status":400}');
+        ACtx.Handled := True;
         Exit;
       end;
-    end;
 
-    // Path traversal
-    if not IsPathSafe(Req.PathInfo) then
-    begin
-      Res.Status(400).Send('Bad Request');
-      Exit;
-    end;
+      LHasCL := ACtx.Header('Content-Length') <> '';
+      LTE := LowerCase(ACtx.Header('Transfer-Encoding'));
+      if HasRequestSmuggling(LHasCL, Pos('chunked', LTE) > 0) then
+      begin
+        ACtx.Status := 400;
+        ACtx.ContentType := 'application/problem+json';
+        ACtx.Body := TEncoding.UTF8.GetBytes(
+          '{"type":"about:blank","title":"Bad Request","status":400}');
+        ACtx.Handled := True;
+        Exit;
+      end;
 
-    // Request smuggling
-    LHasCL := Req.RawWebRequest.GetFieldByName('Content-Length') <> '';
-    LTE := LowerCase(Req.RawWebRequest.GetFieldByName('Transfer-Encoding'));
-    if HasRequestSmuggling(LHasCL, Pos('chunked', LTE) > 0) then
-    begin
-      Res.Status(400).Send('Bad Request');
-      Exit;
+      ANext();
     end;
-
-    Next();
-  end;
 end;
 
 end.

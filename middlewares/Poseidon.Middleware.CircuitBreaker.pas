@@ -1,60 +1,52 @@
 unit Poseidon.Middleware.CircuitBreaker;
 
 // Sliding-window circuit breaker middleware.
-// States: Closed → Open → HalfOpen → Closed
+// States: Closed -> Open -> HalfOpen -> Closed
 // Open state returns 503 without calling the handler.
+//
+// Usage:
+//   App.Use(CircuitBreakerMiddleware);
+//   App.Use(CircuitBreakerMiddleware(50, 60, 30));
 
 interface
 
 uses
-  Poseidon.Callback,
-  Poseidon.Proc;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonMiddlewareCircuitBreaker = class
-  public
-    // AErrorThresholdPct: open circuit when error% >= this value (0-100)
-    // AWindowSec:         sliding window size in seconds
-    // AOpenDurationSec:   how long to stay Open before trying HalfOpen
-    class function New(AErrorThresholdPct: Integer = 50;
-      AWindowSec: Integer = 60; AOpenDurationSec: Integer = 30): TPoseidonCallback; static;
-  end;
+function CircuitBreakerMiddleware(AErrorThresholdPct: Integer = 50;
+  AWindowSec: Integer = 60; AOpenDurationSec: Integer = 30): TNativeMiddlewareFunc;
 
 implementation
 
 uses
   System.SysUtils,
   System.SyncObjs,
-  System.DateUtils,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Commons;
+  System.DateUtils;
 
 type
   TCircuitState = (csClosed, csOpen, csHalfOpen);
 
   TBucket = record
     Timestamp: TDateTime;
-    Requests:  Integer;
-    Errors:    Integer;
+    Requests: Integer;
+    Errors: Integer;
   end;
 
   TCircuitBreaker = class
   private
-    FLock:              TCriticalSection;
-    FState:             TCircuitState;
-    FOpenedAt:          TDateTime;
-    FBuckets:           array[0..59] of TBucket;
+    FLock: TCriticalSection;
+    FState: TCircuitState;
+    FOpenedAt: TDateTime;
+    FBuckets: array[0..59] of TBucket;
     FErrorThresholdPct: Integer;
-    FWindowSec:         Integer;
-    FOpenDurationSec:   Integer;
+    FWindowSec: Integer;
+    FOpenDurationSec: Integer;
     procedure EvictStale(ANow: TDateTime);
     procedure RecordResult(AError: Boolean);
     function ErrorRate: Double;
   public
     constructor Create(AErrorThresholdPct, AWindowSec, AOpenDurationSec: Integer);
     destructor Destroy; override;
-    // Returns True if the request should be allowed through
     function TryAcquire: Boolean;
     procedure RecordSuccess;
     procedure RecordFailure;
@@ -62,11 +54,11 @@ type
 
 constructor TCircuitBreaker.Create(AErrorThresholdPct, AWindowSec, AOpenDurationSec: Integer);
 begin
-  FLock              := TCriticalSection.Create;
-  FState             := csClosed;
+  FLock := TCriticalSection.Create;
+  FState := csClosed;
   FErrorThresholdPct := AErrorThresholdPct;
-  FWindowSec         := AWindowSec;
-  FOpenDurationSec   := AOpenDurationSec;
+  FWindowSec := AWindowSec;
+  FOpenDurationSec := AOpenDurationSec;
 end;
 
 destructor TCircuitBreaker.Destroy;
@@ -77,62 +69,61 @@ end;
 
 procedure TCircuitBreaker.EvictStale(ANow: TDateTime);
 var
-  I:     Integer;
-  Cutoff: TDateTime;
+  I: Integer;
+  LCutoff: TDateTime;
 begin
-  Cutoff := IncSecond(ANow, -FWindowSec);
+  LCutoff := IncSecond(ANow, -FWindowSec);
   for I := 0 to High(FBuckets) do
-    if (FBuckets[I].Requests > 0) and (FBuckets[I].Timestamp < Cutoff) then
+    if (FBuckets[I].Requests > 0) and (FBuckets[I].Timestamp < LCutoff) then
       FBuckets[I] := Default(TBucket);
 end;
 
 function TCircuitBreaker.ErrorRate: Double;
 var
-  I, TotalReqs, TotalErrs: Integer;
+  I, LTotalReqs, LTotalErrs: Integer;
 begin
-  TotalReqs := 0;
-  TotalErrs := 0;
+  LTotalReqs := 0;
+  LTotalErrs := 0;
   for I := 0 to High(FBuckets) do
   begin
-    Inc(TotalReqs, FBuckets[I].Requests);
-    Inc(TotalErrs, FBuckets[I].Errors);
+    Inc(LTotalReqs, FBuckets[I].Requests);
+    Inc(LTotalErrs, FBuckets[I].Errors);
   end;
-  if TotalReqs = 0 then
+  if LTotalReqs = 0 then
     Result := 0
   else
-    Result := (TotalErrs / TotalReqs) * 100;
+    Result := (LTotalErrs / LTotalReqs) * 100;
 end;
 
 procedure TCircuitBreaker.RecordResult(AError: Boolean);
 var
-  ANow:  TDateTime;
-  Slot:  Integer;
+  LNow: TDateTime;
+  LSlot: Integer;
 begin
-  ANow := Now;
-  EvictStale(ANow);
-  // Use second-of-minute as bucket slot
-  Slot := SecondOf(ANow) mod Length(FBuckets);
-  if FBuckets[Slot].Timestamp < IncSecond(ANow, -1) then
-    FBuckets[Slot] := Default(TBucket);
-  FBuckets[Slot].Timestamp := ANow;
-  Inc(FBuckets[Slot].Requests);
+  LNow := Now;
+  EvictStale(LNow);
+  LSlot := SecondOf(LNow) mod Length(FBuckets);
+  if FBuckets[LSlot].Timestamp < IncSecond(LNow, -1) then
+    FBuckets[LSlot] := Default(TBucket);
+  FBuckets[LSlot].Timestamp := LNow;
+  Inc(FBuckets[LSlot].Requests);
   if AError then
-    Inc(FBuckets[Slot].Errors);
+    Inc(FBuckets[LSlot].Errors);
 end;
 
 function TCircuitBreaker.TryAcquire: Boolean;
 var
-  ANow: TDateTime;
+  LNow: TDateTime;
 begin
   FLock.Enter;
   try
-    ANow := Now;
+    LNow := Now;
     case FState of
       csClosed:
         Result := True;
       csOpen:
       begin
-        if SecondsBetween(ANow, FOpenedAt) >= FOpenDurationSec then
+        if SecondsBetween(LNow, FOpenedAt) >= FOpenDurationSec then
         begin
           FState := csHalfOpen;
           Result := True;
@@ -169,12 +160,12 @@ begin
     RecordResult(True);
     if FState = csHalfOpen then
     begin
-      FState    := csOpen;
+      FState := csOpen;
       FOpenedAt := Now;
     end
     else if (FState = csClosed) and (ErrorRate >= FErrorThresholdPct) then
     begin
-      FState    := csOpen;
+      FState := csOpen;
       FOpenedAt := Now;
     end;
   finally
@@ -182,28 +173,27 @@ begin
   end;
 end;
 
-{ TPoseidonMiddlewareCircuitBreaker }
-
-class function TPoseidonMiddlewareCircuitBreaker.New(AErrorThresholdPct,
-  AWindowSec, AOpenDurationSec: Integer): TPoseidonCallback;
+function CircuitBreakerMiddleware(AErrorThresholdPct, AWindowSec,
+  AOpenDurationSec: Integer): TNativeMiddlewareFunc;
 var
   LBreaker: TCircuitBreaker;
 begin
   LBreaker := TCircuitBreaker.Create(AErrorThresholdPct, AWindowSec, AOpenDurationSec);
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     begin
       if not LBreaker.TryAcquire then
       begin
-        Res.Status(THTTPStatus.ServiceUnavailable)
-           .Header('Content-Type', 'application/problem+json')
-           .Send(
-             '{"type":"about:blank","title":"Service Unavailable",' +
-             '"status":503,"detail":"Circuit breaker is open"}');
+        ACtx.Status := 503;
+        ACtx.ContentType := 'application/problem+json';
+        ACtx.Body := TEncoding.UTF8.GetBytes(
+          '{"type":"about:blank","title":"Service Unavailable",' +
+          '"status":503,"detail":"Circuit breaker is open"}');
+        ACtx.Handled := True;
         Exit;
       end;
       try
-        Next();
+        ANext();
         LBreaker.RecordSuccess;
       except
         LBreaker.RecordFailure;

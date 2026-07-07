@@ -1,28 +1,18 @@
 unit Poseidon.Middleware.Static;
 
-// Static file serving middleware for Poseidon.
-//
-// Serves files under ARootDir for requests matching AUrlPrefix.
-// Features: ETag (size+mtime), Last-Modified, 304 Not Modified,
-//           MIME type detection, gzip for compressible types.
-// Directory traversal is blocked by canonicalizing the resolved path.
+// Static file serving middleware.
+// Features: ETag, Last-Modified, 304 Not Modified, MIME detection, gzip.
 //
 // Usage:
-//   TPoseidon.Use(TPoseidonMiddlewareStatic.New('/static', 'C:\www\public'));
-//   // GET /static/app.js  → serves C:\www\public\app.js
+//   App.Use(StaticMiddleware('/static', 'C:\www\public'));
 
 interface
 
 uses
-  Poseidon.Callback,
-  Poseidon.Proc;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonMiddlewareStatic = class
-  public
-    class function New(const AUrlPrefix, ARootDir: string;
-      AEnableGzip: Boolean = True): TPoseidonCallback; static;
-  end;
+function StaticMiddleware(const AUrlPrefix, ARootDir: string;
+  AEnableGzip: Boolean = True): TNativeMiddlewareFunc;
 
 implementation
 
@@ -31,13 +21,10 @@ uses
   System.Classes,
   System.IOUtils,
   System.DateUtils,
-  System.ZLib,
-  Web.HTTPApp,
-  Poseidon.Request,
-  Poseidon.Response;
+  System.ZLib;
 
 const
-  MIME_MAP: array[0..23] of array[0..1] of string = (
+  CMimeMap: array[0..23] of array[0..1] of string = (
     ('.html',  'text/html; charset=utf-8'),
     ('.htm',   'text/html; charset=utf-8'),
     ('.css',   'text/css; charset=utf-8'),
@@ -67,12 +54,12 @@ const
 function GetMimeType(const APath: string): string;
 var
   LExt: string;
-  I:    Integer;
+  I: Integer;
 begin
   LExt := TPath.GetExtension(APath).ToLower;
-  for I := 0 to High(MIME_MAP) do
-    if MIME_MAP[I][0] = LExt then
-      Exit(MIME_MAP[I][1]);
+  for I := 0 to High(CMimeMap) do
+    if CMimeMap[I][0] = LExt then
+      Exit(CMimeMap[I][1]);
   Result := 'application/octet-stream';
 end;
 
@@ -85,17 +72,25 @@ begin
             AMimeType.Contains('svg');
 end;
 
-procedure GzipStream(AInput: TStream; AOutput: TStream);
+procedure GzipBytes(const AInput: TBytes; out AOutput: TBytes);
 var
+  LOutput: TMemoryStream;
   LZip: TZCompressionStream;
 begin
-  AInput.Position := 0;
-  // WindowBits = 31 (15 + 16) = proper gzip envelope
-  LZip := TZCompressionStream.Create(AOutput, zcDefault, 31);
+  LOutput := TMemoryStream.Create;
   try
-    LZip.CopyFrom(AInput, 0);
+    LZip := TZCompressionStream.Create(LOutput, zcDefault, 31);
+    try
+      if Length(AInput) > 0 then
+        LZip.WriteBuffer(AInput[0], Length(AInput));
+    finally
+      LZip.Free;
+    end;
+    SetLength(AOutput, LOutput.Size);
+    if LOutput.Size > 0 then
+      Move(LOutput.Memory^, AOutput[0], LOutput.Size);
   finally
-    LZip.Free;
+    LOutput.Free;
   end;
 end;
 
@@ -106,131 +101,119 @@ end;
 
 function FormatHTTPDate(ADate: TDateTime): string;
 const
-  DAYS:   array[1..7] of string = ('Sun','Mon','Tue','Wed','Thu','Fri','Sat');
-  MONTHS: array[1..12] of string = ('Jan','Feb','Mar','Apr','May','Jun',
-                                     'Jul','Aug','Sep','Oct','Nov','Dec');
+  CDays: array[1..7] of string = ('Sun','Mon','Tue','Wed','Thu','Fri','Sat');
+  CMonths: array[1..12] of string = ('Jan','Feb','Mar','Apr','May','Jun',
+    'Jul','Aug','Sep','Oct','Nov','Dec');
 var
   Y, M, D, H, Mn, S, Ms: Word;
-  DOW: Integer;
+  LDOW: Integer;
 begin
   DecodeDateTime(ADate, Y, M, D, H, Mn, S, Ms);
-  DOW := DayOfWeek(ADate);
+  LDOW := DayOfWeek(ADate);
   Result := Format('%s, %02d %s %04d %02d:%02d:%02d GMT',
-    [DAYS[DOW], D, MONTHS[M], Y, H, Mn, S]);
+    [CDays[LDOW], D, CMonths[M], Y, H, Mn, S]);
 end;
 
-class function TPoseidonMiddlewareStatic.New(const AUrlPrefix, ARootDir: string;
-  AEnableGzip: Boolean): TPoseidonCallback;
+procedure AddHeader(var ACtx: TNativeRequestContext; const AName, AValue: string);
 var
-  LRoot:   string;
-  LPrefix: string;
+  LLen: Integer;
 begin
-  LRoot   := TPath.GetFullPath(IncludeTrailingPathDelimiter(ARootDir));
+  LLen := Length(ACtx.ExtraHeaders);
+  SetLength(ACtx.ExtraHeaders, LLen + 1);
+  ACtx.ExtraHeaders[LLen] := TPair<string,string>.Create(AName, AValue);
+end;
+
+function StaticMiddleware(const AUrlPrefix, ARootDir: string;
+  AEnableGzip: Boolean): TNativeMiddlewareFunc;
+var
+  LRoot, LPrefix: string;
+begin
+  LRoot := TPath.GetFullPath(IncludeTrailingPathDelimiter(ARootDir));
   LPrefix := AUrlPrefix.TrimRight(['/']);
 
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     var
-      LPath:      string;
-      LRelative:  string;
-      LAbsolute:  string;
-      LMime:      string;
-      LSR:        TSearchRec;
-      LETag:      string;
-      LFileStream: TFileStream;
-      LOutStream:  TMemoryStream;
-      LAccept:    string;
-      LUseGzip:   Boolean;
-      LIfNoneMatch: string;
+      LRelative, LAbsolute, LMime, LETag, LIfNoneMatch, LAccept: string;
+      LSR: TSearchRec;
+      LFileBytes, LCompressed: TBytes;
+      LUseGzip: Boolean;
     begin
-      LPath := Req.PathInfo;
-
-      // Only handle paths matching the prefix
-      if not LPath.StartsWith(LPrefix) then
+      if not ACtx.Path.StartsWith(LPrefix) then
       begin
-        Next();
+        ANext();
         Exit;
       end;
 
-      // Extract relative path and block traversal sequences immediately
-      LRelative := LPath.Substring(Length(LPrefix));
+      LRelative := ACtx.Path.Substring(Length(LPrefix));
       if LRelative.Contains('..') then
       begin
-        Res.Status(403).Send('');
+        ACtx.Status := 403;
+        ACtx.Body := nil;
+        ACtx.Handled := True;
         Exit;
       end;
-      LRelative := LRelative.Replace('/', PathDelim);
-      LRelative := LRelative.TrimLeft([PathDelim]);
-      if LRelative.IsEmpty then
+      LRelative := LRelative.Replace('/', PathDelim).TrimLeft([PathDelim]);
+      if LRelative = '' then
         LRelative := 'index.html';
 
       LAbsolute := TPath.GetFullPath(TPath.Combine(LRoot, LRelative));
 
-      // Secondary traversal check after canonicalization
       if not LAbsolute.StartsWith(LRoot) then
       begin
-        Res.Status(403).Send('');
+        ACtx.Status := 403;
+        ACtx.Body := nil;
+        ACtx.Handled := True;
         Exit;
       end;
 
       if not TFile.Exists(LAbsolute) then
       begin
-        Next();
+        ANext();
         Exit;
       end;
 
-      // Get file info for ETag and Last-Modified
       if FindFirst(LAbsolute, faAnyFile, LSR) <> 0 then
       begin
-        Next();
+        ANext();
         Exit;
       end;
       try
         LETag := BuildETag(LSR);
         LMime := GetMimeType(LAbsolute);
 
-        // 304 Not Modified check
-        LIfNoneMatch := Req.RawWebRequest.GetFieldByName('If-None-Match');
+        LIfNoneMatch := ACtx.Header('If-None-Match');
         if (LIfNoneMatch <> '') and (LIfNoneMatch = LETag) then
         begin
-          Res.Status(304)
-             .Header('ETag', LETag)
-             .Send('');
+          ACtx.Status := 304;
+          ACtx.Body := nil;
+          AddHeader(ACtx, 'ETag', LETag);
+          ACtx.Handled := True;
           Exit;
         end;
 
-        LAccept   := Req.RawWebRequest.GetFieldByName('Accept-Encoding');
-        LUseGzip  := AEnableGzip and LAccept.Contains('gzip') and IsCompressible(LMime);
+        LAccept := ACtx.Header('Accept-Encoding');
+        LUseGzip := AEnableGzip and LAccept.Contains('gzip') and IsCompressible(LMime);
 
-        LFileStream := TFileStream.Create(LAbsolute, fmOpenRead or fmShareDenyWrite);
-        try
-          Res.Status(200);
-          Res.Header('Content-Type', LMime);
-          Res.Header('ETag', LETag);
-          Res.Header('Last-Modified',
-            FormatHTTPDate(LSR.TimeStamp));
-          Res.Header('Cache-Control', 'public, max-age=3600');
+        LFileBytes := TFile.ReadAllBytes(LAbsolute);
 
-          if LUseGzip then
-          begin
-            LOutStream := TMemoryStream.Create;
-            GzipStream(LFileStream, LOutStream);
-            LOutStream.Position := 0;
-            Res.Header('Content-Encoding', 'gzip');
-            Res.Header('Vary', 'Accept-Encoding');
-            Res.RawWebResponse.ContentStream  := LOutStream;
-            Res.RawWebResponse.ContentLength  := LOutStream.Size;
-          end
-          else
-          begin
-            Res.RawWebResponse.ContentStream := LFileStream;
-            Res.RawWebResponse.ContentLength := LFileStream.Size;
-            LFileStream := nil; // ownership transferred
-          end;
-        finally
-          LFileStream.Free;
-        end;
+        ACtx.Status := 200;
+        ACtx.ContentType := LMime;
+        AddHeader(ACtx, 'ETag', LETag);
+        AddHeader(ACtx, 'Last-Modified', FormatHTTPDate(LSR.TimeStamp));
+        AddHeader(ACtx, 'Cache-Control', 'public, max-age=3600');
 
+        if LUseGzip then
+        begin
+          GzipBytes(LFileBytes, LCompressed);
+          ACtx.Body := LCompressed;
+          AddHeader(ACtx, 'Content-Encoding', 'gzip');
+          AddHeader(ACtx, 'Vary', 'Accept-Encoding');
+        end
+        else
+          ACtx.Body := LFileBytes;
+
+        ACtx.Handled := True;
       finally
         FindClose(LSR);
       end;

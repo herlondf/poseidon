@@ -1,47 +1,85 @@
 unit Poseidon.Middleware.CORS;
 
 // Usage:
-//   TPoseidon.Use(TPoseidonMiddlewareCORS.New);
-//   TPoseidon.Use(TPoseidonMiddlewareCORS.New('https://myapp.com', 'GET,POST,PUT,DELETE'));
+//   App.Use(CORSMiddleware);
+//   App.Use(CORSMiddleware(MyCORSOptions));
 
 interface
 
 uses
-  Web.HTTPApp,
-  Poseidon.Proc,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Callback;
+  Poseidon.Native.Types;
 
 type
-  TPoseidonMiddlewareCORS = class
-  public
-    class function New(
-      const AAllowOrigin: string = '*';
-      const AAllowMethods: string = 'GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS';
-      const AAllowHeaders: string = 'Content-Type, Authorization, Accept'
-    ): TPoseidonCallback;
+  TCORSOptions = record
+    AllowOrigin: string;
+    AllowMethods: string;
+    AllowHeaders: string;
+    ExposeHeaders: string;
+    AllowCredentials: Boolean;
+    MaxAge: Integer;
   end;
+
+function CORSMiddleware: TNativeMiddlewareFunc; overload;
+function CORSMiddleware(const AOptions: TCORSOptions): TNativeMiddlewareFunc; overload;
+function DefaultCORSOptions: TCORSOptions;
 
 implementation
 
-class function TPoseidonMiddlewareCORS.New(const AAllowOrigin, AAllowMethods, AAllowHeaders: string): TPoseidonCallback;
+uses
+  System.SysUtils;
+
+function DefaultCORSOptions: TCORSOptions;
+begin
+  Result.AllowOrigin := '*';
+  Result.AllowMethods := 'GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS';
+  Result.AllowHeaders := 'Content-Type, Authorization, Accept';
+  Result.ExposeHeaders := '';
+  Result.AllowCredentials := False;
+  Result.MaxAge := 86400;
+end;
+
+procedure AddHeader(var ACtx: TNativeRequestContext; const AName, AValue: string);
+var
+  LLen: Integer;
+begin
+  LLen := Length(ACtx.ExtraHeaders);
+  SetLength(ACtx.ExtraHeaders, LLen + 1);
+  ACtx.ExtraHeaders[LLen] := TPair<string,string>.Create(AName, AValue);
+end;
+
+function CORSMiddleware(const AOptions: TCORSOptions): TNativeMiddlewareFunc;
 begin
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     begin
-      Res.Header('Access-Control-Allow-Origin', AAllowOrigin)
-         .Header('Access-Control-Allow-Methods', AAllowMethods)
-         .Header('Access-Control-Allow-Headers', AAllowHeaders)
-         .Header('Access-Control-Max-Age', '86400');
+      AddHeader(ACtx, 'Access-Control-Allow-Origin', AOptions.AllowOrigin);
+      AddHeader(ACtx, 'Access-Control-Allow-Methods', AOptions.AllowMethods);
+      AddHeader(ACtx, 'Access-Control-Allow-Headers', AOptions.AllowHeaders);
 
-      // Preflight — respond immediately with 204
-      // TMethodType has no mtOptions in Delphi 11; HTTP spec mandates uppercase
-      if Req.RawWebRequest.Method = 'OPTIONS' then
-        Res.Status(204).Send('')
-      else
-        Next;
+      if AOptions.ExposeHeaders <> '' then
+        AddHeader(ACtx, 'Access-Control-Expose-Headers', AOptions.ExposeHeaders);
+
+      if AOptions.AllowCredentials then
+        AddHeader(ACtx, 'Access-Control-Allow-Credentials', 'true');
+
+      if AOptions.MaxAge > 0 then
+        AddHeader(ACtx, 'Access-Control-Max-Age', IntToStr(AOptions.MaxAge));
+
+      if SameText(ACtx.Method, 'OPTIONS') then
+      begin
+        ACtx.Status := 204;
+        ACtx.Body := nil;
+        ACtx.Handled := True;
+        Exit;
+      end;
+
+      ANext();
     end;
+end;
+
+function CORSMiddleware: TNativeMiddlewareFunc;
+begin
+  Result := CORSMiddleware(DefaultCORSOptions);
 end;
 
 end.

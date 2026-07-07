@@ -1,36 +1,25 @@
 unit Poseidon.Middleware.Compression;
 
-// Gzip compression middleware for Poseidon.
-//
-// Compresses text-like responses (JSON, HTML, JS, CSS, XML) when the client
-// advertises Accept-Encoding: gzip. Responses smaller than AMinSize bytes
-// are left uncompressed to avoid overhead on tiny payloads.
+// Gzip compression middleware.
+// Compresses text-like responses when client advertises Accept-Encoding: gzip.
 //
 // Usage:
-//   TPoseidon.Use(TPoseidonMiddlewareCompression.New);         // default: 860 bytes
-//   TPoseidon.Use(TPoseidonMiddlewareCompression.New(2048));   // custom threshold
+//   App.Use(CompressionMiddleware);
+//   App.Use(CompressionMiddleware(2048));
 
 interface
 
 uses
-  Poseidon.Callback,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Proc;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonMiddlewareCompression = class
-  public
-    class function New(AMinSize: Integer = 860): TPoseidonCallback;
-  end;
+function CompressionMiddleware(AMinSize: Integer = 860): TNativeMiddlewareFunc;
 
 implementation
 
 uses
   System.SysUtils,
   System.Classes,
-  System.ZLib,
-  Web.HTTPApp;
+  System.ZLib;
 
 function IsCompressibleType(const AContentType: string): Boolean;
 begin
@@ -49,7 +38,6 @@ var
 begin
   LOutput := TMemoryStream.Create;
   try
-    // WindowBits = 31 (15 + 16) produces a proper gzip stream
     LZip := TZCompressionStream.Create(LOutput, zcDefault, 31);
     try
       if Length(AInput) > 0 then
@@ -57,58 +45,48 @@ begin
     finally
       LZip.Free;
     end;
-    AOutput := Copy(LOutput.Memory, 0, LOutput.Size);
+    SetLength(AOutput, LOutput.Size);
+    if LOutput.Size > 0 then
+      Move(LOutput.Memory^, AOutput[0], LOutput.Size);
   finally
     LOutput.Free;
   end;
 end;
 
-class function TPoseidonMiddlewareCompression.New(AMinSize: Integer): TPoseidonCallback;
+procedure AddHeader(var ACtx: TNativeRequestContext; const AName, AValue: string);
+var
+  LLen: Integer;
+begin
+  LLen := Length(ACtx.ExtraHeaders);
+  SetLength(ACtx.ExtraHeaders, LLen + 1);
+  ACtx.ExtraHeaders[LLen] := TPair<string,string>.Create(AName, AValue);
+end;
+
+function CompressionMiddleware(AMinSize: Integer): TNativeMiddlewareFunc;
 begin
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     var
       LAcceptEncoding: string;
-      LRaw: TWebResponse;
-      LContent: string;
-      LInput, LCompressed: TBytes;
-      LStream: TMemoryStream;
+      LCompressed: TBytes;
     begin
-      Next;
+      ANext();
 
-      LAcceptEncoding := Req.Headers.Get('Accept-Encoding');
+      LAcceptEncoding := ACtx.Header('Accept-Encoding');
       if not LAcceptEncoding.Contains('gzip') then
         Exit;
 
-      LRaw := Res.RawWebResponse;
-
-      if not IsCompressibleType(LRaw.ContentType) then
+      if not IsCompressibleType(ACtx.ContentType) then
         Exit;
 
-      // ContentStream takes priority over Content in WebBroker;
-      // only compress if the response was set via Content (string)
-      if LRaw.ContentStream <> nil then
+      if Length(ACtx.Body) < AMinSize then
         Exit;
 
-      LContent := LRaw.Content;
-      if LContent.IsEmpty then
-        Exit;
+      GzipBytes(ACtx.Body, LCompressed);
 
-      LInput := TEncoding.UTF8.GetBytes(LContent);
-      if Length(LInput) < AMinSize then
-        Exit;
-
-      GzipBytes(LInput, LCompressed);
-
-      LStream := TMemoryStream.Create;
-      LStream.WriteBuffer(LCompressed[0], Length(LCompressed));
-      LStream.Position := 0;
-
-      LRaw.Content       := '';
-      LRaw.ContentStream := LStream;
-      LRaw.ContentLength := LStream.Size;
-      LRaw.SetCustomHeader('Content-Encoding', 'gzip');
-      LRaw.SetCustomHeader('Vary', 'Accept-Encoding');
+      ACtx.Body := LCompressed;
+      AddHeader(ACtx, 'Content-Encoding', 'gzip');
+      AddHeader(ACtx, 'Vary', 'Accept-Encoding');
     end;
 end;
 

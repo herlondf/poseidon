@@ -1,52 +1,37 @@
 unit Poseidon.Middleware.BodyLimit;
 
-// Rejects requests whose Content-Length exceeds AMaxBytes.
-// Returns 413 application/problem+json before the body is consumed.
+// Rejects requests whose body exceeds AMaxBytes.
+// Returns 413 application/problem+json.
 
 interface
 
 uses
-  Poseidon.Callback,
-  Poseidon.Proc;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonMiddlewareBodyLimit = class
-  public
-    class function New(AMaxBytes: Int64): TPoseidonCallback; static;
-  end;
+function BodyLimitMiddleware(AMaxBytes: Int64): TNativeMiddlewareFunc;
 
 implementation
 
 uses
-  System.SysUtils,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Commons;
+  System.SysUtils;
 
-class function TPoseidonMiddlewareBodyLimit.New(AMaxBytes: Int64): TPoseidonCallback;
+function BodyLimitMiddleware(AMaxBytes: Int64): TNativeMiddlewareFunc;
 begin
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
-    var
-      LContentLength: Int64;
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     begin
-      // Prefer the Content-Length header (available before body is read);
-      // fall back to the WebRequest property for servers that populate it differently.
-      LContentLength := StrToInt64Def(
-        Req.RawWebRequest.GetFieldByName('Content-Length'), 0);
-      if LContentLength = 0 then
-        LContentLength := Req.RawWebRequest.ContentLength;
-      if (LContentLength > 0) and (LContentLength > AMaxBytes) then
+      if Length(ACtx.RawBody) > AMaxBytes then
       begin
-        Res.Status(THTTPStatus.PayloadTooLarge)
-           .Header('Content-Type', 'application/problem+json')
-           .Send(
-             '{"type":"about:blank","title":"Payload Too Large",' +
-             '"status":413,"detail":"Request body exceeds limit of ' +
-             AMaxBytes.ToString + ' bytes"}');
+        ACtx.Status := 413;
+        ACtx.ContentType := 'application/problem+json';
+        ACtx.Body := TEncoding.UTF8.GetBytes(
+          Format('{"type":"about:blank","title":"Payload Too Large",' +
+            '"status":413,"detail":"Body size %d exceeds limit of %d bytes"}',
+            [Length(ACtx.RawBody), AMaxBytes]));
+        ACtx.Handled := True;
         Exit;
       end;
-      Next();
+      ANext();
     end;
 end;
 

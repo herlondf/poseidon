@@ -1,55 +1,43 @@
 unit Poseidon.Middleware.Validation;
 
-// Middleware que intercepta excecoes de validacao e retorna RFC 7807.
+// Catches EPoseidonValidation and returns RFC 7807 response (422).
 //
-// Uso:
-//   TPoseidon.Use(TPoseidonValidationMiddleware.Handler);
-//
-// Quando BodyAs<T> lanca EPoseidonValidation, este middleware converte
-// automaticamente para uma resposta 422 Problem Details.
-// Se nao registrar este middleware, a excecao sobe normalmente.
+// Usage:
+//   App.Use(ValidationMiddleware);
 
 interface
 
 uses
-  Poseidon.Callback;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonValidationMiddleware = class
-  public
-    class function Handler: TPoseidonCallback;
-  end;
+function ValidationMiddleware: TNativeMiddlewareFunc;
 
 implementation
 
 uses
   System.SysUtils,
-  System.JSON,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Proc,
   Poseidon.Exception;
 
-class function TPoseidonValidationMiddleware.Handler: TPoseidonCallback;
+function ValidationMiddleware: TNativeMiddlewareFunc;
 begin
-  Result := procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
-  begin
-    try
-      Next();
-    except
-      on E: EPoseidonValidation do
-      begin
-        Res.Status(422)
-           .ContentType('application/problem+json')
-           .Send(
-             '{"type":"about:blank",' +
-             '"title":"Unprocessable Entity",' +
-             '"status":422,' +
-             '"detail":"' + E.Message + '"}'
-           );
+  Result :=
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
+    begin
+      try
+        ANext();
+      except
+        on E: EPoseidonValidation do
+        begin
+          ACtx.Status := 422;
+          ACtx.ContentType := 'application/problem+json';
+          ACtx.Body := TEncoding.UTF8.GetBytes(
+            '{"type":"about:blank",' +
+            '"title":"Unprocessable Entity",' +
+            '"status":422,' +
+            '"detail":"' + E.Message + '"}');
+        end;
       end;
     end;
-  end;
 end;
 
 end.

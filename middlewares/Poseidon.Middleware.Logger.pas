@@ -1,112 +1,96 @@
 unit Poseidon.Middleware.Logger;
 
 // Logs each request: method, path, status, elapsed time.
+//
 // Usage:
-//   TPoseidon.Use(TPoseidonMiddlewareLogger.New);
-//   TPoseidon.Use(TPoseidonMiddlewareLogger.New(LogToFile('app.log')));
+//   App.Use(LoggerMiddleware);
+//   App.Use(LoggerMiddleware(MyOutput));
+//   App.Use(LoggerMiddlewareJSON);
 
 interface
 
 uses
   System.SysUtils,
-  Poseidon.Proc,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Callback;
+  Poseidon.Native.Types;
 
 type
   TLogOutput = reference to procedure(const ALine: string);
 
-  TPoseidonMiddlewareLogger = class
-  private
-    class procedure DefaultOutput(const ALine: string);
-  public
-    // Logs to console in text format (default)
-    class function New: TPoseidonCallback; overload;
-
-    // Custom output handler — text format
-    class function New(AOutput: TLogOutput): TPoseidonCallback; overload;
-
-    // JSON structured log — compatible with Loki / ELK / Datadog
-    class function NewJSON: TPoseidonCallback; overload;
-    class function NewJSON(AOutput: TLogOutput): TPoseidonCallback; overload;
-
-    // Convenience: returns an output handler that appends to a file
-    class function LogToFile(const AFileName: string): TLogOutput;
-  end;
+function LoggerMiddleware: TNativeMiddlewareFunc; overload;
+function LoggerMiddleware(AOutput: TLogOutput): TNativeMiddlewareFunc; overload;
+function LoggerMiddlewareJSON: TNativeMiddlewareFunc; overload;
+function LoggerMiddlewareJSON(AOutput: TLogOutput): TNativeMiddlewareFunc; overload;
+function LogToFile(const AFileName: string): TLogOutput;
 
 implementation
 
 uses
   System.Classes,
-  System.IOUtils,
-  System.DateUtils,
   System.Diagnostics;
 
-class procedure TPoseidonMiddlewareLogger.DefaultOutput(const ALine: string);
+procedure DefaultOutput(const ALine: string);
 begin
   Writeln(ALine);
 end;
 
-class function TPoseidonMiddlewareLogger.New: TPoseidonCallback;
+function FindExtraHeader(const ACtx: TNativeRequestContext; const AName: string): string;
+var
+  I: Integer;
 begin
-  Result := New(DefaultOutput);
+  Result := '';
+  for I := 0 to High(ACtx.ExtraHeaders) do
+    if SameText(ACtx.ExtraHeaders[I].Key, AName) then
+      Exit(ACtx.ExtraHeaders[I].Value);
 end;
 
-class function TPoseidonMiddlewareLogger.New(AOutput: TLogOutput): TPoseidonCallback;
+function LoggerMiddleware: TNativeMiddlewareFunc;
+begin
+  Result := LoggerMiddleware(DefaultOutput);
+end;
+
+function LoggerMiddleware(AOutput: TLogOutput): TNativeMiddlewareFunc;
 begin
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     var
-      LStart: TDateTime;
-      LElapsedMs: Int64;
-      LLine: string;
-    begin
-      LStart := Now;
-      Next;
-      LElapsedMs := MilliSecondsBetween(Now, LStart);
-      LLine := Format('[%s] %s %s %d (%dms)',
-        [FormatDateTime('yyyy-mm-dd hh:nn:ss', Now),
-         Req.RawWebRequest.Method,
-         Req.PathInfo,
-         Res.StatusCode,
-         LElapsedMs]);
-      AOutput(LLine);
-    end;
-end;
-
-class function TPoseidonMiddlewareLogger.NewJSON: TPoseidonCallback;
-begin
-  Result := NewJSON(DefaultOutput);
-end;
-
-class function TPoseidonMiddlewareLogger.NewJSON(AOutput: TLogOutput): TPoseidonCallback;
-begin
-  Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
-    var
-      LSW:       TStopwatch;
-      LReqID:    string;
-      LLine:     string;
+      LSW: TStopwatch;
     begin
       LSW := TStopwatch.StartNew;
-      Next;
+      ANext();
       LSW.Stop;
-      LReqID := Res.RawWebResponse.CustomHeaders.Values['X-Request-ID'];
-      LLine := Format(
-        '{"ts":"%s","method":"%s","path":"%s","status":%d,"ms":%d,"ip":"%s","id":"%s"}',
-        [FormatDateTime('yyyy-mm-dd"T"hh:nn:ss.zzz', Now),
-         Req.RawWebRequest.Method,
-         Req.PathInfo,
-         Res.StatusCode,
-         LSW.ElapsedMilliseconds,
-         Req.RawWebRequest.RemoteAddr,
-         LReqID]);
-      AOutput(LLine);
+      AOutput(Format('[%s] %s %s %d (%dms)',
+        [FormatDateTime('yyyy-mm-dd hh:nn:ss', Now),
+         ACtx.Method, ACtx.Path, ACtx.Status,
+         LSW.ElapsedMilliseconds]));
     end;
 end;
 
-class function TPoseidonMiddlewareLogger.LogToFile(const AFileName: string): TLogOutput;
+function LoggerMiddlewareJSON: TNativeMiddlewareFunc;
+begin
+  Result := LoggerMiddlewareJSON(DefaultOutput);
+end;
+
+function LoggerMiddlewareJSON(AOutput: TLogOutput): TNativeMiddlewareFunc;
+begin
+  Result :=
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
+    var
+      LSW: TStopwatch;
+      LReqID: string;
+    begin
+      LSW := TStopwatch.StartNew;
+      ANext();
+      LSW.Stop;
+      LReqID := FindExtraHeader(ACtx, 'X-Request-ID');
+      AOutput(Format(
+        '{"ts":"%s","method":"%s","path":"%s","status":%d,"ms":%d,"ip":"%s","id":"%s"}',
+        [FormatDateTime('yyyy-mm-dd"T"hh:nn:ss.zzz', Now),
+         ACtx.Method, ACtx.Path, ACtx.Status,
+         LSW.ElapsedMilliseconds, ACtx.RemoteAddr, LReqID]));
+    end;
+end;
+
+function LogToFile(const AFileName: string): TLogOutput;
 begin
   Result :=
     procedure(const ALine: string)

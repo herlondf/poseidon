@@ -1,38 +1,34 @@
 unit Poseidon.Middleware.Digest;
 
+// HTTP Digest Authentication (MD5, qop=auth).
+//
+// Usage:
+//   App.Use(DigestMiddleware('MyRealm',
+//     function(const AUser, ARealm: string): string
+//     begin
+//       Result := DigestHA1(AUser, ARealm, 'password');
+//     end));
+
 interface
 
 uses
   System.SysUtils,
-  System.NetEncoding,
-  System.Hash,
-  Poseidon.Proc,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Callback;
+  Poseidon.Native.Types;
 
 type
-  TPoseidonMiddlewareDigest = class
-  private
-    class function _DigestParam(const AHeader, AKey: string): string; static;
-    class function _GenerateNonce: string; static;
-    class function _WwwAuthenticate(const ARealm, ANonce: string): string; static;
-  public
-    class function New(
-      const ARealm: string;
-      AGetHA1: reference to function(const AUser, ARealm: string): string
-    ): TPoseidonCallback; static;
+  TGetHA1Func = reference to function(const AUser, ARealm: string): string;
 
-    class function HA1(const AUser, ARealm, APass: string): string; static;
-  end;
+function DigestMiddleware(const ARealm: string; AGetHA1: TGetHA1Func): TNativeMiddlewareFunc;
+function DigestHA1(const AUser, ARealm, APass: string): string;
 
 implementation
 
 uses
-  System.DateUtils,
-  System.Math;
+  System.NetEncoding,
+  System.Hash,
+  System.DateUtils;
 
-class function TPoseidonMiddlewareDigest._DigestParam(const AHeader, AKey: string): string;
+function DigestParam(const AHeader, AKey: string): string;
 var
   LPos, LEnd: Integer;
   LSearch: string;
@@ -61,74 +57,76 @@ begin
   end;
 end;
 
-class function TPoseidonMiddlewareDigest._GenerateNonce: string;
+function GenerateNonce: string;
 var
-  LTimestamp: string;
-  LRandom: string;
   LRaw: string;
 begin
-  LTimestamp := IntToHex(DateTimeToUnix(TTimeZone.Local.ToUniversalTime(Now), False), 8);
-  LRandom    := IntToHex(Random(MaxInt), 8) + IntToHex(Random(MaxInt), 8);
-  LRaw       := LTimestamp + ':' + LRandom;
-  Result     := TNetEncoding.Base64String.Encode(LRaw);
+  LRaw := IntToHex(DateTimeToUnix(TTimeZone.Local.ToUniversalTime(Now), False), 8) +
+    ':' + IntToHex(Random(MaxInt), 8) + IntToHex(Random(MaxInt), 8);
+  Result := TNetEncoding.Base64String.Encode(LRaw);
 end;
 
-class function TPoseidonMiddlewareDigest._WwwAuthenticate(const ARealm, ANonce: string): string;
+function WwwAuthenticate(const ARealm, ANonce: string): string;
 begin
   Result := 'Digest realm="' + ARealm + '", nonce="' + ANonce +
-            '", algorithm=MD5, qop="auth"';
+    '", algorithm=MD5, qop="auth"';
 end;
 
-class function TPoseidonMiddlewareDigest.HA1(const AUser, ARealm, APass: string): string;
+function DigestHA1(const AUser, ARealm, APass: string): string;
 begin
   Result := LowerCase(THashMD5.GetHashString(AnsiString(AUser + ':' + ARealm + ':' + APass)));
 end;
 
-class function TPoseidonMiddlewareDigest.New(
-  const ARealm: string;
-  AGetHA1: reference to function(const AUser, ARealm: string): string
-): TPoseidonCallback;
+procedure Unauthorized(var ACtx: TNativeRequestContext; const ARealm: string);
+var
+  LNonce: string;
+  LLen: Integer;
+begin
+  LNonce := GenerateNonce;
+  ACtx.Status := 401;
+  ACtx.ContentType := 'text/plain';
+  ACtx.Body := TEncoding.UTF8.GetBytes('Unauthorized');
+  LLen := Length(ACtx.ExtraHeaders);
+  SetLength(ACtx.ExtraHeaders, LLen + 1);
+  ACtx.ExtraHeaders[LLen] := TPair<string,string>.Create(
+    'WWW-Authenticate', WwwAuthenticate(ARealm, LNonce));
+  ACtx.Handled := True;
+end;
+
+function DigestMiddleware(const ARealm: string; AGetHA1: TGetHA1Func): TNativeMiddlewareFunc;
 begin
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     var
       LAuthHeader: string;
       LUsername, LRealm, LNonce, LUri, LQop, LNc, LCnonce, LResponse: string;
-      LHA1, LHA2, LExpected, LNonce401: string;
-      LMethod: string;
+      LHA1, LHA2, LExpected: string;
     begin
-      LAuthHeader := Req.Headers.GetOrDefault('Authorization', '');
+      LAuthHeader := ACtx.Header('Authorization');
 
       if (LAuthHeader = '') or not LAuthHeader.StartsWith('Digest ', True) then
       begin
-        LNonce401 := _GenerateNonce;
-        Res.Status(401)
-           .Header('WWW-Authenticate', _WwwAuthenticate(ARealm, LNonce401))
-           .Send('Unauthorized');
+        Unauthorized(ACtx, ARealm);
         Exit;
       end;
 
-      LUsername := _DigestParam(LAuthHeader, 'username');
-      LRealm    := _DigestParam(LAuthHeader, 'realm');
-      LNonce    := _DigestParam(LAuthHeader, 'nonce');
-      LUri      := _DigestParam(LAuthHeader, 'uri');
-      LQop      := _DigestParam(LAuthHeader, 'qop');
-      LNc       := _DigestParam(LAuthHeader, 'nc');
-      LCnonce   := _DigestParam(LAuthHeader, 'cnonce');
-      LResponse := _DigestParam(LAuthHeader, 'response');
+      LUsername := DigestParam(LAuthHeader, 'username');
+      LRealm := DigestParam(LAuthHeader, 'realm');
+      LNonce := DigestParam(LAuthHeader, 'nonce');
+      LUri := DigestParam(LAuthHeader, 'uri');
+      LQop := DigestParam(LAuthHeader, 'qop');
+      LNc := DigestParam(LAuthHeader, 'nc');
+      LCnonce := DigestParam(LAuthHeader, 'cnonce');
+      LResponse := DigestParam(LAuthHeader, 'response');
 
       LHA1 := AGetHA1(LUsername, LRealm);
       if LHA1 = '' then
       begin
-        LNonce401 := _GenerateNonce;
-        Res.Status(401)
-           .Header('WWW-Authenticate', _WwwAuthenticate(ARealm, LNonce401))
-           .Send('Unauthorized');
+        Unauthorized(ACtx, ARealm);
         Exit;
       end;
 
-      LMethod := Req.RawWebRequest.Method;
-      LHA2    := LowerCase(THashMD5.GetHashString(AnsiString(LMethod + ':' + LUri)));
+      LHA2 := LowerCase(THashMD5.GetHashString(AnsiString(ACtx.Method + ':' + LUri)));
 
       if SameText(LQop, 'auth') then
         LExpected := LowerCase(THashMD5.GetHashString(
@@ -139,14 +137,11 @@ begin
 
       if not SameText(LExpected, LResponse) then
       begin
-        LNonce401 := _GenerateNonce;
-        Res.Status(401)
-           .Header('WWW-Authenticate', _WwwAuthenticate(ARealm, LNonce401))
-           .Send('Unauthorized');
+        Unauthorized(ACtx, ARealm);
         Exit;
       end;
 
-      Next;
+      ANext();
     end;
 end;
 

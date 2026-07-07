@@ -1,190 +1,145 @@
 unit Poseidon.Middleware.HealthCheck;
 
-// Standard health-check endpoints for Poseidon.
-//
-// Exposes three paths (configurable):
-//   - /health        Aggregate of all registered checks
-//   - /health/live   Liveness probe — server is responding (always 200 OK)
-//   - /health/ready  Readiness probe — all dependencies pass their checks
-//
-// Liveness vs Readiness (K8s semantics):
-//   * Liveness fails  → container restart
-//   * Readiness fails → container removed from load-balancer rotation, NOT restarted
-//
-// Response shape (JSON):
-//   {
-//     "status": "ok" | "degraded",
-//     "checks": {
-//       "postgres": { "ok": true,  "ms": 3 },
-//       "redis":    { "ok": false, "ms": 1200, "error": "timeout" }
-//     }
-//   }
-//
-// HTTP status:
-//   200 OK              — all checks pass (or /live always)
-//   503 Service Unavailable — any check fails on /health or /health/ready
+// Health-check endpoints: /health, /health/live, /health/ready
 //
 // Usage:
-//   uses Poseidon.Middleware.HealthCheck;
-//
-//   var H := TPoseidonMiddlewareHealthCheck.New;
-//   H.AddCheck('postgres',
-//     function: THealthCheckResult
-//     begin
-//       try MyDB.Ping; Result := THealthCheckResult.OK;
-//       except on E: Exception do Result := THealthCheckResult.Failed(E.Message); end;
-//     end);
-//   TPoseidon.Use(H.Build);
+//   var H := TPoseidonHealthCheck.Create;
+//   H.AddCheck('postgres', function: THealthCheckResult begin ... end);
+//   App.Use(H.Build);
 
 interface
 
 uses
   System.SysUtils,
   System.Generics.Collections,
-  Poseidon.Callback,
-  Poseidon.Proc;
+  Poseidon.Native.Types;
 
 type
   THealthCheckResult = record
     Healthy: Boolean;
-    Error:   string;
+    Error: string;
     class function OK: THealthCheckResult; static;
     class function Failed(const AReason: string): THealthCheckResult; static;
   end;
 
   THealthCheckProc = reference to function: THealthCheckResult;
 
-  TPoseidonMiddlewareHealthCheck = class
+  TPoseidonHealthCheck = class
   private
     FBasePath: string;
-    FChecks:   TDictionary<string, THealthCheckProc>;
+    FChecks: TDictionary<string, THealthCheckProc>;
   public
     constructor Create;
-    destructor  Destroy; override;
+    destructor Destroy; override;
 
-    function BasePath(const APath: string): TPoseidonMiddlewareHealthCheck;
+    function BasePath(const APath: string): TPoseidonHealthCheck;
     function AddCheck(const AName: string;
-      const ACheck: THealthCheckProc): TPoseidonMiddlewareHealthCheck;
+      const ACheck: THealthCheckProc): TPoseidonHealthCheck;
 
-    function Build: TPoseidonCallback;
-
-    class function New: TPoseidonMiddlewareHealthCheck; static;
+    function Build: TNativeMiddlewareFunc;
   end;
 
 implementation
 
 uses
   System.DateUtils,
-  System.JSON,
-  Poseidon.Request,
-  Poseidon.Response,
-  Poseidon.Commons;
-
-{ THealthCheckResult }
+  System.JSON;
 
 class function THealthCheckResult.OK: THealthCheckResult;
 begin
   Result.Healthy := True;
-  Result.Error   := '';
+  Result.Error := '';
 end;
 
 class function THealthCheckResult.Failed(const AReason: string): THealthCheckResult;
 begin
   Result.Healthy := False;
-  Result.Error   := AReason;
+  Result.Error := AReason;
 end;
 
-{ TPoseidonMiddlewareHealthCheck }
-
-constructor TPoseidonMiddlewareHealthCheck.Create;
+constructor TPoseidonHealthCheck.Create;
 begin
   inherited Create;
   FBasePath := '/health';
-  FChecks   := TDictionary<string, THealthCheckProc>.Create;
+  FChecks := TDictionary<string, THealthCheckProc>.Create;
 end;
 
-destructor TPoseidonMiddlewareHealthCheck.Destroy;
+destructor TPoseidonHealthCheck.Destroy;
 begin
   FChecks.Free;
   inherited;
 end;
 
-class function TPoseidonMiddlewareHealthCheck.New: TPoseidonMiddlewareHealthCheck;
-begin
-  Result := TPoseidonMiddlewareHealthCheck.Create;
-end;
-
-function TPoseidonMiddlewareHealthCheck.BasePath(const APath: string): TPoseidonMiddlewareHealthCheck;
+function TPoseidonHealthCheck.BasePath(const APath: string): TPoseidonHealthCheck;
 begin
   FBasePath := APath;
   Result := Self;
 end;
 
-function TPoseidonMiddlewareHealthCheck.AddCheck(const AName: string;
-  const ACheck: THealthCheckProc): TPoseidonMiddlewareHealthCheck;
+function TPoseidonHealthCheck.AddCheck(const AName: string;
+  const ACheck: THealthCheckProc): TPoseidonHealthCheck;
 begin
   FChecks.AddOrSetValue(AName, ACheck);
   Result := Self;
 end;
 
-function TPoseidonMiddlewareHealthCheck.Build: TPoseidonCallback;
+function TPoseidonHealthCheck.Build: TNativeMiddlewareFunc;
 var
-  LBase:   string;
+  LBase: string;
   LChecks: TDictionary<string, THealthCheckProc>;
+  LPair: TPair<string, THealthCheckProc>;
 begin
-  // Capture state into local vars for the closure. The builder retains
-  // ownership of FChecks; the closure references a snapshot copy of the
-  // proc map so the builder can be freed afterwards.
-  LBase   := FBasePath;
+  LBase := FBasePath;
   LChecks := TDictionary<string, THealthCheckProc>.Create;
-  for var Pair in FChecks do
-    LChecks.AddOrSetValue(Pair.Key, Pair.Value);
+  for LPair in FChecks do
+    LChecks.AddOrSetValue(LPair.Key, LPair.Value);
   Self.Free;
 
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     var
-      LPath:     string;
-      LRoot:     TJSONObject;
-      LChecksJ:  TJSONObject;
-      LEntry:    TJSONObject;
-      LAllOk:    Boolean;
-      LStart:    TDateTime;
-      LResult:   THealthCheckResult;
+      LPath: string;
+      LRoot, LChecksJ, LEntry: TJSONObject;
+      LAllOk: Boolean;
+      LStart: TDateTime;
+      LResult: THealthCheckResult;
+      LP: TPair<string, THealthCheckProc>;
     begin
-      LPath := Req.PathInfo;
+      LPath := ACtx.Path;
+
       if LPath = LBase + '/live' then
       begin
-        // Liveness — fastest possible. We're responding, that's enough.
-        Res.Status(THTTPStatus.Ok).Json(
-          TJSONObject.Create.AddPair('status', 'ok'));
+        ACtx.Status := 200;
+        ACtx.ContentType := 'application/json';
+        ACtx.Body := TEncoding.UTF8.GetBytes('{"status":"ok"}');
+        ACtx.Handled := True;
         Exit;
       end;
 
       if (LPath = LBase) or (LPath = LBase + '/ready') then
       begin
-        LRoot    := TJSONObject.Create;
+        LRoot := TJSONObject.Create;
         LChecksJ := TJSONObject.Create;
-        LAllOk   := True;
+        LAllOk := True;
         try
-          for var Pair in LChecks do
+          for LP in LChecks do
           begin
             LStart := Now;
             try
-              LResult := Pair.Value();
+              LResult := LP.Value();
             except
               on E: Exception do
                 LResult := THealthCheckResult.Failed(E.ClassName + ': ' + E.Message);
             end;
-            LEntry := TJSONObject.Create
-              .AddPair('ok', TJSONBool.Create(LResult.Healthy))
-              .AddPair('ms', TJSONNumber.Create(MilliSecondsBetween(Now, LStart)));
+            LEntry := TJSONObject.Create;
+            LEntry.AddPair('ok', TJSONBool.Create(LResult.Healthy));
+            LEntry.AddPair('ms', TJSONNumber.Create(MilliSecondsBetween(Now, LStart)));
             if not LResult.Healthy then
             begin
               LAllOk := False;
               LEntry.AddPair('error', LResult.Error);
             end;
-            LChecksJ.AddPair(Pair.Key, LEntry);
+            LChecksJ.AddPair(LP.Key, LEntry);
           end;
 
           if LAllOk then
@@ -194,17 +149,19 @@ begin
           LRoot.AddPair('checks', LChecksJ);
 
           if LAllOk then
-            Res.Status(THTTPStatus.Ok).Json(LRoot)
+            ACtx.Status := 200
           else
-            Res.Status(THTTPStatus.ServiceUnavailable).Json(LRoot);
-        except
+            ACtx.Status := 503;
+          ACtx.ContentType := 'application/json';
+          ACtx.Body := TEncoding.UTF8.GetBytes(LRoot.ToJSON);
+        finally
           LRoot.Free;
-          raise;
         end;
+        ACtx.Handled := True;
         Exit;
       end;
 
-      Next();
+      ANext();
     end;
 end;
 

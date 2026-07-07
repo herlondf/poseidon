@@ -1,42 +1,41 @@
 unit Poseidon.Middleware.RequestID;
 
-// Reads X-Request-ID from the incoming request; generates a GUID if absent.
-// Echoes the ID in X-Request-ID response header.
-// Stores the ID in Req.Params under key '__request_id' for handler access.
-
 interface
 
 uses
-  Poseidon.Callback,
-  Poseidon.Proc;
+  Poseidon.Native.Types;
 
-type
-  TPoseidonMiddlewareRequestID = class
-  public
-    class function New: TPoseidonCallback; static;
-  end;
+function RequestIDMiddleware: TNativeMiddlewareFunc;
 
 implementation
 
 uses
-  System.SysUtils,
-  Web.HTTPApp,
-  Poseidon.Request,
-  Poseidon.Response;
+  System.SysUtils;
 
-class function TPoseidonMiddlewareRequestID.New: TPoseidonCallback;
+procedure AddHeader(var ACtx: TNativeRequestContext; const AName, AValue: string); forward;
+
+procedure AddHeader(var ACtx: TNativeRequestContext; const AName, AValue: string);
+var
+  LLen: Integer;
+begin
+  LLen := Length(ACtx.ExtraHeaders);
+  SetLength(ACtx.ExtraHeaders, LLen + 1);
+  ACtx.ExtraHeaders[LLen] := TPair<string,string>.Create(AName, AValue);
+end;
+
+function RequestIDMiddleware: TNativeMiddlewareFunc;
 begin
   Result :=
-    procedure(Req: TPoseidonRequest; Res: TPoseidonResponse; Next: TNextProc)
+    procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     var
       LID: string;
     begin
-      LID := Req.RawWebRequest.GetFieldByName('X-Request-ID');
-      if LID.IsEmpty then
-        LID := GUIDToString(TGUID.NewGuid).ToLower.Replace('{', '').Replace('}', '');
-      Req.Params.Add('__request_id', LID);
-      Res.Header('X-Request-ID', LID);
-      Next();
+      LID := ACtx.Header('X-Request-ID');
+      if LID = '' then
+        LID := TGUID.NewGuid.ToString.Replace('{', '').Replace('}', '').ToLower;
+
+      AddHeader(ACtx, 'X-Request-ID', LID);
+      ANext();
     end;
 end;
 
