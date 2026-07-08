@@ -15,6 +15,8 @@ uses
   System.Classes
   {$IFDEF MSWINDOWS}
   , Winapi.Windows
+  {$ELSE}
+  , Posix.Errno
   {$ENDIF};
 
 {$IFNDEF MSWINDOWS}
@@ -56,7 +58,10 @@ begin
       else if LN = 0 then
         Break
       else
+      begin
+        if GetLastError = EINTR then Continue;
         Break;
+      end;
     end;
   finally
     _close(LFileFd);
