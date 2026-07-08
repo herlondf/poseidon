@@ -85,7 +85,7 @@ begin
   for I := 0 to High(LParts) do
   begin
     LPair := LParts[I].Split(['='], 2);
-    if (Length(LPair) = 2) and SameText(LPair[0], AName) then
+    if (Length(LPair) = 2) and SameText(TNetEncoding.URL.Decode(LPair[0]), AName) then
       Exit(TNetEncoding.URL.Decode(LPair[1]));
   end;
 end;

@@ -267,7 +267,7 @@ begin
   LWrapper := TWorkWrapper.Create;
   LWrapper.Work := AWork;
 
-  LDequeIdx := TInterlocked.Increment(FNextDeque) mod FDequeCount;
+  LDequeIdx := (TInterlocked.Increment(FNextDeque) and $7FFFFFFF) mod FDequeCount;
   FDeques[LDequeIdx].Lock.Enter;
   try
     FDeques[LDequeIdx].Queue.Enqueue(LWrapper);
