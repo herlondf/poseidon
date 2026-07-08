@@ -189,6 +189,8 @@ const
   IORING_REGISTER_FILES_UPDATE = UInt32(6);
   IORING_REGISTER_PROBE = UInt32(8);
 
+  CRegFilesMax = 4096;  // max registered fd slots
+
   // io_uring_probe_op flag — op is supported by this kernel
   IO_URING_OP_SUPPORTED = UInt16(1);
 
@@ -283,14 +285,14 @@ type
     resv2: UInt32;
   end;
 
-  // Header followed by ops[0..last_op] — we only care about ops up to opcode 23
-  // (IORING_OP_SEND), so a fixed array of 32 entries is more than enough.
+  // Header followed by ops[0..last_op] — covers up to opcode 53
+  // (IORING_OP_SEND_ZC), so a fixed array of 64 entries is needed.
   TIOUringProbe = packed record
     last_op:  Byte;
     ops_len:  Byte;
     resv:     UInt16;
     resv2:    array[0..2] of UInt32;
-    ops:      array[0..31] of TIOUringProbeOp;
+    ops:      array[0..63] of TIOUringProbeOp;
   end;
 
   // Heap-allocated recv context: stable buffer for in-flight IORING_OP_RECV.
@@ -880,9 +882,6 @@ end;
 // ---------------------------------------------------------------------------
 // Registered files — eliminates fget/fput atomic refcount per I/O op
 // ---------------------------------------------------------------------------
-
-const
-  CRegFilesMax = 4096;  // max registered fd slots
 
 function TIOUringBackend._RegFileIndex(AFd: Integer): Integer;
 begin

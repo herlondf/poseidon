@@ -43,7 +43,10 @@ procedure InstallSignalHandler(AOnShutdown: TProc);
 
 implementation
 
-{$IFNDEF MSWINDOWS}
+{$IFDEF MSWINDOWS}
+uses
+  Winapi.Windows;
+{$ELSE}
 uses
   Posix.Signal,
   Posix.Unistd;
@@ -57,7 +60,11 @@ begin
   AssignFile(LFile, APath);
   try
     Rewrite(LFile);
-    WriteLn(LFile, GetProcessID);
+    {$IFDEF MSWINDOWS}
+    WriteLn(LFile, GetCurrentProcessId);
+    {$ELSE}
+    WriteLn(LFile, getpid);
+    {$ENDIF}
     CloseFile(LFile);
   except
     on E: Exception do; // Best-effort — don't crash if /run is read-only
@@ -90,7 +97,7 @@ var
 begin
   GShutdownProc := AOnShutdown;
   FillChar(LSA, SizeOf(LSA), 0);
-  LSA.__sigaction_handler := @_SigTermHandler;
+  LSA._u.sa_handler := @_SigTermHandler;
   LSA.sa_flags := 0;
   sigemptyset(LSA.sa_mask);
   sigaction(SIGTERM, @LSA, nil);
