@@ -451,6 +451,9 @@ begin
     Inc(LPos, 8);
   end;
 
+  // RFC 6455 §5.2 — MSB of 64-bit payload length must be 0
+  if LPLen < 0 then Exit;
+
   if LMasked then
   begin
     if ABufLen < LPos + 4 then Exit;

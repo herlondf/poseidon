@@ -12,6 +12,7 @@ interface
 
 uses
   System.SysUtils,
+  System.NetEncoding,
   System.Generics.Collections,
   Poseidon.Native.Types;
 
@@ -184,7 +185,8 @@ begin
     if ARoute.Segments[I].StartsWith(':') then
     begin
       LParams[LPIdx] := TPair<string,string>.Create(
-        ARoute.Entry.ParamNames[LPIdx], ASegments[I]);
+        ARoute.Entry.ParamNames[LPIdx],
+        TNetEncoding.URL.Decode(ASegments[I]));
       Inc(LPIdx);
     end
     else if not SameText(ARoute.Segments[I], ASegments[I]) then
