@@ -56,7 +56,13 @@ type
 
   TRIO_NOTIFICATION_COMPLETION = record
     Typ: Integer;
-    // Union — we use polled mode (type=0), no further fields needed
+    case Integer of
+      0: ();
+      2: (
+        IocpHandle: THandle;
+        CompletionKey: Pointer;
+        pOverlapped: POverlapped
+      );
   end;
   PRIO_NOTIFICATION_COMPLETION = ^TRIO_NOTIFICATION_COMPLETION;
 
@@ -94,12 +100,24 @@ type
     FRecvFreeStack: array of Integer;
     FRecvFreeTop: Integer;
     FRecvPoolLock: TCriticalSection;
+    // #107: Pre-allocated send pool
+    FSendPool: Pointer;
+    FSendPoolBufId: TRIO_BUFFERID;
+    FSendFreeStack: array of Integer;
+    FSendFreeTop: Integer;
+    FSendPoolLock: TCriticalSection;
+    // #107: Per-worker IOCP for hybrid notification
+    FWorkerIOCPs: TArray<THandle>;
+    FWorkerOvls: TArray<POverlapped>;
     procedure _LoadRIO;
     procedure _Accept;
     procedure _WorkerLoop(ACQIdx: Integer);
     function _RecvPoolAcquire: Integer;
     procedure _RecvPoolRelease(AIdx: Integer);
     function _RecvSlotPtr(AIdx: Integer): PByte;
+    function _SendPoolAcquire: Integer;
+    procedure _SendPoolRelease(AIdx: Integer);
+    function _SendSlotPtr(AIdx: Integer): PByte;
   public
     constructor Create;
     destructor Destroy; override;
@@ -134,9 +152,13 @@ const
   CRecvBufSize  = 32768;
   CRecvPoolSize = 512;
   CRecvPoolBytes = CRecvPoolSize * CRecvBufSize;
+  CSendBufSize  = 32768;
+  CSendPoolSize = 512;
+  CSendPoolBytes = CSendPoolSize * CSendBufSize;
   CRIOCQSize = 4096;
   CRIORQRecv = 32;
   CRIORQSend = 32;
+  CRIONotifyIOCP = 2;
 
   // RequestContext encoding: low bit = action, rest = context index/pointer
   CTagRecv = UInt64(0);
@@ -157,13 +179,15 @@ type
     Flags: DWORD; RequestContext: Pointer): BOOL; stdcall;
   TFnDequeue = function(CQ: TRIO_CQ; Array_: PRIO_RESULT;
     ArraySize: DWORD): ULONG; stdcall;
+  TFnNotify = function(CQ: TRIO_CQ): BOOL; stdcall;
 
   // Send context — heap-allocated, holds buffer reference until completion
   PRIOSendCtx = ^TRIOSendCtx;
   TRIOSendCtx = record
     Conn: TNativeConn;
     SendBuf: TBytes;
-    BufId: TRIO_BUFFERID;
+    SlotIdx: Integer;       // #107: send pool slot, -1 = per-op fallback
+    BufId: TRIO_BUFFERID;   // only used when SlotIdx = -1
     ActualLen: Integer;
   end;
 
@@ -187,6 +211,9 @@ begin
   FRecvPool := nil;
   FRecvPoolBufId := nil;
   FRecvPoolLock := TCriticalSection.Create;
+  FSendPoolLock := TCriticalSection.Create;
+  FSendPool := nil;
+  FSendPoolBufId := nil;
   _LoadRIO;
 
   // Pre-allocate contiguous recv buffer pool and register with RIO
@@ -205,6 +232,22 @@ begin
   var I: Integer;
   for I := 0 to CRecvPoolSize - 1 do
     FRecvFreeStack[I] := I;
+
+  // #107: Pre-allocate contiguous send buffer pool and register with RIO
+  FSendPool := VirtualAlloc(nil, CSendPoolBytes, MEM_COMMIT or MEM_RESERVE,
+    PAGE_READWRITE);
+  if FSendPool = nil then
+    raise Exception.Create('VirtualAlloc for RIO send pool failed');
+
+  FSendPoolBufId := TFnRegBuf(FRio.RIORegisterBuffer)(PAnsiChar(FSendPool),
+    CSendPoolBytes);
+  if FSendPoolBufId = CRIOInvalidBufId then
+    raise Exception.Create('RIORegisterBuffer for send pool failed');
+
+  SetLength(FSendFreeStack, CSendPoolSize);
+  FSendFreeTop := CSendPoolSize;
+  for I := 0 to CSendPoolSize - 1 do
+    FSendFreeStack[I] := I;
 end;
 
 destructor TRIOBackend.Destroy;
@@ -213,7 +256,12 @@ begin
     TFnDeregBuf(FRio.RIODeregisterBuffer)(FRecvPoolBufId);
   if FRecvPool <> nil then
     VirtualFree(FRecvPool, 0, MEM_RELEASE);
+  if (FSendPoolBufId <> nil) and (FSendPoolBufId <> CRIOInvalidBufId) then
+    TFnDeregBuf(FRio.RIODeregisterBuffer)(FSendPoolBufId);
+  if FSendPool <> nil then
+    VirtualFree(FSendPool, 0, MEM_RELEASE);
   FreeAndNil(FRecvPoolLock);
+  FreeAndNil(FSendPoolLock);
   inherited Destroy;
 end;
 
@@ -284,6 +332,42 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
+// Send pool (#107)
+// ---------------------------------------------------------------------------
+
+function TRIOBackend._SendPoolAcquire: Integer;
+begin
+  FSendPoolLock.Enter;
+  try
+    if FSendFreeTop > 0 then
+    begin
+      Dec(FSendFreeTop);
+      Result := FSendFreeStack[FSendFreeTop];
+    end
+    else
+      Result := -1;
+  finally
+    FSendPoolLock.Leave;
+  end;
+end;
+
+procedure TRIOBackend._SendPoolRelease(AIdx: Integer);
+begin
+  FSendPoolLock.Enter;
+  try
+    FSendFreeStack[FSendFreeTop] := AIdx;
+    Inc(FSendFreeTop);
+  finally
+    FSendPoolLock.Leave;
+  end;
+end;
+
+function TRIOBackend._SendSlotPtr(AIdx: Integer): PByte;
+begin
+  Result := PByte(FSendPool) + NativeUInt(AIdx) * CSendBufSize;
+end;
+
+// ---------------------------------------------------------------------------
 // IIOBackend — lifecycle
 // ---------------------------------------------------------------------------
 
@@ -325,12 +409,27 @@ begin
 
   TSocketPool.LoadDisconnectEx(FListenSocket);
 
-  // Per-worker polled completion queues
+  // #107: Per-worker IOCP-notified completion queues (hybrid notification)
   SetLength(FCQs, AWorkerCount);
   SetLength(FCQLocks, AWorkerCount);
+  SetLength(FWorkerIOCPs, AWorkerCount);
+  SetLength(FWorkerOvls, AWorkerCount);
   for I := 0 to AWorkerCount - 1 do
   begin
-    FCQs[I] := TFnCreateCQ(FRio.RIOCreateCompletionQueue)(CRIOCQSize, nil);
+    FWorkerIOCPs[I] := CreateIoCompletionPort(INVALID_HANDLE_VALUE, 0, 0, 1);
+    if FWorkerIOCPs[I] = 0 then
+      raise Exception.Create('CreateIoCompletionPort for RIO worker failed');
+    New(FWorkerOvls[I]);
+    FillChar(FWorkerOvls[I]^, SizeOf(TOverlapped), 0);
+
+    var LNotify: TRIO_NOTIFICATION_COMPLETION;
+    FillChar(LNotify, SizeOf(LNotify), 0);
+    LNotify.Typ := CRIONotifyIOCP;
+    LNotify.IocpHandle := FWorkerIOCPs[I];
+    LNotify.CompletionKey := nil;
+    LNotify.pOverlapped := FWorkerOvls[I];
+
+    FCQs[I] := TFnCreateCQ(FRio.RIOCreateCompletionQueue)(CRIOCQSize, @LNotify);
     if FCQs[I] = nil then
       raise Exception.Create('RIOCreateCompletionQueue failed');
     FCQLocks[I] := TCriticalSection.Create;
@@ -370,8 +469,13 @@ begin
 end;
 
 procedure TRIOBackend.SignalWorkers;
+var
+  I: Integer;
 begin
   FShutdown := True;
+  // #107: Wake workers blocked on GetQueuedCompletionStatus
+  for I := 0 to High(FWorkerIOCPs) do
+    PostQueuedCompletionStatus(FWorkerIOCPs[I], 0, 0, nil);
 end;
 
 procedure TRIOBackend.JoinWorkers;
@@ -394,6 +498,17 @@ begin
   end;
   SetLength(FCQs, 0);
   SetLength(FCQLocks, 0);
+
+  // #107: Clean up per-worker IOCPs
+  for I := 0 to High(FWorkerIOCPs) do
+  begin
+    if FWorkerIOCPs[I] <> 0 then
+      CloseHandle(FWorkerIOCPs[I]);
+    if FWorkerOvls[I] <> nil then
+      Dispose(FWorkerOvls[I]);
+  end;
+  SetLength(FWorkerIOCPs, 0);
+  SetLength(FWorkerOvls, 0);
 
   WSACleanup;
 end;
@@ -470,6 +585,7 @@ var
   LSendCtx: PRIOSendCtx;
   LBuf: TRIO_BUF;
   LReqCtx: UInt64;
+  LSlotIdx: Integer;
 begin
   LSendLen := AActualLen;
   if LSendLen = 0 then LSendLen := Length(AData);
@@ -485,31 +601,49 @@ begin
   LSendCtx^.SendBuf := AData;
   LSendCtx^.ActualLen := LSendLen;
 
-  // Register the send buffer with RIO
-  LSendCtx^.BufId := TFnRegBuf(FRio.RIORegisterBuffer)(
-    PAnsiChar(@AData[0]), Length(AData));
-  if LSendCtx^.BufId = CRIOInvalidBufId then
+  // #107: Try pre-registered send pool first (eliminates per-send register/deregister)
+  LSlotIdx := -1;
+  if LSendLen <= CSendBufSize then
+    LSlotIdx := _SendPoolAcquire;
+
+  if LSlotIdx >= 0 then
   begin
-    Dispose(LSendCtx);
-    TBufferPool.Release(AData);
-    FCallbacks.OnConnError(AConn);
-    Exit;
+    LSendCtx^.SlotIdx := LSlotIdx;
+    LSendCtx^.BufId := nil;
+    Move(AData[0], _SendSlotPtr(LSlotIdx)^, LSendLen);
+    LBuf.BufferId := FSendPoolBufId;
+    LBuf.Offset := ULONG(LSlotIdx) * CSendBufSize;
+    LBuf.Length := ULONG(LSendLen);
+  end
+  else
+  begin
+    // Fallback: per-op registration for oversized or pool-exhausted sends
+    LSendCtx^.SlotIdx := -1;
+    LSendCtx^.BufId := TFnRegBuf(FRio.RIORegisterBuffer)(
+      PAnsiChar(@AData[0]), Length(AData));
+    if LSendCtx^.BufId = CRIOInvalidBufId then
+    begin
+      Dispose(LSendCtx);
+      TBufferPool.Release(AData);
+      FCallbacks.OnConnError(AConn);
+      Exit;
+    end;
+    LBuf.BufferId := LSendCtx^.BufId;
+    LBuf.Offset := 0;
+    LBuf.Length := ULONG(LSendLen);
   end;
 
-  LBuf.BufferId := LSendCtx^.BufId;
-  LBuf.Offset := 0;
-  LBuf.Length := ULONG(LSendLen);
-
-  // Encode: pointer to send context in high bits, tag send in low bit
   LReqCtx := (UInt64(LSendCtx) and $FFFFFFFFFFFFFFFE) or CTagSend;
-
   LConn.AddRef;
 
   if not TFnSend(FRio.RIOSend)(LConn.RioRQ, @LBuf, 1, 0,
     Pointer(LReqCtx)) then
   begin
     LConn.Release;
-    TFnDeregBuf(FRio.RIODeregisterBuffer)(LSendCtx^.BufId);
+    if LSendCtx^.SlotIdx >= 0 then
+      _SendPoolRelease(LSendCtx^.SlotIdx)
+    else
+      TFnDeregBuf(FRio.RIODeregisterBuffer)(LSendCtx^.BufId);
     TBufferPool.Release(LSendCtx^.SendBuf);
     Dispose(LSendCtx);
     FCallbacks.OnConnError(AConn);
@@ -594,88 +728,89 @@ end;
 
 procedure TRIOBackend._WorkerLoop(ACQIdx: Integer);
 var
-  LResults: array[0..63] of TRIO_RESULT;
+  LResults: array[0..255] of TRIO_RESULT;
   LCount: ULONG;
   I: Integer;
   LReqCtx: UInt64;
   LConn: TNativeConn;
   LSlotIdx: Integer;
   LSendCtx: PRIOSendCtx;
-  LSpinCount: Integer;
+  LBytesXfer: DWORD;
+  LCompKey: NativeUInt;
+  LOverlapped: POverlapped;
 begin
-  LSpinCount := 0;
   while not FShutdown do
   begin
-    // #101: CQ is owned by exactly one worker — no lock needed for dequeue.
-    // Lock is only needed during RIOCreateRequestQueue (RegisterConn).
-    LCount := TFnDequeue(FRio.RIODequeueCompletion)(
-      FCQs[ACQIdx], @LResults[0], 64);
+    // #107: Arm IOCP notification — fires when CQEs arrive
+    TFnNotify(FRio.RIONotify)(FCQs[ACQIdx]);
 
-    if LCount = $FFFFFFFF then Break;
+    // Block until notification or timeout (100ms handles Notify/drain race)
+    GetQueuedCompletionStatus(FWorkerIOCPs[ACQIdx],
+      LBytesXfer, LCompKey, LOverlapped, 100);
 
-    if LCount = 0 then
+    if FShutdown then Break;
+
+    // Burst dequeue — drain all available completions
+    while True do
     begin
-      Inc(LSpinCount);
-      // Adaptive spin: yield → sleep(0) → sleep(1)
-      if LSpinCount < 1000 then
-        TThread.SpinWait(32)
-      else if LSpinCount < 5000 then
-        Sleep(0)
-      else
-        Sleep(1);
-      Continue;
-    end;
+      LCount := TFnDequeue(FRio.RIODequeueCompletion)(
+        FCQs[ACQIdx], @LResults[0], 256);
 
-    LSpinCount := 0;
+      if (LCount = $FFFFFFFF) or (LCount = 0) then Break;
 
-    for I := 0 to Integer(LCount) - 1 do
-    begin
-      LConn := TNativeConn(Pointer(LResults[I].SocketContext));
-      LReqCtx := UInt64(LResults[I].RequestContext);
+      for I := 0 to Integer(LCount) - 1 do
+      begin
+        LConn := TNativeConn(Pointer(LResults[I].SocketContext));
+        LReqCtx := UInt64(LResults[I].RequestContext);
 
-      try
-        if (LReqCtx and 1) = 0 then
-        begin
-          // RECV completion
-          LSlotIdx := Integer(LReqCtx shr 1);
-
-          if (LResults[I].Status <> 0) or (LResults[I].BytesTransferred = 0) then
+        try
+          if (LReqCtx and 1) = 0 then
           begin
-            _RecvPoolRelease(LSlotIdx);
-            FCallbacks.OnConnError(LConn);
+            // RECV completion
+            LSlotIdx := Integer(LReqCtx shr 1);
+
+            if (LResults[I].Status <> 0) or (LResults[I].BytesTransferred = 0) then
+            begin
+              _RecvPoolRelease(LSlotIdx);
+              FCallbacks.OnConnError(LConn);
+            end
+            else
+            begin
+              FCallbacks.OnRecv(LConn, _RecvSlotPtr(LSlotIdx),
+                LResults[I].BytesTransferred);
+              _RecvPoolRelease(LSlotIdx);
+            end;
+            LConn.Release;
           end
           else
           begin
-            FCallbacks.OnRecv(LConn, _RecvSlotPtr(LSlotIdx),
-              LResults[I].BytesTransferred);
-            _RecvPoolRelease(LSlotIdx);
-          end;
-          LConn.Release;
-        end
-        else
-        begin
-          // SEND completion
-          LSendCtx := PRIOSendCtx(Pointer(LReqCtx and $FFFFFFFFFFFFFFFE));
+            // SEND completion
+            LSendCtx := PRIOSendCtx(Pointer(LReqCtx and $FFFFFFFFFFFFFFFE));
 
-          TFnDeregBuf(FRio.RIODeregisterBuffer)(LSendCtx^.BufId);
+            // #107: Release send pool slot or deregister per-op buffer
+            if LSendCtx^.SlotIdx >= 0 then
+              _SendPoolRelease(LSendCtx^.SlotIdx)
+            else if LSendCtx^.BufId <> CRIOInvalidBufId then
+              TFnDeregBuf(FRio.RIODeregisterBuffer)(LSendCtx^.BufId);
 
-          if (LResults[I].Status <> 0) then
-          begin
-            TBufferPool.Release(LSendCtx^.SendBuf);
-            Dispose(LSendCtx);
-            FCallbacks.OnConnError(LConn);
-          end
-          else
-          begin
-            TBufferPool.Release(LSendCtx^.SendBuf);
-            Dispose(LSendCtx);
-            FCallbacks.OnSendComplete(LConn);
+            if LResults[I].Status <> 0 then
+            begin
+              TBufferPool.Release(LSendCtx^.SendBuf);
+              Dispose(LSendCtx);
+              FCallbacks.OnConnError(LConn);
+            end
+            else
+            begin
+              TBufferPool.Release(LSendCtx^.SendBuf);
+              Dispose(LSendCtx);
+              FCallbacks.OnSendComplete(LConn);
+            end;
+            LConn.Release;
           end;
-          LConn.Release;
+        except
+          on E: Exception do
+            Writeln(ErrOutput, '[rio] WORKER_EX [', E.ClassName, ']: ', E.Message);
         end;
-      except
-        on E: Exception do
-          Writeln(ErrOutput, '[rio] WORKER_EX [', E.ClassName, ']: ', E.Message);
       end;
     end;
   end;

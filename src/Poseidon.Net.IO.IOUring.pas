@@ -75,6 +75,7 @@ type
     FRecvPoolLock: TCriticalSection;
     FRecvPoolBase: PByte;
     FMultishotAccept: Boolean;          // #73: multishot accept active
+    FPendingSQEs: Integer;               // #109: count of SQEs pending notification
     // #75: registered files
     FRegFiles: Boolean;                   // True if IORING_REGISTER_FILES succeeded
     FRegFds: array of Int32;              // fd → index mapping table
@@ -134,6 +135,8 @@ const
 
   // io_uring_setup flags
   IORING_SETUP_SQPOLL     = UInt32(2);   // #60: kernel-side SQ polling thread
+  IORING_SETUP_CQSIZE     = UInt32($200); // #109: custom CQ ring size
+  IORING_SETUP_CLAMP      = UInt32($10);  // clamp entries to max allowed
 
   // SQ ring flags (read from sq_off.flags at runtime)
   IORING_SQ_NEED_WAKEUP   = UInt32(1);   // #60: SQPOLL thread is idle, need wakeup
@@ -167,6 +170,7 @@ const
 
   CRecvBufSize  = 32768;
   CRingEntries  = 512;
+  CCQEntries    = 2048;  // #109: larger CQ to prevent overflow
   CRecvPoolSize = CRingEntries;
 
   // io_uring_register opcodes
@@ -392,6 +396,7 @@ begin
   FSQLock       := TCriticalSection.Create;
   FRecvPoolLock := TCriticalSection.Create;
   FShutdown     := False;
+  FPendingSQEs  := 0;
 
   FRecvCtxPool := AllocMem(CRecvPoolSize * SizeOf(TRecvCtx));
   FRecvPoolBase := PByte(FRecvCtxPool);
@@ -478,18 +483,28 @@ begin
     FListenSockets[I] := CreateListenSocket;
 
   // #60: try SQPOLL first (kernel 5.11+ or CAP_SYS_NICE); fall back silently
+  // #109: use IORING_SETUP_CQSIZE for larger CQ to prevent overflow
   FillChar(LParams, SizeOf(LParams), 0);
-  LParams.flags          := IORING_SETUP_SQPOLL;
+  LParams.flags          := IORING_SETUP_SQPOLL or IORING_SETUP_CQSIZE;
   LParams.sq_thread_idle := 10000;  // 10ms idle before kernel poller sleeps
+  LParams.cq_entries     := CCQEntries;
   FRingFd := _io_uring_setup(CRingEntries, @LParams);
   if FRingFd >= 0 then
     FSQPoll := True
   else
   begin
-    // SQPOLL not available — normal mode
+    // SQPOLL not available — try normal mode with custom CQ size
     FSQPoll := False;
     FillChar(LParams, SizeOf(LParams), 0);
+    LParams.flags      := IORING_SETUP_CQSIZE;
+    LParams.cq_entries := CCQEntries;
     FRingFd := _io_uring_setup(CRingEntries, @LParams);
+    if FRingFd < 0 then
+    begin
+      // CQSIZE not supported — plain setup
+      FillChar(LParams, SizeOf(LParams), 0);
+      FRingFd := _io_uring_setup(CRingEntries, @LParams);
+    end;
   end;
   if FRingFd < 0 then
     raise Exception.CreateFmt('io_uring_setup failed (errno %d)', [GetLastError]);
@@ -906,7 +921,14 @@ end;
 // ---------------------------------------------------------------------------
 
 procedure TIOUringBackend._NotifyKernel;
+var
+  LPending: Integer;
 begin
+  LPending := FPendingSQEs;
+  if LPending <= 0 then
+    LPending := 1;
+  FPendingSQEs := 0;
+
   if FSQPoll then
   begin
     // Kernel poller is active — only wake it if it went idle
@@ -915,7 +937,7 @@ begin
       _io_uring_enter(FRingFd, 0, 0, IORING_ENTER_SQ_WAKEUP);
   end
   else
-    _io_uring_enter(FRingFd, 1, 0, 0);
+    _io_uring_enter(FRingFd, LPending, 0, 0);
 end;
 
 // ---------------------------------------------------------------------------
@@ -957,6 +979,7 @@ begin
 
   // x86-64 TSO: plain store sufficient; io_uring_enter acts as full barrier
   FPSQTail^ := LTail + 1;
+  Inc(FPendingSQEs);  // #109: track for batched submission
 
   Result := True;
 end;
@@ -1061,8 +1084,16 @@ begin
     begin
       FMultishotAccept := False;
       // #103: re-arm multishot accept — without this, server stops accepting
-      if not FShutdown then
-        _SubmitAcceptMultishot;
+      if not FShutdown and (Length(FListenSockets) > 0) then
+      begin
+        FSQLock.Acquire;
+        try
+          _SubmitAcceptMultishot(FListenSockets[0]);
+          _NotifyKernel;
+        finally
+          FSQLock.Release;
+        end;
+      end;
     end;
     Exit;
   end;
@@ -1124,7 +1155,7 @@ end;
 
 procedure TIOUringBackend._CompletionLoop;
 var
-  LHead, LMask: UInt32;
+  LHead, LTail, LMask: UInt32;
   LCQE: PIOUringCQE;
 begin
   while not FShutdown do
@@ -1133,7 +1164,11 @@ begin
 
     LMask := FPCQMask^;
     LHead := FPCQHead^;
-    while LHead <> FPCQTail^ do
+    LTail := FPCQTail^;
+
+    // #109: Batch CQ head update — process all CQEs, then advance head once.
+    // Reduces memory barrier overhead vs per-CQE update.
+    while LHead <> LTail do
     begin
       LCQE := PIOUringCQE(PByte(FPCQEs) +
         NativeUInt(LHead and LMask) * SizeOf(TIOUringCQE));
@@ -1144,8 +1179,8 @@ begin
           Writeln(ErrOutput, '[io_uring] CQE_EX [', E.ClassName, ']: ', E.Message);
       end;
       Inc(LHead);
-      FPCQHead^ := LHead;
     end;
+    FPCQHead^ := LHead;
   end;
 end;
 
