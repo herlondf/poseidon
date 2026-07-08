@@ -15,6 +15,7 @@ interface
 uses
   System.SysUtils,
   System.Classes,
+  System.SyncObjs,
   Posix.SysSocket,
   Posix.NetinetIn,
   Posix.NetinetTcp,
@@ -33,7 +34,7 @@ type
     FEpollFds: TArray<Integer>;
     FShutdownPipes: TArray<array[0..1] of Integer>;
     FCallbacks: IIOCallbacks;
-    FShutdown: Boolean;
+    FShutdown: Integer;  // 0=running, 1=shutdown; atomic via TInterlocked
     procedure _CoreWorkerLoop(ACoreIdx: Integer);
     procedure _DoRecv(AConn: Pointer);
     procedure _FlushSend(AConn: Pointer);
@@ -176,7 +177,7 @@ end;
 constructor TEpollBackend.Create;
 begin
   inherited Create;
-  FShutdown := False;
+  FShutdown := 0;
 end;
 
 destructor TEpollBackend.Destroy;
@@ -224,7 +225,7 @@ var
   LCoreN: Integer;
 begin
   FCallbacks := ACallbacks;
-  FShutdown := False;
+  FShutdown := 0;
 
   LCoreN := AWorkerCount;
   if LCoreN < 1 then LCoreN := 1;
@@ -264,7 +265,7 @@ procedure TEpollBackend.StopAccept;
 begin
   // Listen sockets are closed in JoinWorkers after workers have exited,
   // avoiding race where a worker calls accept4 on a closed fd.
-  FShutdown := True;
+  TInterlocked.Exchange(FShutdown, 1);
 end;
 
 procedure TEpollBackend.ShutdownConn(AConn: Pointer);
@@ -566,7 +567,7 @@ begin
 
       if LEvents[I].data.ptr = CListenSentinel then
       begin
-        while not FShutdown do
+        while TInterlocked.Read(FShutdown) = 0 do
         begin
           FillChar(LAddr, SizeOf(LAddr), 0);
           LAddrLen := SizeOf(LAddr);

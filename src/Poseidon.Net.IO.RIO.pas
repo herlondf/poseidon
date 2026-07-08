@@ -92,7 +92,7 @@ type
     FCQs: TArray<TRIO_CQ>;
     FCQLocks: TArray<TCriticalSection>;
     FCallbacks: IIOCallbacks;
-    FShutdown: Boolean;
+    FShutdown: Integer;  // 0=running, 1=shutdown; atomic via TInterlocked
     FNextCQ: Integer;
     // Pre-allocated recv pool
     FRecvPool: Pointer;
@@ -234,7 +234,7 @@ var
 begin
   inherited Create;
   FListenSocket := INVALID_SOCKET;
-  FShutdown := False;
+  FShutdown := 0;
   FNextCQ := 0;
   FRecvPool := nil;
   FRecvPoolBufId := nil;
@@ -409,7 +409,7 @@ var
   LIdx: Integer;
 begin
   FCallbacks := ACallbacks;
-  FShutdown := False;
+  FShutdown := 0;
 
   FListenSocket := WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nil, 0,
     WSA_FLAG_REGISTERED_IO);
@@ -499,7 +499,7 @@ procedure TRIOBackend.SignalWorkers;
 var
   I: Integer;
 begin
-  FShutdown := True;
+  TInterlocked.Exchange(FShutdown, 1);
   for I := 0 to High(FWorkerIOCPs) do
     PostQueuedCompletionStatus(FWorkerIOCPs[I], 0, 0, nil);
 end;
@@ -508,7 +508,7 @@ procedure TRIOBackend.JoinWorkers;
 var
   I: Integer;
 begin
-  FShutdown := True;
+  TInterlocked.Exchange(FShutdown, 1);
   for I := 0 to High(FWorkers) do
   begin
     FWorkers[I].WaitFor;
@@ -549,7 +549,7 @@ var
   LRQ: TRIO_RQ;
 begin
   // Round-robin CQ assignment
-  LCQIdx := TInterlocked.Increment(FNextCQ) mod Length(FCQs);
+  LCQIdx := Cardinal(TInterlocked.Increment(FNextCQ)) mod Cardinal(Length(FCQs));
 
   // Create per-socket request queue bound to recv CQ and send CQ (same CQ)
   FCQLocks[LCQIdx].Enter;
@@ -779,13 +779,15 @@ begin
   if not TFnSend(FRio.RIOSend)(LConn.RioRQ, @LBufB, 1, 0,
     Pointer(LReqCtx)) then
   begin
-    LConn.Release;
-    LConn.Release;
-    _SendPoolRelease(LSlotH);
+    // First deferred send already accepted by kernel — SlotH cannot be freed
+    // here. Mark Remaining=1 so the CQ completion for the first send will
+    // clean up SlotH, HeaderBuf and Dispose the context.
+    LSendCtx^.Remaining := 1;
+    LSendCtx^.SlotIdx2 := -2;  // mark second slot as not submitted
+    LConn.Release;  // drop ref for the second (failed) send only
     _SendPoolRelease(LSlotB);
-    TBufferPool.Release(LSendCtx^.SendBuf);
     TBufferPool.Release(LSendCtx^.BodyBuf);
-    Dispose(LSendCtx);
+    LSendCtx^.BodyBuf := nil;
     FCallbacks.OnConnError(AConn);
   end;
 end;
@@ -854,7 +856,7 @@ var
   LOverlapped: POverlapped;
   LHadError: Boolean;
 begin
-  while not FShutdown do
+  while TInterlocked.Read(FShutdown) = 0 do
   begin
     TFnNotify(FRio.RIONotify)(FCQs[ACQIdx]);
 
@@ -862,7 +864,7 @@ begin
     GetQueuedCompletionStatus(FWorkerIOCPs[ACQIdx],
       LBytesXfer, LCompKey, LOverlapped, 100);
 
-    if FShutdown then Break;
+    if TInterlocked.Read(FShutdown) <> 0 then Break;
 
     // Burst dequeue — drain all available completions
     while True do
@@ -873,7 +875,7 @@ begin
       if LCount = CRioCorruptCQ then
       begin
         Writeln(ErrOutput, '[rio] FATAL: CQ corruption on worker ', ACQIdx);
-        FShutdown := True;
+        TInterlocked.Exchange(FShutdown, 1);
         Break;
       end;
       if LCount = 0 then Break;
@@ -888,19 +890,21 @@ begin
           begin
             // RECV completion
             LSlotIdx := Integer(LReqCtx shr 1);
-
-            if (LResults[I].Status <> 0) or (LResults[I].BytesTransferred = 0) then
-            begin
-              _RecvPoolRelease(LSlotIdx);
-              FCallbacks.OnConnError(LConn);
-            end
-            else
-            begin
-              FCallbacks.OnRecv(LConn, _RecvSlotPtr(LSlotIdx),
-                LResults[I].BytesTransferred);
-              _RecvPoolRelease(LSlotIdx);
+            try
+              if (LResults[I].Status <> 0) or (LResults[I].BytesTransferred = 0) then
+              begin
+                _RecvPoolRelease(LSlotIdx);
+                FCallbacks.OnConnError(LConn);
+              end
+              else
+              begin
+                FCallbacks.OnRecv(LConn, _RecvSlotPtr(LSlotIdx),
+                  LResults[I].BytesTransferred);
+                _RecvPoolRelease(LSlotIdx);
+              end;
+            finally
+              LConn.Release;
             end;
-            LConn.Release;
           end
           else
           begin
@@ -909,7 +913,7 @@ begin
 
             Dec(LSendCtx^.Remaining);
 
-            if LResults[I].Status <> 0 then
+            if (LResults[I].Status <> 0) or (LResults[I].BytesTransferred = 0) then
               LSendCtx^.ActualLen := -1;
 
             if LSendCtx^.Remaining > 0 then
@@ -936,11 +940,14 @@ begin
               LHadError := LSendCtx^.ActualLen = -1;
               Dispose(LSendCtx);
 
-              if LHadError then
-                FCallbacks.OnConnError(LConn)
-              else
-                FCallbacks.OnSendComplete(LConn);
-              LConn.Release;
+              try
+                if LHadError then
+                  FCallbacks.OnConnError(LConn)
+                else
+                  FCallbacks.OnSendComplete(LConn);
+              finally
+                LConn.Release;
+              end;
             end;
           end;
         except

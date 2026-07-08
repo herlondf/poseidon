@@ -292,20 +292,23 @@ begin
 
   LOut := TBytesStream.Create;
   try
-    LStrm.next_in  := @AData[0];
-    LStrm.avail_in := Length(AData);
-    // Z_SYNC_FLUSH: flushes all pending output and appends 00 00 FF FF
-    repeat
-      LStrm.next_out  := @LBuf[0];
-      LStrm.avail_out := CHUNK;
-      LRet := deflate(LStrm, Z_SYNC_FLUSH);
-      if LRet < Z_OK then
-        raise Exception.CreateFmt('WSDeflate: deflate error %d', [LRet]);
-      LLen := CHUNK - LStrm.avail_out;
-      if LLen > 0 then
-        LOut.Write(LBuf[0], LLen);
-    until LStrm.avail_out > 0;  // avail_out > 0 means no more pending output
-    deflateEnd(LStrm);
+    try
+      LStrm.next_in  := @AData[0];
+      LStrm.avail_in := Length(AData);
+      // Z_SYNC_FLUSH: flushes all pending output and appends 00 00 FF FF
+      repeat
+        LStrm.next_out  := @LBuf[0];
+        LStrm.avail_out := CHUNK;
+        LRet := deflate(LStrm, Z_SYNC_FLUSH);
+        if LRet < Z_OK then
+          raise Exception.CreateFmt('WSDeflate: deflate error %d', [LRet]);
+        LLen := CHUNK - LStrm.avail_out;
+        if LLen > 0 then
+          LOut.Write(LBuf[0], LLen);
+      until LStrm.avail_out > 0;  // avail_out > 0 means no more pending output
+    finally
+      deflateEnd(LStrm);
+    end;
 
     // Strip trailing 00 00 FF FF (4 bytes) per RFC 7692 §7.2.1
     LSize := LOut.Size;

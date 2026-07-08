@@ -78,7 +78,7 @@ type
     FIdleWorkers: Integer;  // atomic — threads blocked on semaphore
     FPadIdle: array[0..14] of Integer;
     FSemaphore:     TSemaphore;
-    FShutdown:      Boolean;
+    FShutdown:      Integer;  // 0=running, 1=shutdown; atomic via TInterlocked
     procedure _WorkerLoop(ADequeIdx: Integer);
     procedure _SpawnWorker(ADequeIdx: Integer);
     function  _TrySteal(AMyIdx: Integer; out AWrapper: TWorkWrapper): Boolean;
@@ -99,6 +99,9 @@ type
 
 implementation
 
+uses
+  Poseidon.Net.Pool.Buffer;
+
 { TElasticWorkerPool }
 
 constructor TElasticWorkerPool.Create(AMin, AMax, AIdleTimeoutMs: Integer);
@@ -109,7 +112,7 @@ begin
   FMinWorkers := AMin;
   FMaxWorkers := AMax;
   FIdleTimeoutMs := AIdleTimeoutMs;
-  FShutdown := False;
+  FShutdown := 0;
   FActiveWorkers := 0;
   FIdleWorkers := 0;
   FNextDeque := 0;
@@ -191,13 +194,15 @@ begin
   LAlreadyDropped := False;
   LDeque := @FDeques[ADequeIdx];
   try
+    // If shutdown happened between _SpawnWorker and here, exit immediately.
+    if TInterlocked.Read(FShutdown) <> 0 then Exit;
     while True do
     begin
       TInterlocked.Increment(FIdleWorkers);
       LResult := FSemaphore.WaitFor(LongWord(FIdleTimeoutMs));
       TInterlocked.Decrement(FIdleWorkers);
 
-      if FShutdown then Break;
+      if TInterlocked.Read(FShutdown) <> 0 then Break;
 
       if LResult = wrTimeout then
       begin
@@ -244,6 +249,7 @@ begin
       end;
     end;
   finally
+    TBufferPool.FlushThreadCache;
     if not LAlreadyDropped then
       TInterlocked.Decrement(FActiveWorkers);
   end;
@@ -256,7 +262,7 @@ var
   LActive: Integer;
   LDequeIdx: Integer;
 begin
-  if FShutdown then Exit;
+  if TInterlocked.Read(FShutdown) <> 0 then Exit;
 
   LWrapper := TWorkWrapper.Create;
   LWrapper.Work := AWork;
@@ -285,8 +291,8 @@ var
   LWrapper: TWorkWrapper;
   I: Integer;
 begin
-  if FShutdown then Exit;
-  FShutdown := True;
+  if TInterlocked.Read(FShutdown) <> 0 then Exit;
+  TInterlocked.Exchange(FShutdown, 1);
 
   // Wake all blocked workers so they check FShutdown and exit cleanly.
   LActive := TInterlocked.Add(FActiveWorkers, 0);
@@ -297,6 +303,10 @@ begin
   while TInterlocked.Add(FActiveWorkers, 0) > 0 do
   begin
     if Int64(TThread.GetTickCount64) - LStart >= ATimeoutMs then Break;
+    // Release extra signals in case new workers were spawned after the
+    // initial Release(LActive) above — they need a signal to wake up
+    // and see FShutdown=1.
+    FSemaphore.Release(1);
     Sleep(10);
   end;
 

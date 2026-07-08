@@ -65,6 +65,18 @@ end;
 
 {$ELSE}
 
+function _WinSend(ASocket: Integer; const ABuf; ALen: Integer): Integer;
+type
+  TSendFunc = function(s: NativeUInt; const buf; len, flags: Integer): Integer; stdcall;
+var
+  LSend: TSendFunc;
+  LMod: HMODULE;
+begin
+  LMod := GetModuleHandle('ws2_32.dll');
+  @LSend := GetProcAddress(LMod, 'send');
+  Result := LSend(NativeUInt(ASocket), ABuf, ALen, 0);
+end;
+
 function PoseidonSendFile(ASocket: Integer; const AFilePath: string;
   AOffset, ACount: Int64): Int64;
 const
@@ -75,6 +87,8 @@ var
   LRemain: Int64;
   LChunk: Integer;
   LRead: Integer;
+  LSent: Integer;
+  LPos: Integer;
 begin
   Result := 0;
   LStream := TFileStream.Create(AFilePath, fmOpenRead or fmShareDenyNone);
@@ -89,6 +103,14 @@ begin
       LRead := LStream.Read(LBuf[0], LChunk);
       if LRead <= 0 then
         Break;
+      LPos := 0;
+      while LPos < LRead do
+      begin
+        LSent := _WinSend(ASocket, LBuf[LPos], LRead - LPos);
+        if LSent <= 0 then
+          Exit;
+        Inc(LPos, LSent);
+      end;
       Dec(LRemain, LRead);
       Inc(Result, LRead);
     end;

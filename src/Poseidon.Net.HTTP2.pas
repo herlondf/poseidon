@@ -694,7 +694,9 @@ end;
 procedure TH2Conn._HandleGoAway(APayload: PByte; APayLen: Integer);
 begin
   FGoAwaySent := True; // suppress further sends
-  if Assigned(FCloseProc) then
+  if FActiveStreams > 0 then
+    FDeferClose := True
+  else if Assigned(FCloseProc) then
     FCloseProc(FConn);
 end;
 

@@ -63,53 +63,20 @@ function IsPathSafe(const APath: string): Boolean;
 var
   LLower: string;
 begin
-  if Pos(#0, APath) > 0 then
-  begin
-    Result := False;
-    Exit;
-  end;
-  if Pos('%00', LowerCase(APath)) > 0 then
-  begin
-    Result := False;
-    Exit;
-  end;
-  if Pos('\', APath) > 0 then
-  begin
-    Result := False;
-    Exit;
-  end;
+  Result := False;
+  if Pos(#0, APath) > 0 then Exit;
   LLower := LowerCase(APath);
-  if Pos('%2e%2e', LLower) > 0 then
-  begin
-    Result := False;
-    Exit;
-  end;
-  if Pos('/../', LLower) > 0 then
-  begin
-    Result := False;
-    Exit;
-  end;
-  if (Length(LLower) >= 3) and
-     (LLower[Length(LLower) - 2] = '/') and
-     (LLower[Length(LLower) - 1] = '.') and
-     (LLower[Length(LLower)]     = '.') then
-  begin
-    Result := False;
-    Exit;
-  end;
-  if (Length(LLower) >= 3) and
-     (LLower[1] = '.') and
-     (LLower[2] = '.') and
-     (LLower[3] = '/') then
-  begin
-    Result := False;
-    Exit;
-  end;
-  if LLower = '..' then
-  begin
-    Result := False;
-    Exit;
-  end;
+  // NUL encoded
+  if Pos('%00', LLower) > 0 then Exit;
+  // Literal backslash
+  if Pos('\', APath) > 0 then Exit;
+  // URL-encoded backslash (%5c)
+  if Pos('%5c', LLower) > 0 then Exit;
+  // Double-dot traversal — all encoding variants
+  if Pos('..', LLower) > 0 then Exit;
+  if Pos('%2e%2e', LLower) > 0 then Exit;
+  if Pos('%2e.', LLower) > 0 then Exit;
+  if Pos('.%2e', LLower) > 0 then Exit;
   Result := True;
 end;
 

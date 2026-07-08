@@ -63,7 +63,7 @@ begin
   // Find LAST colon to handle IPv6 too.
   LColonPos := ARemoteAddr.LastDelimiter(':');
   if LColonPos > 0 then
-    Result := Copy(ARemoteAddr, 1, LColonPos)
+    Result := Copy(ARemoteAddr, 1, LColonPos - 1)
   else
     Result := ARemoteAddr;
 end;

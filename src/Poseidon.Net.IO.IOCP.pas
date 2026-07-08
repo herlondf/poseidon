@@ -12,6 +12,7 @@ interface
 uses
   System.SysUtils,
   System.Classes,
+  System.SyncObjs,
   Winapi.Windows,
   Winapi.Winsock2,
   Poseidon.Net.IO,
@@ -26,7 +27,7 @@ type
     FListenSocket: TSocket;
     FWorkers: TArray<TThread>;
     FCallbacks: IIOCallbacks;
-    FShutdown: Boolean;
+    FShutdown: Integer;  // 0=running, 1=shutdown; atomic via TInterlocked
     FAcceptEx: Pointer;
     FGetAcceptExSockaddrs: Pointer;
     FAcceptCtxs: array of Pointer;  // PAcceptCtx, allocated in StartListening
@@ -219,7 +220,7 @@ begin
   inherited Create;
   FIocp := 0;
   FListenSocket := INVALID_SOCKET;
-  FShutdown := False;
+  FShutdown := 0;
   FAcceptEx := nil;
   FGetAcceptExSockaddrs := nil;
   FDisconnectEx := nil;
@@ -236,6 +237,16 @@ begin
         closesocket(PAcceptCtx(FAcceptCtxs[I])^.AcceptSocket);
       Dispose(PAcceptCtx(FAcceptCtxs[I]));
     end;
+  if FListenSocket <> INVALID_SOCKET then
+  begin
+    closesocket(FListenSocket);
+    FListenSocket := INVALID_SOCKET;
+  end;
+  if FIocp <> 0 then
+  begin
+    CloseHandle(FIocp);
+    FIocp := 0;
+  end;
   inherited Destroy;
 end;
 
@@ -368,7 +379,7 @@ end;
 
 procedure TIOCPBackend.StopAccept;
 begin
-  FShutdown := True;
+  TInterlocked.Exchange(FShutdown, 1);
   closesocket(FListenSocket);
   FListenSocket := INVALID_SOCKET;
 end;
@@ -384,7 +395,7 @@ procedure TIOCPBackend.SignalWorkers;
 var
   I: Integer;
 begin
-  FShutdown := True;
+  TInterlocked.Exchange(FShutdown, 1);
   for I := 0 to High(FWorkers) do
     _IocpPost(FIocp, 0, 0, nil);
 end;
@@ -502,30 +513,33 @@ begin
 
   if LRes = 0 then
   begin
-    if Integer(LBytes) < LSendLen then
+    // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS: sync completion arrives inline.
+    // Loop to handle consecutive partial sends that also complete synchronously.
+    while Integer(LBytes) < (LCtx^.ActualLen - LCtx^.SentBytes) do
     begin
-      LCtx^.SentBytes := Integer(LBytes);
-      LCtx^.WsaBuf.buf := @LCtx^.SendBuf[LBytes];
-      LCtx^.WsaBuf.len := ULONG(LSendLen - Integer(LBytes));
+      Inc(LCtx^.SentBytes, Integer(LBytes));
+      LCtx^.WsaBuf.buf := @LCtx^.SendBuf[LCtx^.SentBytes];
+      LCtx^.WsaBuf.len := ULONG(LCtx^.ActualLen - LCtx^.SentBytes);
       FillChar(LCtx^.Ovl, SizeOf(TOverlapped), 0);
+      LBytes := 0;
       LRes := WSASend(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, 0,
         PWSAOverlapped(@LCtx^.Ovl), nil);
-      if (LRes <> 0) and (WSAGetLastError <> WSA_IO_PENDING) then
+      if LRes <> 0 then
       begin
+        if WSAGetLastError = WSA_IO_PENDING then
+          Exit;  // will complete via IOCP
         LConn.Release;
         TBufferPool.Release(LCtx^.SendBuf);
         Dispose(LCtx);
         FCallbacks.OnConnError(AConn);
+        Exit;
       end;
-      // else: will complete via IOCP or next sync check
-    end
-    else
-    begin
-      TBufferPool.Release(LCtx^.SendBuf);
-      Dispose(LCtx);
-      FCallbacks.OnSendComplete(LConn);
-      LConn.Release;
     end;
+    // Full send completed synchronously
+    TBufferPool.Release(LCtx^.SendBuf);
+    Dispose(LCtx);
+    FCallbacks.OnSendComplete(LConn);
+    LConn.Release;
   end
   else if WSAGetLastError <> WSA_IO_PENDING then
   begin
@@ -627,7 +641,14 @@ begin
       Dispose(LCtx);
     end
     else
-      Exit;  // completed synchronously — will get IOCP completion
+    begin
+      // Completed synchronously — FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
+      // means no IOCP completion will arrive; handle inline.
+      if not TSocketPool.AddRecycled(LCtx^.Socket) then
+        closesocket(LCtx^.Socket);
+      Dispose(LCtx);
+      Exit;
+    end;
   end;
 
   closesocket(LConn.Socket);
@@ -652,6 +673,7 @@ var
   LLocalAddr, LRemoteAddr: PSockAddr;
   LLocalLen, LRemoteLen: Integer;
   LRemoteIP: AnsiString;
+  LRemotePort: Word;
   LOne: Integer;
   LAcceptIdx: Integer;
   LRes: Integer;
@@ -679,7 +701,7 @@ begin
         begin
           LAcceptCtx := PAcceptCtx(LOvl);
 
-          if FShutdown or (LAcceptCtx^.AcceptSocket = INVALID_SOCKET) then
+          if (TInterlocked.Read(FShutdown) <> 0) or (LAcceptCtx^.AcceptSocket = INVALID_SOCKET) then
           begin
             if LAcceptCtx^.AcceptSocket <> INVALID_SOCKET then
               closesocket(LAcceptCtx^.AcceptSocket);
@@ -718,14 +740,19 @@ begin
           end;
 
           if (LRemoteAddr <> nil) and (LRemoteLen >= SizeOf(TSockAddrIn)) then
-            LRemoteIP := inet_ntoa(PSockAddrIn(LRemoteAddr)^.sin_addr)
+          begin
+            LRemoteIP := inet_ntoa(PSockAddrIn(LRemoteAddr)^.sin_addr);
+            LRemotePort := ntohs(PSockAddrIn(LRemoteAddr)^.sin_port);
+          end
           else
+          begin
             LRemoteIP := '0.0.0.0';
+            LRemotePort := 0;
+          end;
 
           try
             FCallbacks.OnNewConn(NativeUInt(LAcceptCtx^.AcceptSocket),
-              string(LRemoteIP) + ':' +
-              IntToStr(ntohs(PSockAddrIn(LRemoteAddr)^.sin_port)));
+              string(LRemoteIP) + ':' + IntToStr(LRemotePort));
           except
             closesocket(LAcceptCtx^.AcceptSocket);
           end;

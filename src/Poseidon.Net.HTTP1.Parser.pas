@@ -344,6 +344,7 @@ begin
     if Int64(LDataStart) + LChunk + 2 > Int64(ABufLen) then Exit;
 
     LOldLen := Length(ABody);
+    if Int64(LOldLen) + LChunk > AMaxBodySize then begin AMalformed := True; Exit; end;
     SetLength(ABody, LOldLen + Integer(LChunk));
     Move(LBytes[LDataStart], ABody[LOldLen], LChunk);
 

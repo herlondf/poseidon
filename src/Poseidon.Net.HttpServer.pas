@@ -418,6 +418,8 @@ begin
     if LBLen > 0 then Move(ABody[0], LConcat[LHLen], LBLen);
     LTmp := AHeaders;
     TBufferPool.Release(LTmp);
+    LTmp := ABody;
+    TBufferPool.Release(LTmp);
     FServer._EncryptAndSend(AConn, LConcat, LHLen + LBLen);
   end
   else
@@ -710,12 +712,11 @@ begin
   if (FMaxQueueDepth > 0) and
      (TInterlocked.Read(FInFlightCount) >= Int64(FMaxQueueDepth)) then
   begin
+    TNativeConn(AConn).KeepAlive := False;
     LResp := BuildHTTPResponse(503, 'text/plain',
       TEncoding.ASCII.GetBytes('Service Unavailable'),
-      TNativeConn(AConn).KeepAlive, [],
-      FSecureHeadersEnabled, FServerBanner);
+      False, [], FSecureHeadersEnabled, FServerBanner);
     _EncryptAndSend(AConn, LResp);
-    // OnSendComplete re-arma recv (keep-alive) ou fecha — não forçar close aqui
     Exit;
   end;
 

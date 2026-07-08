@@ -46,6 +46,9 @@ type
     // ASize = 0 is treated as a request for a Tier-0 (8 KB) buffer.
     class function  Acquire(ASize: Integer = 0): TBytes; static;
     class procedure Release(var ABuf: TBytes); static;
+    // Flush thread-local cache back to global pool and free the cache object.
+    // Call this before a worker thread exits to prevent leaking buffers.
+    class procedure FlushThreadCache; static;
   end;
 
 implementation
@@ -226,6 +229,29 @@ begin
   end;
   // Oversized or unrecognised: let the TBytes ref-count free it naturally.
   ABuf := nil;
+end;
+
+class procedure TBufferPool.FlushThreadCache;
+var
+  LCache: TThreadLocalBufCache;
+  I: Integer;
+begin
+  LCache := GTLCache;
+  if LCache = nil then Exit;
+
+  for I := 0 to LCache.FTier0Count - 1 do
+    _GlobalPushIfRoom(GTier0, POOL_TIER0_MAX, LCache.FTier0[I]);
+  LCache.FTier0Count := 0;
+
+  for I := 0 to LCache.FTier1Count - 1 do
+    _GlobalPushIfRoom(GTier1, POOL_TIER1_MAX, LCache.FTier1[I]);
+  LCache.FTier1Count := 0;
+
+  for I := 0 to LCache.FTier2Count - 1 do
+    _GlobalPushIfRoom(GTier2, POOL_TIER2_MAX, LCache.FTier2[I]);
+  LCache.FTier2Count := 0;
+
+  FreeAndNil(GTLCache);
 end;
 
 initialization

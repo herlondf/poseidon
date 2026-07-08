@@ -66,7 +66,7 @@ type
     FCallbacks: IIOCallbacks;
     FListenSockets: TArray<Integer>;
     FSQLock: TCriticalSection;
-    FShutdown: Boolean;
+    FShutdown: Integer;  // 0=running, 1=shutdown; atomic via TInterlocked
     FSQPoll: Boolean;
     FPSQFlags: PUInt32;
     FRecvCtxPool: Pointer;
@@ -425,7 +425,7 @@ begin
   FRingFd := -1;
   FSQLock := TCriticalSection.Create;
   FRecvPoolLock := TCriticalSection.Create;
-  FShutdown := False;
+  FShutdown := 0;
   FPendingSQEs := 0;
 
   FRecvCtxPool := AllocMem(CRecvPoolSize * SizeOf(TRecvCtx));
@@ -444,6 +444,29 @@ end;
 
 destructor TIOUringBackend.Destroy;
 begin
+  // Safety net: clean up mmaps and ring fd if JoinWorkers was never called
+  // (e.g. exception during StartListening after mmap succeeded).
+  if (FSQEs <> nil) and (FSQEs <> MAP_FAILED) then
+  begin
+    _LinuxMunmap(FSQEs, FSQEsSize);
+    FSQEs := nil;
+  end;
+  if (FCQRingSize > 0) and (FCQRing <> nil) and (FCQRing <> MAP_FAILED)
+     and (FCQRing <> FSQRing) then
+  begin
+    _LinuxMunmap(FCQRing, FCQRingSize);
+    FCQRing := nil;
+  end;
+  if (FSQRing <> nil) and (FSQRing <> MAP_FAILED) then
+  begin
+    _LinuxMunmap(FSQRing, FSQRingSize);
+    FSQRing := nil;
+  end;
+  if FRingFd >= 0 then
+  begin
+    _LinuxClose(FRingFd);
+    FRingFd := -1;
+  end;
   if FRecvCtxPool <> nil then
   begin
     FreeMem(FRecvCtxPool);
@@ -504,7 +527,7 @@ var
   LInitFds: array of Int32;
 begin
   FCallbacks := ACallbacks;
-  FShutdown := False;
+  FShutdown := 0;
   LAcceptN := AAcceptThreads;
   if LAcceptN < 1 then LAcceptN := 1;
 
@@ -1115,7 +1138,7 @@ var
 begin
   if AUserData = CUdShutdown then
   begin
-    FShutdown := True;
+    TInterlocked.Exchange(FShutdown, 1);
     Exit;
   end;
 
@@ -1164,7 +1187,7 @@ begin
     Exit;
   end;
 
-  if (AUserData and CUdTagAccept) <> 0 then
+  if AUserData = CUdTagAccept then
   begin
     if ARes >= 0 then
     begin
@@ -1187,7 +1210,7 @@ begin
     begin
       FMultishotAccept := False;
       // Re-arm multishot accept — without this, server stops accepting
-      if not FShutdown and (Length(FListenSockets) > 0) then
+      if (TInterlocked.Read(FShutdown) = 0) and (Length(FListenSockets) > 0) then
       begin
         FSQLock.Acquire;
         try
@@ -1261,7 +1284,7 @@ var
   LHead, LTail, LMask: UInt32;
   LCQE: PIOUringCQE;
 begin
-  while not FShutdown do
+  while TInterlocked.Read(FShutdown) = 0 do
   begin
     _io_uring_enter(FRingFd, 0, 1, IORING_ENTER_GETEVENTS);
 

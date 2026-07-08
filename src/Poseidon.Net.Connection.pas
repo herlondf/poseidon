@@ -88,7 +88,7 @@ end;
 procedure TNativeConn.Release;
 begin
   if TInterlocked.Decrement(FRefCount) = 0 then
-    Destroy;
+    Self.Free;
 end;
 
 constructor TNativeConn.Create(ASocket: NativeUInt; const AAddr: string);
