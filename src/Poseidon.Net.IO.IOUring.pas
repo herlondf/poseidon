@@ -142,6 +142,7 @@ const
 
   // io_uring feature flags (returned in params.features)
   IORING_FEAT_SINGLE_MMAP = UInt32($0001);
+  IORING_FEAT_NODROP = UInt32($0002);
 
   // SQE opcodes
   IORING_OP_NOP = Byte(0);
@@ -548,6 +549,10 @@ begin
   FPCQTail := PUInt32(PByte(FCQRing) + LParams.cq_off.tail);
   FPCQMask := PUInt32(PByte(FCQRing) + LParams.cq_off.ring_mask);
   FPCQEs := Pointer(PByte(FCQRing) + LParams.cq_off.cqes);
+
+  if (LParams.features and IORING_FEAT_NODROP) = 0 then
+    Writeln(ErrOutput, '[io_uring] WARNING: kernel lacks IORING_FEAT_NODROP — ',
+      'CQE overflow may silently drop completions. CQ size = ', LParams.cq_entries);
 
   for I := 0 to Integer(LParams.sq_entries) - 1 do
     PUInt32(PByte(FSQRing) + LParams.sq_off.array_ + NativeUInt(I) * SizeOf(UInt32))^

@@ -16,7 +16,7 @@ A seleção do backend Linux ocorre **uma única vez** na construção de
 ## Propriedades principais
 
 - **Zero overhead de thread por conexão** — conexões são file descriptors em um conjunto do kernel, não threads bloqueadas.
-- **Um único send por resposta** — headers + body montados em um único buffer e enviados com uma única chamada `WSASend`/`send`. Elimina travagens de Nagle/delayed-ACK em loopback.
+- **Send vetorizado** — `PostSendV` envia headers + body em uma única syscall via scatter-gather I/O (`writev` no Linux, `WSASend` com múltiplos `WSABUF` no Windows). Sem necessidade de concatenar buffers. `PostSend` também está disponível para respostas de buffer único.
 - **Backend plugável** — `IIOBackend` separa o servidor da plataforma de I/O; a seleção é feita no constructor sem nenhum `{$IFDEF}` no path de requisição.
 
 ## Windows: IOCP
@@ -56,8 +56,9 @@ evento. Buffers são pré-registrados via `RIORegisterBuffer`, eliminando
 cópias de kernel para userspace.
 
 Características:
-- Polling de completions sem syscall (leitura direta no ring buffer)
-- Buffers de send/recv pré-registrados — zero-copy de userspace para kernel
+- Uma CQ dedicada por worker thread — sem contenção cross-thread
+- Buffers de send/recv pré-registrados (512 × 32 KB cada) — zero-copy de userspace para kernel
+- Batch dequeue de até 256 completions por chamada
 - Latência p99 inferior ao IOCP em cargas de alta conexão simultânea
 
 **IOCP — I/O Completion Ports (Windows, fallback)**
@@ -71,13 +72,17 @@ todas as versões do Windows a partir do XP.
 Ring assíncrono compartilhado entre userspace e kernel.
 O backend do Poseidon usa `IORING_REGISTER_FILES` para registrar file
 descriptors de socket no ring — evita uma lookup no kernel por operação.
-`IORING_OP_ACCEPT` no modo **multishot** mantém um único SQE de accept ativo
-que gera um CQE para cada nova conexão, sem precisar repostar o SQE.
+`IORING_OP_ACCEPT` no modo **multishot** (`IOSQE_ACCEPT_MULTISHOT` no campo
+`ioprio`) mantém um único SQE de accept ativo que gera um CQE para cada nova
+conexão, sem precisar repostar o SQE. Se o kernel cancela o multishot
+(indicado pela ausência de `IORING_CQE_F_MORE`), o backend re-submete
+automaticamente.
 
 Características:
 - Arquivo registrado: elimina lookup fd→file por operação
 - Multishot accept: um SQE serve N conexões
-- Sends zero-copy via `IORING_OP_SEND`
+- SQPOLL opcional: kernel poll thread elimina syscalls no hot path
+- Pool de recv pré-alocado (512 contextos × 32 KB)
 
 **epoll (Linux, fallback)**
 

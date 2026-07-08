@@ -18,7 +18,7 @@ from the selection.
 ## Key properties
 
 - **Zero thread-per-connection overhead** — connections are file descriptors in a kernel set, not blocked threads.
-- **Single send per response** — headers + body assembled in one buffer, sent with a single `WSASend`/`send`. Eliminates Nagle/delayed-ACK stalls on loopback.
+- **Vectored send** — `PostSendV` sends headers + body in a single syscall via scatter-gather I/O (`writev` on Linux, `WSASend` with multiple `WSABUF` on Windows). No buffer concatenation needed. `PostSend` is also available for single-buffer responses.
 - **Pluggable backend** — `IIOBackend` separates the server from the I/O platform; no `{$IFDEF}` blocks in the request hot path.
 
 ---
@@ -35,10 +35,11 @@ the lowest-overhead path on Windows:
   between user space and the kernel. Worker threads call `RIODequeueCompletion`
   on the CQ without issuing a syscall; the kernel signals readiness via an IOCP
   notification handle used only as a wake-up event.
-- **Shared-memory CQ** — multiple I/O operations share one CQ per worker thread,
-  reducing context switches compared to one IOCP packet per operation.
+- **Per-worker CQ** — each worker thread owns a dedicated completion queue (CQ)
+  and IOCP notification handle. Connections are distributed across CQs via
+  round-robin, eliminating cross-thread CQ contention.
 
-Poseidon creates one RIO request queue per worker thread and one shared CQ.
+Poseidon creates one RIO completion queue and one IOCP per worker thread.
 `PostRecv` submits a `RIO_BUF` pointing into the pre-registered buffer pool;
 `PostSend` does the same for the outgoing side.
 
@@ -68,9 +69,11 @@ optimizations enabled when the kernel supports them:
   accepted sockets are registered with the ring at accept time and referenced by
   index in subsequent SQEs, eliminating the per-operation fd table lookup in the
   kernel.
-- **Multishot accept** (`IORING_OP_ACCEPT` with `IOSQE_IO_LINK`) — a single SQE
-  continuously re-arms itself after each accepted connection, avoiding repeated
-  `accept4` submissions.
+- **Multishot accept** (`IORING_OP_ACCEPT` with `IOSQE_ACCEPT_MULTISHOT` in the
+  `ioprio` field) — a single SQE continuously re-arms itself after each accepted
+  connection, avoiding repeated `accept4` submissions. If the kernel cancels the
+  multishot (indicated by `IORING_CQE_F_MORE` being absent), the backend
+  automatically re-submits.
 
 `PostRecv` submits an `IORING_OP_RECV` SQE with a heap-allocated per-request
 buffer. A dedicated completion thread calls `io_uring_enter(GETEVENTS)` in a

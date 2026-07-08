@@ -70,6 +70,7 @@ const
   EPOLLOUT = $00000004;
   EPOLLERR = $00000008;
   EPOLLHUP = $00000010;
+  EPOLLRDHUP = $00002000;
   EPOLLONESHOT = Integer($40000000);
   EPOLL_CTL_ADD = 1;
   EPOLL_CTL_DEL = 2;
@@ -317,7 +318,7 @@ var
 begin
   LConn.OwnerEpollFd := GCurrentEpollFd;
   FillChar(LEv, SizeOf(LEv), 0);
-  LEv.events := EPOLLIN or EPOLLONESHOT;
+  LEv.events := EPOLLIN or EPOLLRDHUP or EPOLLONESHOT;
   LEv.data.ptr := AConn;
   epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_ADD, LConn.Socket, @LEv);
 end;
@@ -328,7 +329,7 @@ var
   LEv: epoll_event;
 begin
   FillChar(LEv, SizeOf(LEv), 0);
-  LEv.events := EPOLLIN or EPOLLONESHOT;
+  LEv.events := EPOLLIN or EPOLLRDHUP or EPOLLONESHOT;
   LEv.data.ptr := AConn;
   epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_MOD, LConn.Socket, @LEv);
 end;
@@ -484,7 +485,7 @@ begin
       if GetLastError = EAGAIN then
       begin
         FillChar(LEv, SizeOf(LEv), 0);
-        LEv.events := EPOLLOUT or EPOLLONESHOT;
+        LEv.events := EPOLLOUT or EPOLLRDHUP or EPOLLONESHOT;
         LEv.data.ptr := AConn;
         epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_MOD, LConn.Socket, @LEv);
       end
@@ -591,7 +592,7 @@ begin
 
       LConn := TNativeConn(LEvents[I].data.ptr);
       try
-        if (LEvents[I].events and (EPOLLERR or EPOLLHUP)) <> 0 then
+        if (LEvents[I].events and (EPOLLERR or EPOLLHUP or EPOLLRDHUP)) <> 0 then
           FCallbacks.OnConnError(LConn)
         else
         begin
