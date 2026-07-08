@@ -41,6 +41,10 @@ type
     // Acquire a recycled socket from the pool.
     // Returns INVALID_SOCKET if pool is empty.
     class function Acquire: TSocket; static;
+
+    // #106: Add an already-disconnected socket directly to the pool.
+    // Used by async DisconnectEx completion path.
+    class function AddRecycled(ASocket: TSocket): Boolean; static;
   end;
 
 implementation
@@ -135,6 +139,23 @@ begin
     begin
       Dec(FCount);
       Result := FPool[FCount];
+    end;
+  finally
+    TMonitor.Exit(FLock);
+  end;
+end;
+
+// #106: Add an already-disconnected socket directly to the pool
+class function TSocketPool.AddRecycled(ASocket: TSocket): Boolean;
+begin
+  Result := False;
+  TMonitor.Enter(FLock);
+  try
+    if FCount < CMaxPoolSize then
+    begin
+      FPool[FCount] := ASocket;
+      Inc(FCount);
+      Result := True;
     end;
   finally
     TMonitor.Exit(FLock);

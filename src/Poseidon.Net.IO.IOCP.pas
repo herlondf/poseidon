@@ -25,9 +25,16 @@ type
     FIocp: THandle;
     FListenSocket: TSocket;
     FWorkers: TArray<TThread>;
-    FAcceptThread: TThread;
     FCallbacks: IIOCallbacks;
-    procedure _Accept;
+    FShutdown: Boolean;
+    // #105: AcceptEx
+    FAcceptEx: Pointer;
+    FGetAcceptExSockaddrs: Pointer;
+    FAcceptCtxs: array of Pointer;  // PAcceptCtx, allocated in StartListening
+    // #106: async DisconnectEx
+    FDisconnectEx: Pointer;
+    procedure _LoadExtensions;
+    procedure _PostOneAccept(AIdx: Integer);
     procedure _WorkerLoop;
   public
     constructor Create;
@@ -91,14 +98,37 @@ const
   FILE_SKIP_COMPLETION_PORT_ON_SUCCESS = $01;
   FILE_SKIP_SET_EVENT_ON_HANDLE        = $02;
 
+// #106: CancelIoEx for shutdown drain
+function _CancelIoEx(hFile: THandle; lpOverlapped: POverlapped): BOOL; stdcall;
+  external 'kernel32.dll' name 'CancelIoEx';
+
 function _WsaBind(s: TSocket; addr: PSockAddrIn; addrlen: Integer): Integer; stdcall;
   external 'ws2_32.dll' name 'bind';
 
-function _WsaAccept(s: TSocket; addr: PSockAddrIn; addrlen: PInteger): TSocket; stdcall;
-  external 'ws2_32.dll' name 'accept';
-
 function _WsaListen(s: TSocket; backlog: Integer): Integer; stdcall;
   external 'ws2_32.dll' name 'listen';
+
+// #105: AcceptEx function types and GUIDs
+const
+  SIO_GET_EXTENSION_FUNCTION_POINTER = $C8000006;
+  WSAID_ACCEPTEX: TGUID = '{B5367DF1-CBAC-11CF-95CA-00805F48A169}';
+  WSAID_GETACCEPTEXSOCKADDRS: TGUID = '{B5367DF2-CBAC-11CF-95CA-00805F48A169}';
+
+type
+  TAcceptExFunc = function(sListenSocket, sAcceptSocket: TSocket;
+    lpOutputBuffer: Pointer; dwReceiveDataLength: DWORD;
+    dwLocalAddressLength, dwRemoteAddressLength: DWORD;
+    lpdwBytesReceived: PDWORD; lpOverlapped: PWSAOverlapped): BOOL; stdcall;
+
+  TGetAcceptExSockaddrsFunc = procedure(lpOutputBuffer: Pointer;
+    dwReceiveDataLength: DWORD;
+    dwLocalAddressLength, dwRemoteAddressLength: DWORD;
+    var LocalSockaddr: PSockAddr; var LocalSockaddrLength: Integer;
+    var RemoteSockaddr: PSockAddr; var RemoteSockaddrLength: Integer); stdcall;
+
+  // #106: DisconnectEx for async socket recycling
+  TDisconnectExFunc = function(ASocket: TSocket; AOverlapped: POverlapped;
+    AFlags: DWORD; AReserved: DWORD): BOOL; stdcall;
 
 // ---------------------------------------------------------------------------
 // IOCP context types
@@ -107,9 +137,12 @@ function _WsaListen(s: TSocket; backlog: Integer): Integer; stdcall;
 const
   CRecvBufSize = 32768;
   CIocpBatchSize = 64;    // #104: max completions per GetQueuedCompletionStatusEx call
+  CAcceptPoolSize = 16;   // #105: pre-posted AcceptEx operations
+  CAddrBufSize = (SizeOf(TSockAddrIn) + 16) * 2;
+  CTF_REUSE_SOCKET = $02; // #106: for async DisconnectEx
 
 type
-  TIocpAction = (iaRecv, iaSend, iaSendV);
+  TIocpAction = (iaRecv, iaSend, iaSendV, iaAccept, iaDisconnect);
 
   PRecvCtx = ^TRecvCtx;
   TRecvCtx = record
@@ -128,6 +161,7 @@ type
     WsaBuf: TWsaBuf;
     SendBuf: TBytes;
     ActualLen: Integer;             // P-4: bytes to send; 0 = use Length(SendBuf)
+    SentBytes: Integer;             // #105: partial send tracking
   end;
 
   // #61: Vectored send context — 2 WSABUFs for headers + body
@@ -139,6 +173,23 @@ type
     WsaBufs: array[0..1] of TWsaBuf;
     HeaderBuf: TBytes;
     BodyBuf: TBytes;
+  end;
+
+  // #105: AcceptEx context
+  PAcceptCtx = ^TAcceptCtx;
+  TAcceptCtx = record
+    Ovl: TOverlapped;               // MUST be first
+    Action: TIocpAction;
+    AcceptSocket: TSocket;
+    AddrBuf: array[0..CAddrBufSize - 1] of Byte;
+  end;
+
+  // #106: Async DisconnectEx context
+  PDisconnectCtx = ^TDisconnectCtx;
+  TDisconnectCtx = record
+    Ovl: TOverlapped;               // MUST be first
+    Action: TIocpAction;
+    Socket: TSocket;
   end;
 
   PIocpHdr = ^TIocpHdr;
@@ -157,11 +208,86 @@ begin
   inherited Create;
   FIocp := 0;
   FListenSocket := INVALID_SOCKET;
+  FShutdown := False;
+  FAcceptEx := nil;
+  FGetAcceptExSockaddrs := nil;
+  FDisconnectEx := nil;
 end;
 
 destructor TIOCPBackend.Destroy;
+var
+  I: Integer;
 begin
+  for I := 0 to High(FAcceptCtxs) do
+    if FAcceptCtxs[I] <> nil then
+    begin
+      if PAcceptCtx(FAcceptCtxs[I])^.AcceptSocket <> INVALID_SOCKET then
+        closesocket(PAcceptCtx(FAcceptCtxs[I])^.AcceptSocket);
+      Dispose(PAcceptCtx(FAcceptCtxs[I]));
+    end;
   inherited Destroy;
+end;
+
+// #105: Load AcceptEx + GetAcceptExSockaddrs + DisconnectEx via WSAIoctl
+procedure TIOCPBackend._LoadExtensions;
+var
+  LBytes: DWORD;
+  LGuid: TGUID;
+begin
+  LBytes := 0;
+  LGuid := WSAID_ACCEPTEX;
+  WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+    @LGuid, SizeOf(LGuid), @FAcceptEx, SizeOf(FAcceptEx), @LBytes, nil, nil);
+
+  LGuid := WSAID_GETACCEPTEXSOCKADDRS;
+  WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+    @LGuid, SizeOf(LGuid), @FGetAcceptExSockaddrs, SizeOf(FGetAcceptExSockaddrs),
+    @LBytes, nil, nil);
+
+  LGuid := StringToGUID('{7FDA2E11-8630-436F-A031-F536A6EEC157}');
+  WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+    @LGuid, SizeOf(LGuid), @FDisconnectEx, SizeOf(FDisconnectEx),
+    @LBytes, nil, nil);
+end;
+
+// #105: Post one AcceptEx operation — creates accept socket + posts to IOCP
+procedure TIOCPBackend._PostOneAccept(AIdx: Integer);
+var
+  LCtx: PAcceptCtx;
+  LAcceptSocket: TSocket;
+  LBytes: DWORD;
+begin
+  // Try to get a recycled socket first, otherwise create new
+  LAcceptSocket := TSocketPool.Acquire;
+  if LAcceptSocket = INVALID_SOCKET then
+    LAcceptSocket := WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nil, 0,
+      WSA_FLAG_OVERLAPPED);
+  if LAcceptSocket = INVALID_SOCKET then Exit;
+
+  if FAcceptCtxs[AIdx] = nil then
+  begin
+    New(LCtx);
+    FAcceptCtxs[AIdx] := LCtx;
+  end
+  else
+    LCtx := PAcceptCtx(FAcceptCtxs[AIdx]);
+
+  FillChar(LCtx^, SizeOf(TAcceptCtx), 0);
+  LCtx^.Action := iaAccept;
+  LCtx^.AcceptSocket := LAcceptSocket;
+  LBytes := 0;
+
+  if not TAcceptExFunc(FAcceptEx)(FListenSocket, LAcceptSocket,
+    @LCtx^.AddrBuf[0], 0,
+    SizeOf(TSockAddrIn) + 16, SizeOf(TSockAddrIn) + 16,
+    @LBytes, PWSAOverlapped(@LCtx^.Ovl)) then
+  begin
+    if WSAGetLastError <> WSA_IO_PENDING then
+    begin
+      closesocket(LAcceptSocket);
+      LCtx^.AcceptSocket := INVALID_SOCKET;
+    end;
+  end;
 end;
 
 procedure TIOCPBackend.StartListening(const AHost: string; APort: Integer;
@@ -209,6 +335,13 @@ begin
   // #77: load DisconnectEx from the listen socket for socket recycling
   TSocketPool.LoadDisconnectEx(FListenSocket);
 
+  // #105: load AcceptEx + GetAcceptExSockaddrs + DisconnectEx
+  _LoadExtensions;
+
+  // Associate listen socket with IOCP for AcceptEx completions
+  if _IocpCreate(THandle(FListenSocket), FIocp, 0, 0) = 0 then
+    raise Exception.Create('IOCP associate listen socket failed');
+
   SetLength(FWorkers, AWorkerCount);
   for I := 0 to AWorkerCount - 1 do
     FWorkers[I] := TThread.CreateAnonymousThread(procedure begin _WorkerLoop; end);
@@ -218,20 +351,24 @@ begin
     FWorkers[I].Start;
   end;
 
-  FAcceptThread := TThread.CreateAnonymousThread(procedure begin _Accept; end);
-  FAcceptThread.FreeOnTerminate := False;
-  FAcceptThread.Start;
+  // #105: Pre-post AcceptEx operations (replaces synchronous accept thread)
+  if FAcceptEx <> nil then
+  begin
+    SetLength(FAcceptCtxs, CAcceptPoolSize);
+    for I := 0 to CAcceptPoolSize - 1 do
+    begin
+      FAcceptCtxs[I] := nil;
+      _PostOneAccept(I);
+    end;
+  end;
 end;
 
 procedure TIOCPBackend.StopAccept;
 begin
+  // Closing listen socket cancels all pending AcceptEx operations
+  FShutdown := True;
   closesocket(FListenSocket);
   FListenSocket := INVALID_SOCKET;
-  if FAcceptThread <> nil then
-  begin
-    FAcceptThread.WaitFor;
-    FreeAndNil(FAcceptThread);
-  end;
 end;
 
 procedure TIOCPBackend.ShutdownConn(AConn: Pointer);
@@ -245,6 +382,7 @@ procedure TIOCPBackend.SignalWorkers;
 var
   I: Integer;
 begin
+  FShutdown := True;
   for I := 0 to High(FWorkers) do
     _IocpPost(FIocp, 0, 0, nil);
 end;
@@ -347,7 +485,8 @@ begin
   LCtx^.Action     := iaSend;
   LCtx^.Conn       := AConn;
   LCtx^.SendBuf    := AData;
-  LCtx^.ActualLen  := AActualLen;
+  LCtx^.ActualLen  := LSendLen;
+  LCtx^.SentBytes  := 0;
   LCtx^.WsaBuf.len := ULONG(LSendLen);
   LCtx^.WsaBuf.buf := @LCtx^.SendBuf[0];
   LBytes := 0;
@@ -359,10 +498,31 @@ begin
   if LRes = 0 then
   begin
     // #100: sync completion — handle inline
-    TBufferPool.Release(LCtx^.SendBuf);
-    Dispose(LCtx);
-    FCallbacks.OnSendComplete(LConn);
-    LConn.Release;
+    // #105: check for partial send
+    if Integer(LBytes) < LSendLen then
+    begin
+      LCtx^.SentBytes := Integer(LBytes);
+      LCtx^.WsaBuf.buf := @LCtx^.SendBuf[LBytes];
+      LCtx^.WsaBuf.len := ULONG(LSendLen - Integer(LBytes));
+      FillChar(LCtx^.Ovl, SizeOf(TOverlapped), 0);
+      LRes := WSASend(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, 0,
+        PWSAOverlapped(@LCtx^.Ovl), nil);
+      if (LRes <> 0) and (WSAGetLastError <> WSA_IO_PENDING) then
+      begin
+        LConn.Release;
+        TBufferPool.Release(LCtx^.SendBuf);
+        Dispose(LCtx);
+        FCallbacks.OnConnError(AConn);
+      end;
+      // else: will complete via IOCP or next sync check
+    end
+    else
+    begin
+      TBufferPool.Release(LCtx^.SendBuf);
+      Dispose(LCtx);
+      FCallbacks.OnSendComplete(LConn);
+      LConn.Release;
+    end;
   end
   else if WSAGetLastError <> WSA_IO_PENDING then
   begin
@@ -445,49 +605,32 @@ end;
 procedure TIOCPBackend.SocketClose(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
+  LCtx: PDisconnectCtx;
 begin
   // R-6: TCP half-close — FIN before RST so the client receives the last bytes
   shutdown(LConn.Socket, SD_SEND);
-  // #77: try to recycle via DisconnectEx + TF_REUSE_SOCKET instead of closesocket
-  if not TSocketPool.Recycle(LConn.Socket) then
-    closesocket(LConn.Socket);
-end;
 
-// ---------------------------------------------------------------------------
-// Accept thread
-// ---------------------------------------------------------------------------
-
-procedure TIOCPBackend._Accept;
-var
-  LClient: TSocket;
-  LAddr: TSockAddrIn;
-  LAddrLen: Integer;
-  LRemoteIP: AnsiString;
-  LOne: Integer;
-begin
-  while True do
+  // #106: async DisconnectEx — non-blocking socket recycling via IOCP
+  if FDisconnectEx <> nil then
   begin
-    FillChar(LAddr, SizeOf(LAddr), 0);
-    LAddrLen := SizeOf(LAddr);
-    LClient := _WsaAccept(FListenSocket, @LAddr, @LAddrLen);
-    if LClient = INVALID_SOCKET then Break;
+    New(LCtx);
+    FillChar(LCtx^, SizeOf(TDisconnectCtx), 0);
+    LCtx^.Action := iaDisconnect;
+    LCtx^.Socket := LConn.Socket;
 
-    LOne := 1;
-    setsockopt(LClient, IPPROTO_TCP, TCP_NODELAY,
-      PAnsiChar(@LOne), SizeOf(LOne));
-    setsockopt(LClient, SOL_SOCKET, SO_KEEPALIVE,
-      PAnsiChar(@LOne), SizeOf(LOne));
-
-    LRemoteIP := inet_ntoa(LAddr.sin_addr);
-    try
-      FCallbacks.OnNewConn(NativeUInt(LClient),
-        string(LRemoteIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
-    except
-      // #77: try to recycle failed socket instead of closing
-      if not TSocketPool.Recycle(LClient) then
-        closesocket(LClient);
-    end;
+    if not TDisconnectExFunc(FDisconnectEx)(LConn.Socket,
+      POverlapped(@LCtx^.Ovl), CTF_REUSE_SOCKET, 0) then
+    begin
+      if WSAGetLastError = WSA_IO_PENDING then
+        Exit;  // will complete via IOCP
+      // DisconnectEx failed — fall through to closesocket
+      Dispose(LCtx);
+    end
+    else
+      Exit;  // completed synchronously — will get IOCP completion
   end;
+
+  closesocket(LConn.Socket);
 end;
 
 // ---------------------------------------------------------------------------
@@ -503,6 +646,15 @@ var
   LBytes: DWORD;
   LHdr: PIocpHdr;
   LConn: TNativeConn;
+  LAcceptCtx: PAcceptCtx;
+  LDisCtx: PDisconnectCtx;
+  LSendCtx: PSendCtx;
+  LLocalAddr, LRemoteAddr: PSockAddr;
+  LLocalLen, LRemoteLen: Integer;
+  LRemoteIP: AnsiString;
+  LOne: Integer;
+  LAcceptIdx: Integer;
+  LRes: Integer;
 begin
   while True do
   begin
@@ -517,13 +669,86 @@ begin
       LBytes := LEntries[I].dwNumberOfBytesTransferred;
 
       if LOvl = nil then
-      begin
-        // Shutdown signal
-        Exit;
-      end;
+        Exit;  // Shutdown signal
 
       try
         LHdr := PIocpHdr(LOvl);
+
+        // #105: AcceptEx completion — dispatch before accessing Conn
+        if LHdr^.Action = iaAccept then
+        begin
+          LAcceptCtx := PAcceptCtx(LOvl);
+
+          if FShutdown or (LAcceptCtx^.AcceptSocket = INVALID_SOCKET) then
+          begin
+            if LAcceptCtx^.AcceptSocket <> INVALID_SOCKET then
+              closesocket(LAcceptCtx^.AcceptSocket);
+            LAcceptCtx^.AcceptSocket := INVALID_SOCKET;
+            Continue;
+          end;
+
+          // Update accept socket context to inherit listen socket properties
+          setsockopt(LAcceptCtx^.AcceptSocket, SOL_SOCKET,
+            $700B {SO_UPDATE_ACCEPT_CONTEXT},
+            PAnsiChar(@FListenSocket), SizeOf(FListenSocket));
+
+          LOne := 1;
+          setsockopt(LAcceptCtx^.AcceptSocket, IPPROTO_TCP, TCP_NODELAY,
+            PAnsiChar(@LOne), SizeOf(LOne));
+          setsockopt(LAcceptCtx^.AcceptSocket, SOL_SOCKET, SO_KEEPALIVE,
+            PAnsiChar(@LOne), SizeOf(LOne));
+
+          // Extract remote address
+          LLocalAddr := nil;
+          LRemoteAddr := nil;
+          LLocalLen := 0;
+          LRemoteLen := 0;
+          if FGetAcceptExSockaddrs <> nil then
+          begin
+            TGetAcceptExSockaddrsFunc(FGetAcceptExSockaddrs)(
+              @LAcceptCtx^.AddrBuf[0], 0,
+              SizeOf(TSockAddrIn) + 16, SizeOf(TSockAddrIn) + 16,
+              LLocalAddr, LLocalLen, LRemoteAddr, LRemoteLen);
+          end;
+
+          if (LRemoteAddr <> nil) and (LRemoteLen >= SizeOf(TSockAddrIn)) then
+            LRemoteIP := inet_ntoa(PSockAddrIn(LRemoteAddr)^.sin_addr)
+          else
+            LRemoteIP := '0.0.0.0';
+
+          try
+            FCallbacks.OnNewConn(NativeUInt(LAcceptCtx^.AcceptSocket),
+              string(LRemoteIP) + ':' +
+              IntToStr(ntohs(PSockAddrIn(LRemoteAddr)^.sin_port)));
+          except
+            closesocket(LAcceptCtx^.AcceptSocket);
+          end;
+
+          // Find this ctx's index and repost AcceptEx
+          for LAcceptIdx := 0 to High(FAcceptCtxs) do
+            if FAcceptCtxs[LAcceptIdx] = Pointer(LAcceptCtx) then
+            begin
+              _PostOneAccept(LAcceptIdx);
+              Break;
+            end;
+
+          Continue;
+        end;
+
+        // #106: Async DisconnectEx completion — recycle socket into pool
+        if LHdr^.Action = iaDisconnect then
+        begin
+          LDisCtx := PDisconnectCtx(LOvl);
+          if LDisCtx^.Socket <> INVALID_SOCKET then
+          begin
+            // Add directly to socket pool (already disconnected)
+            if not TSocketPool.AddRecycled(LDisCtx^.Socket) then
+              closesocket(LDisCtx^.Socket);
+          end;
+          Dispose(LDisCtx);
+          Continue;
+        end;
+
         LConn := TNativeConn(LHdr^.Conn);
 
         if LBytes = 0 then
@@ -556,10 +781,37 @@ begin
           end;
           iaSend:
           begin
-            TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
-            Dispose(PSendCtx(LOvl));
-            FCallbacks.OnSendComplete(LConn);
-            LConn.Release;
+            // #105: partial send tracking
+            LSendCtx := PSendCtx(LOvl);
+            Inc(LSendCtx^.SentBytes, Integer(LBytes));
+            if LSendCtx^.SentBytes < LSendCtx^.ActualLen then
+            begin
+              // Partial send — resubmit for remaining bytes
+              LSendCtx^.WsaBuf.buf := @LSendCtx^.SendBuf[LSendCtx^.SentBytes];
+              LSendCtx^.WsaBuf.len := ULONG(LSendCtx^.ActualLen - LSendCtx^.SentBytes);
+              FillChar(LSendCtx^.Ovl, SizeOf(TOverlapped), 0);
+              LRes := WSASend(LConn.Socket, @LSendCtx^.WsaBuf, 1, LBytes, 0,
+                PWSAOverlapped(@LSendCtx^.Ovl), nil);
+              if LRes = 0 then
+              begin
+                // Sync completion of remainder — will come back as IOCP completion
+                // (unless FILE_SKIP_COMPLETION_PORT_ON_SUCCESS, handled next iteration)
+              end
+              else if WSAGetLastError <> WSA_IO_PENDING then
+              begin
+                TBufferPool.Release(LSendCtx^.SendBuf);
+                Dispose(LSendCtx);
+                FCallbacks.OnConnError(LConn);
+                LConn.Release;
+              end;
+            end
+            else
+            begin
+              TBufferPool.Release(LSendCtx^.SendBuf);
+              Dispose(LSendCtx);
+              FCallbacks.OnSendComplete(LConn);
+              LConn.Release;
+            end;
           end;
           iaSendV:
           begin
