@@ -829,6 +829,8 @@ var
   LHLen: Integer;
   LBLen: Integer;
   LConcat: TBytes;
+  LTmpH: TBytes;
+  LTmpB: TBytes;
 begin
   LHLen := AHdrLen;
   if LHLen = 0 then LHLen := Length(AHeaders);
@@ -844,6 +846,9 @@ begin
   LConcat := TBufferPool.Acquire(LHLen + LBLen);
   if LHLen > 0 then Move(AHeaders[0], LConcat[0], LHLen);
   if LBLen > 0 then Move(ABody[0], LConcat[LHLen], LBLen);
+
+  LTmpH := AHeaders; TBufferPool.Release(LTmpH);
+  LTmpB := ABody;    TBufferPool.Release(LTmpB);
 
   PostSend(AConn, LConcat, LHLen + LBLen);
 end;
