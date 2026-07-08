@@ -162,6 +162,8 @@ const
   // RequestContext encoding: low bit = action, rest = context index/pointer
   CTagRecv = UInt64(0);
   CTagSend = UInt64(1);
+  CRioMsgDefer = $02;
+  CRioCorruptCQ = ULONG($FFFFFFFF);
 
 type
   // RIO function types
@@ -186,9 +188,33 @@ type
     Conn: TNativeConn;
     SendBuf: TBytes;
     SlotIdx: Integer;
-    BufId: TRIO_BUFFERID;   // only used when SlotIdx = -1
+    BufId: TRIO_BUFFERID;
     ActualLen: Integer;
+    BodyBuf: TBytes;
+    SlotIdx2: Integer;
+    BufId2: TRIO_BUFFERID;
+    Remaining: Integer;
   end;
+
+function VirtualAllocExNuma(hProcess: THandle; lpAddress: Pointer;
+  dwSize: NativeUInt; flAllocationType, flProtect, nndPreferred: DWORD): Pointer; stdcall;
+  external 'kernel32.dll';
+function GetCurrentProcessorNumber: DWORD; stdcall;
+  external 'kernel32.dll';
+function GetNumaProcessorNode(Processor: Byte; var NodeNumber: Byte): BOOL; stdcall;
+  external 'kernel32.dll';
+
+function _GetNumaNode: DWORD;
+var
+  LProc: DWORD;
+  LNode: Byte;
+begin
+  Result := 0;
+  LProc := GetCurrentProcessorNumber;
+  if LProc > 255 then Exit;
+  if GetNumaProcessorNode(Byte(LProc), LNode) then
+    Result := LNode;
+end;
 
 function _WsaBind(s: TSocket; addr: PSockAddrIn; addrlen: Integer): Integer; stdcall;
   external 'ws2_32.dll' name 'bind';
@@ -204,6 +230,7 @@ function _WsaAccept(s: TSocket; addr: PSockAddrIn; addrlen: PInteger): TSocket; 
 constructor TRIOBackend.Create;
 var
   I: Integer;
+  LNumaNode: DWORD;
 begin
   inherited Create;
   FListenSocket := INVALID_SOCKET;
@@ -217,10 +244,12 @@ begin
   FSendPoolBufId := nil;
   _LoadRIO;
 
-  FRecvPool := VirtualAlloc(nil, CRecvPoolBytes, MEM_COMMIT or MEM_RESERVE,
-    PAGE_READWRITE);
+  LNumaNode := _GetNumaNode;
+
+  FRecvPool := VirtualAllocExNuma(GetCurrentProcess, nil, CRecvPoolBytes,
+    MEM_COMMIT or MEM_RESERVE, PAGE_READWRITE, LNumaNode);
   if FRecvPool = nil then
-    raise Exception.Create('VirtualAlloc for RIO recv pool failed');
+    raise Exception.Create('VirtualAllocExNuma for RIO recv pool failed');
 
   FRecvPoolBufId := TFnRegBuf(FRio.RIORegisterBuffer)(PAnsiChar(FRecvPool),
     CRecvPoolBytes);
@@ -232,10 +261,10 @@ begin
   for I := 0 to CRecvPoolSize - 1 do
     FRecvFreeStack[I] := I;
 
-  FSendPool := VirtualAlloc(nil, CSendPoolBytes, MEM_COMMIT or MEM_RESERVE,
-    PAGE_READWRITE);
+  FSendPool := VirtualAllocExNuma(GetCurrentProcess, nil, CSendPoolBytes,
+    MEM_COMMIT or MEM_RESERVE, PAGE_READWRITE, LNumaNode);
   if FSendPool = nil then
-    raise Exception.Create('VirtualAlloc for RIO send pool failed');
+    raise Exception.Create('VirtualAllocExNuma for RIO send pool failed');
 
   FSendPoolBufId := TFnRegBuf(FRio.RIORegisterBuffer)(PAnsiChar(FSendPool),
     CSendPoolBytes);
@@ -596,6 +625,10 @@ begin
   LSendCtx^.Conn := LConn;
   LSendCtx^.SendBuf := AData;
   LSendCtx^.ActualLen := LSendLen;
+  LSendCtx^.BodyBuf := nil;
+  LSendCtx^.SlotIdx2 := -2;
+  LSendCtx^.BufId2 := nil;
+  LSendCtx^.Remaining := 1;
 
   LSlotIdx := -1;
   if LSendLen <= CSendBufSize then
@@ -649,7 +682,15 @@ procedure TRIOBackend.PostSendV(AConn: Pointer;
   const AHeaders: TBytes; AHdrLen: Integer;
   const ABody: TBytes; ABodyLen: Integer);
 var
-  LHLen, LBLen: Integer;
+  LConn: TNativeConn absolute AConn;
+  LHLen: Integer;
+  LBLen: Integer;
+  LSendCtx: PRIOSendCtx;
+  LBufH: TRIO_BUF;
+  LBufB: TRIO_BUF;
+  LReqCtx: UInt64;
+  LSlotH: Integer;
+  LSlotB: Integer;
   LConcat: TBytes;
 begin
   LHLen := AHdrLen;
@@ -663,12 +704,90 @@ begin
     Exit;
   end;
 
-  // RIO doesn't support scatter-gather — concatenate into pool buffer
-  LConcat := TBufferPool.Acquire(LHLen + LBLen);
-  if LHLen > 0 then Move(AHeaders[0], LConcat[0], LHLen);
-  if LBLen > 0 then Move(ABody[0], LConcat[LHLen], LBLen);
+  // Single buffer — delegate to PostSend
+  if LHLen = 0 then
+  begin
+    PostSend(AConn, ABody, LBLen);
+    Exit;
+  end;
+  if LBLen = 0 then
+  begin
+    PostSend(AConn, AHeaders, LHLen);
+    Exit;
+  end;
 
-  PostSend(AConn, LConcat, LHLen + LBLen);
+  // Both parts present — try two-slot approach with RIO_MSG_DEFER
+  LSlotH := -1;
+  LSlotB := -1;
+  if LHLen <= CSendBufSize then
+    LSlotH := _SendPoolAcquire;
+  if (LSlotH >= 0) and (LBLen <= CSendBufSize) then
+    LSlotB := _SendPoolAcquire;
+
+  if (LSlotH < 0) or (LSlotB < 0) then
+  begin
+    // Fallback: concatenate into single buffer
+    if LSlotH >= 0 then _SendPoolRelease(LSlotH);
+    LConcat := TBufferPool.Acquire(LHLen + LBLen);
+    Move(AHeaders[0], LConcat[0], LHLen);
+    Move(ABody[0], LConcat[LHLen], LBLen);
+    PostSend(AConn, LConcat, LHLen + LBLen);
+    Exit;
+  end;
+
+  // Two-send with RIO_MSG_DEFER — avoids concatenation memcpy
+  New(LSendCtx);
+  LSendCtx^.Conn := LConn;
+  LSendCtx^.SendBuf := AHeaders;
+  LSendCtx^.BodyBuf := ABody;
+  LSendCtx^.SlotIdx := LSlotH;
+  LSendCtx^.SlotIdx2 := LSlotB;
+  LSendCtx^.BufId := nil;
+  LSendCtx^.BufId2 := nil;
+  LSendCtx^.ActualLen := LHLen + LBLen;
+  LSendCtx^.Remaining := 2;
+
+  Move(AHeaders[0], _SendSlotPtr(LSlotH)^, LHLen);
+  Move(ABody[0], _SendSlotPtr(LSlotB)^, LBLen);
+
+  LBufH.BufferId := FSendPoolBufId;
+  LBufH.Offset := ULONG(LSlotH) * CSendBufSize;
+  LBufH.Length := ULONG(LHLen);
+
+  LBufB.BufferId := FSendPoolBufId;
+  LBufB.Offset := ULONG(LSlotB) * CSendBufSize;
+  LBufB.Length := ULONG(LBLen);
+
+  LReqCtx := (UInt64(LSendCtx) and $FFFFFFFFFFFFFFFE) or CTagSend;
+  LConn.AddRef;
+  LConn.AddRef;
+
+  if not TFnSend(FRio.RIOSend)(LConn.RioRQ, @LBufH, 1, CRioMsgDefer,
+    Pointer(LReqCtx)) then
+  begin
+    LConn.Release;
+    LConn.Release;
+    _SendPoolRelease(LSlotH);
+    _SendPoolRelease(LSlotB);
+    TBufferPool.Release(LSendCtx^.SendBuf);
+    TBufferPool.Release(LSendCtx^.BodyBuf);
+    Dispose(LSendCtx);
+    FCallbacks.OnConnError(AConn);
+    Exit;
+  end;
+
+  if not TFnSend(FRio.RIOSend)(LConn.RioRQ, @LBufB, 1, 0,
+    Pointer(LReqCtx)) then
+  begin
+    LConn.Release;
+    LConn.Release;
+    _SendPoolRelease(LSlotH);
+    _SendPoolRelease(LSlotB);
+    TBufferPool.Release(LSendCtx^.SendBuf);
+    TBufferPool.Release(LSendCtx^.BodyBuf);
+    Dispose(LSendCtx);
+    FCallbacks.OnConnError(AConn);
+  end;
 end;
 
 procedure TRIOBackend.SocketClose(AConn: Pointer);
@@ -733,6 +852,7 @@ var
   LBytesXfer: DWORD;
   LCompKey: NativeUInt;
   LOverlapped: POverlapped;
+  LHadError: Boolean;
 begin
   while not FShutdown do
   begin
@@ -750,7 +870,13 @@ begin
       LCount := TFnDequeue(FRio.RIODequeueCompletion)(
         FCQs[ACQIdx], @LResults[0], 256);
 
-      if (LCount = $FFFFFFFF) or (LCount = 0) then Break;
+      if LCount = CRioCorruptCQ then
+      begin
+        Writeln(ErrOutput, '[rio] FATAL: CQ corruption on worker ', ACQIdx);
+        FShutdown := True;
+        Break;
+      end;
+      if LCount = 0 then Break;
 
       for I := 0 to Integer(LCount) - 1 do
       begin
@@ -781,25 +907,41 @@ begin
             // SEND completion
             LSendCtx := PRIOSendCtx(Pointer(LReqCtx and $FFFFFFFFFFFFFFFE));
 
-            // Release send pool slot or deregister per-op buffer
-            if LSendCtx^.SlotIdx >= 0 then
-              _SendPoolRelease(LSendCtx^.SlotIdx)
-            else if LSendCtx^.BufId <> CRIOInvalidBufId then
-              TFnDeregBuf(FRio.RIODeregisterBuffer)(LSendCtx^.BufId);
+            Dec(LSendCtx^.Remaining);
 
             if LResults[I].Status <> 0 then
+              LSendCtx^.ActualLen := -1;
+
+            if LSendCtx^.Remaining > 0 then
             begin
-              TBufferPool.Release(LSendCtx^.SendBuf);
-              Dispose(LSendCtx);
-              FCallbacks.OnConnError(LConn);
+              // More completions expected — just release conn ref
+              LConn.Release;
             end
             else
             begin
+              // Last completion — full cleanup
+              if LSendCtx^.SlotIdx >= 0 then
+                _SendPoolRelease(LSendCtx^.SlotIdx);
+              if LSendCtx^.SlotIdx2 >= 0 then
+                _SendPoolRelease(LSendCtx^.SlotIdx2);
+              if (LSendCtx^.BufId <> nil) and (LSendCtx^.BufId <> CRIOInvalidBufId) then
+                TFnDeregBuf(FRio.RIODeregisterBuffer)(LSendCtx^.BufId);
+              if (LSendCtx^.BufId2 <> nil) and (LSendCtx^.BufId2 <> CRIOInvalidBufId) then
+                TFnDeregBuf(FRio.RIODeregisterBuffer)(LSendCtx^.BufId2);
+
               TBufferPool.Release(LSendCtx^.SendBuf);
+              if LSendCtx^.BodyBuf <> nil then
+                TBufferPool.Release(LSendCtx^.BodyBuf);
+
+              LHadError := LSendCtx^.ActualLen = -1;
               Dispose(LSendCtx);
-              FCallbacks.OnSendComplete(LConn);
+
+              if LHadError then
+                FCallbacks.OnConnError(LConn)
+              else
+                FCallbacks.OnSendComplete(LConn);
+              LConn.Release;
             end;
-            LConn.Release;
           end;
         except
           on E: Exception do

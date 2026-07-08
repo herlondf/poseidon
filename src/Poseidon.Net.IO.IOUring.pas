@@ -82,6 +82,7 @@ type
     FRegFreeStack: array of Integer;
     FRegFreeTop: Integer;
     FRegLock: TCriticalSection;
+    FSendZC: Boolean;
     function _RegFileIndex(AFd: Integer): Integer;
     function _RegisterFd(AFd: Integer): Integer;
     procedure _UnregisterFd(AFd: Integer);
@@ -166,6 +167,17 @@ const
   CUdTagSend = UInt64(1);
   CUdTagAccept = UInt64(2);
   CUdShutdown = UInt64($FFFFFFFFFFFFFFFF);
+
+  // Zero-copy send (kernel 6.0+)
+  IORING_OP_SEND_ZC = Byte(53);
+  IORING_CQE_F_NOTIF = UInt32(1 shl 2);
+  CUdTagSendZC = UInt64(3);
+
+  // Provided buffer rings (kernel 5.19+) / multishot recv (kernel 6.0+)
+  IORING_REGISTER_PBUF_RING = UInt32(22);
+  IOSQE_BUFFER_SELECT = Byte(1 shl 3);
+  IORING_CQE_F_BUFFER = UInt32(1 shl 0);
+  IORING_RECV_MULTISHOT = UInt16(2);
 
   CRecvBufSize = 32768;
   CRingEntries = 512;
@@ -289,6 +301,16 @@ type
     Buf:  array[0..CRecvBufSize - 1] of Byte;
   end;
 
+  // Zero-copy send context: holds buffer ref until kernel notification CQE.
+  // Two CQEs per SEND_ZC: result (app can proceed) + notification (buffer safe to free).
+  PSendZCRef = ^TSendZCRef;
+  TSendZCRef = record
+    Conn: TNativeConn;
+    SendBuf: TBytes;
+    TotalLen: Integer;
+    SentBytes: Integer;
+  end;
+
 // ---------------------------------------------------------------------------
 // Syscall wrappers
 // ---------------------------------------------------------------------------
@@ -393,6 +415,10 @@ begin
   finally
     _LinuxClose(LFd);
   end;
+
+  // Detect SEND_ZC support (kernel 6.0+)
+  FSendZC := (LProbe.last_op >= IORING_OP_SEND_ZC) and
+    ((LProbe.ops[IORING_OP_SEND_ZC].flags and IO_URING_OP_SUPPORTED) <> 0);
 
   FRingFd := -1;
   FSQLock := TCriticalSection.Create;
@@ -719,6 +745,7 @@ procedure TIOUringBackend.PostSend(AConn: Pointer; const AData: TBytes;
 var
   LConn: TNativeConn absolute AConn;
   LSendLen: Integer;
+  LZCRef: PSendZCRef;
 begin
   LSendLen := AActualLen;
   if LSendLen = 0 then LSendLen := Length(AData);
@@ -729,10 +756,43 @@ begin
     Exit;
   end;
 
-  LConn.PendingSend := AData;
-  LConn.PendingSendActual := AActualLen;
-  LConn.SentBytes := 0;
-  _ResubmitSend(LConn);
+  if FSendZC then
+  begin
+    // Zero-copy send: kernel DMAs directly from user buffer.
+    // Two CQEs per op: result (proceed) + notification (buffer safe to free).
+    New(LZCRef);
+    LZCRef^.Conn := LConn;
+    LZCRef^.SendBuf := AData;
+    LZCRef^.TotalLen := LSendLen;
+    LZCRef^.SentBytes := 0;
+
+    LConn.AddRef;  // result CQE
+    LConn.AddRef;  // notification CQE
+    FSQLock.Acquire;
+    try
+      if not _SubmitSQE(IORING_OP_SEND_ZC, LConn.Socket,
+        @AData[0], UInt32(LSendLen),
+        UInt64(LZCRef) or CUdTagSendZC) then
+      begin
+        LConn.Release;
+        LConn.Release;
+        TBufferPool.Release(LZCRef^.SendBuf);
+        Dispose(LZCRef);
+        FCallbacks.OnConnError(AConn);
+        Exit;
+      end;
+      _NotifyKernel;
+    finally
+      FSQLock.Release;
+    end;
+  end
+  else
+  begin
+    LConn.PendingSend := AData;
+    LConn.PendingSendActual := AActualLen;
+    LConn.SentBytes := 0;
+    _ResubmitSend(LConn);
+  end;
 end;
 
 // io_uring SEND doesn't support scatter-gather on sockets,
@@ -1052,10 +1112,56 @@ var
   LAddr: sockaddr_in;
   LAddrLen: Cardinal;
   LIP: AnsiString;
+  LZCRef: PSendZCRef;
 begin
   if AUserData = CUdShutdown then
   begin
     FShutdown := True;
+    Exit;
+  end;
+
+  // Zero-copy send (CUdTagSendZC = 3, both bits 0+1 set) — must check before accept/send
+  if (AUserData and 3) = CUdTagSendZC then
+  begin
+    LZCRef := PSendZCRef(Pointer(AUserData and not UInt64(3)));
+    LConn := LZCRef^.Conn;
+
+    if (AFlags and IORING_CQE_F_NOTIF) <> 0 then
+    begin
+      // Buffer release notification — kernel no longer needs the buffer
+      if LZCRef^.SendBuf <> nil then
+        TBufferPool.Release(LZCRef^.SendBuf);
+      Dispose(LZCRef);
+      LConn.Release;
+      Exit;
+    end;
+
+    // Send result CQE
+    if ARes <= 0 then
+    begin
+      // Error — notification CQE will free buffer and release ref
+      FCallbacks.OnConnError(LConn);
+      LConn.Release;
+      Exit;
+    end;
+
+    Inc(LZCRef^.SentBytes, ARes);
+    if LZCRef^.SentBytes < LZCRef^.TotalLen then
+    begin
+      // Partial send — fall back to regular IORING_OP_SEND for remainder
+      LConn.PendingSend := LZCRef^.SendBuf;
+      LConn.PendingSendActual := LZCRef^.TotalLen;
+      LConn.SentBytes := LZCRef^.SentBytes;
+      LZCRef^.SendBuf := nil;  // transfer ownership; notification will see nil
+      _ResubmitSend(LConn);
+      LConn.Release;
+    end
+    else
+    begin
+      // All bytes sent — buffer stays alive for notification CQE
+      FCallbacks.OnSendComplete(LConn);
+      LConn.Release;
+    end;
     Exit;
   end;
 
@@ -1164,7 +1270,11 @@ begin
     LHead := FPCQHead^;
     LTail := FPCQTail^;
 
-    // Batch CQ head update — process all CQEs, then advance head once
+    // Batch CQ head update — process all CQEs, then advance head once.
+    // FEAT_NODROP: when available, kernel applies backpressure instead of
+    // dropping CQEs.  This drain loop processes the entire batch before
+    // advancing CQ head, which is optimal — the kernel sees a single
+    // head update covering all consumed entries.
     while LHead <> LTail do
     begin
       LCQE := PIOUringCQE(PByte(FPCQEs) +

@@ -34,6 +34,7 @@ type
     procedure _LoadExtensions;
     procedure _PostOneAccept(AIdx: Integer);
     procedure _WorkerLoop;
+    procedure _OnRecvReady(AConn: Pointer);
   public
     constructor Create;
     destructor Destroy; override;
@@ -130,14 +131,24 @@ type
 const
   CTCP_FASTOPEN = 15;
   CSO_UPDATE_ACCEPT_CONTEXT = $700B;
+  CSO_EXCLUSIVEADDRUSE = -5;
+  CSIO_KEEPALIVE_VALS = $98000004;
   CRecvBufSize = 32768;
   CIocpBatchSize = 64;
   CAcceptPoolSize = 16;
   CAddrBufSize = (SizeOf(TSockAddrIn) + 16) * 2;
   CTF_REUSE_SOCKET = $02;
+  CKeepAliveTime = 30000;
+  CKeepAliveInterval = 5000;
 
 type
-  TIocpAction = (iaRecv, iaSend, iaSendV, iaAccept, iaDisconnect);
+  TKeepAliveVals = record
+    OnOff: Cardinal;
+    KeepAliveTime: Cardinal;
+    KeepAliveInterval: Cardinal;
+  end;
+
+  TIocpAction = (iaRecv, iaSend, iaSendV, iaAccept, iaDisconnect, iaRecvZero);
 
   PRecvCtx = ^TRecvCtx;
   TRecvCtx = record
@@ -146,6 +157,14 @@ type
     Conn: Pointer;
     WsaBuf: TWsaBuf;
     Data: array[0..CRecvBufSize - 1] of Byte;
+  end;
+
+  PRecvZeroCtx = ^TRecvZeroCtx;
+  TRecvZeroCtx = record
+    Ovl: TOverlapped;               // MUST be first
+    Action: TIocpAction;
+    Conn: Pointer;
+    WsaBuf: TWsaBuf;                // len=0, buf=nil
   end;
 
   PSendCtx = ^TSendCtx;
@@ -301,7 +320,7 @@ begin
   if FListenSocket = INVALID_SOCKET then RaiseLastOSError;
 
   LOne := 1;
-  setsockopt(FListenSocket, SOL_SOCKET, SO_REUSEADDR,
+  setsockopt(FListenSocket, SOL_SOCKET, CSO_EXCLUSIVEADDRUSE,
     PAnsiChar(@LOne), SizeOf(LOne));
 
   // TCP_FASTOPEN (RFC 7413) — opt-in; Windows 10 1607+
@@ -403,16 +422,16 @@ end;
 procedure TIOCPBackend.PostRecv(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
-  LCtx: PRecvCtx;
+  LCtx: PRecvZeroCtx;
   LFlags: DWORD;
   LBytes: DWORD;
   LRes: Integer;
 begin
-  LCtx := AllocMem(SizeOf(TRecvCtx));
-  LCtx^.Action := iaRecv;
+  New(LCtx);
+  FillChar(LCtx^, SizeOf(TRecvZeroCtx), 0);
+  LCtx^.Action := iaRecvZero;
   LCtx^.Conn := AConn;
-  LCtx^.WsaBuf.len := CRecvBufSize;
-  LCtx^.WsaBuf.buf := @LCtx^.Data[0];
+  // WsaBuf already zeroed — len=0, buf=nil (zero-byte recv)
   LFlags := 0;
   LBytes := 0;
 
@@ -422,27 +441,30 @@ begin
 
   if LRes = 0 then
   begin
-    // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS — synchronous completion,
-    // no IOCP packet will be posted
-    if LBytes = 0 then
-    begin
-      LConn.Release;
-      FreeMem(LCtx);
-      FCallbacks.OnConnError(AConn);
-    end
-    else
-    begin
-      FCallbacks.OnRecv(LConn, @LCtx^.Data[0], LBytes);
-      FreeMem(LCtx);
-      LConn.Release;
-    end;
+    // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS — data already available
+    Dispose(LCtx);
+    _OnRecvReady(AConn);
+    LConn.Release;
   end
   else if WSAGetLastError <> WSA_IO_PENDING then
   begin
     LConn.Release;
-    FreeMem(LCtx);
+    Dispose(LCtx);
     FCallbacks.OnConnError(AConn);
   end;
+end;
+
+procedure TIOCPBackend._OnRecvReady(AConn: Pointer);
+var
+  LConn: TNativeConn absolute AConn;
+  LBuf: array[0..CRecvBufSize - 1] of Byte;
+  LRecved: Integer;
+begin
+  LRecved := recv(LConn.Socket, LBuf[0], CRecvBufSize, 0);
+  if LRecved > 0 then
+    FCallbacks.OnRecv(LConn, @LBuf[0], Cardinal(LRecved))
+  else
+    FCallbacks.OnConnError(AConn);
 end;
 
 procedure TIOCPBackend.PostSend(AConn: Pointer; const AData: TBytes;
@@ -633,6 +655,8 @@ var
   LOne: Integer;
   LAcceptIdx: Integer;
   LRes: Integer;
+  LKA: TKeepAliveVals;
+  LBytesRet: DWORD;
 begin
   while True do
   begin
@@ -672,6 +696,14 @@ begin
             PAnsiChar(@LOne), SizeOf(LOne));
           setsockopt(LAcceptCtx^.AcceptSocket, SOL_SOCKET, SO_KEEPALIVE,
             PAnsiChar(@LOne), SizeOf(LOne));
+
+          // SIO_KEEPALIVE_VALS — probe after 30s idle, retry every 5s
+          LKA.OnOff := 1;
+          LKA.KeepAliveTime := CKeepAliveTime;
+          LKA.KeepAliveInterval := CKeepAliveInterval;
+          LBytesRet := 0;
+          WSAIoctl(LAcceptCtx^.AcceptSocket, CSIO_KEEPALIVE_VALS,
+            @LKA, SizeOf(LKA), nil, 0, @LBytesRet, nil, nil);
 
           LLocalAddr := nil;
           LRemoteAddr := nil;
@@ -721,6 +753,15 @@ begin
         end;
 
         LConn := TNativeConn(LHdr^.Conn);
+
+        // Zero-byte recv: LBytes is always 0; do synchronous recv
+        if LHdr^.Action = iaRecvZero then
+        begin
+          Dispose(PRecvZeroCtx(LOvl));
+          _OnRecvReady(LConn);
+          LConn.Release;
+          Continue;
+        end;
 
         if LBytes = 0 then
         begin
