@@ -10,6 +10,7 @@ interface
 
 uses
   System.SysUtils,
+  System.NetEncoding,
   System.Generics.Collections;
 
 type
@@ -85,7 +86,7 @@ begin
   begin
     LPair := LParts[I].Split(['='], 2);
     if (Length(LPair) = 2) and SameText(LPair[0], AName) then
-      Exit(LPair[1]);
+      Exit(TNetEncoding.URL.Decode(LPair[1]));
   end;
 end;
 

@@ -495,7 +495,8 @@ begin
   FRunning := True;
   FShutdownEvent.ResetEvent;
 
-  FServer.Listen(AHost, APort,
+  try
+    FServer.Listen(AHost, APort,
     procedure(const AReq: TPoseidonNativeRequest;
       out AStatus: Integer; out AContentType: string;
       out ABody: TBytes; out AExtraHeaders: TArray<TPair<string,string>>)
@@ -508,9 +509,21 @@ begin
       if Assigned(AOnListen) then
         AOnListen();
     end);
+  except
+    FRunning := False;
+    raise;
+  end;
 
   if IsConsole then
+  begin
+    {$IFNDEF MSWINDOWS}
+    // Poll for signal flag since signal handler only sets an atomic flag
+    while FShutdownEvent.WaitFor(500) = wrTimeout do
+      CheckShutdownSignal;
+    {$ELSE}
     FShutdownEvent.WaitFor;
+    {$ENDIF}
+  end;
 end;
 
 procedure TPoseidonServer.Stop;

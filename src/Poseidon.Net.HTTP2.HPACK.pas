@@ -479,7 +479,7 @@ begin
     Result := LValue;
     Exit;
   end;
-  // Multi-byte encoding
+  // Multi-byte encoding (RFC 7541 §5.1 — max 4 continuation bytes for 32-bit)
   LShift := 0;
   repeat
     if APos >= ABufLen then
@@ -489,6 +489,11 @@ begin
     end;
     LByte  := ABuf[APos];
     Inc(APos);
+    if LShift > 28 then
+    begin
+      Result := 0;
+      Exit;
+    end;
     LValue := LValue + Cardinal(LByte and $7F) shl LShift;
     Inc(LShift, 7);
   until (LByte and $80) = 0;

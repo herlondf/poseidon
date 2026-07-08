@@ -125,7 +125,13 @@ begin
 
     LIPParts := LIPStr.Split(['.']);
     LNParts  := LCIDRHost.Split(['.']);
-    if (Length(LIPParts) <> 4) or (Length(LNParts) <> 4) then Exit;
+    // IPv6 addresses won't produce 4 octets — fail-close (no match)
+    // instead of the default fail-open, to prevent IPv6 CIDR bypass.
+    if (Length(LIPParts) <> 4) or (Length(LNParts) <> 4) then
+    begin
+      Result := False;
+      Exit;
+    end;
 
     LIPNum  := 0;
     LNetNum := 0;

@@ -35,10 +35,13 @@ procedure WritePIDFile(const APath: string);
 procedure RemovePIDFile(const APath: string);
 
 {$IFNDEF MSWINDOWS}
-// Install a SIGTERM handler that calls AOnShutdown.
-// The callback is invoked from the signal handler context —
-// it should only set a flag or call TEvent.SetEvent.
+// Install a SIGTERM/SIGINT handler. The signal handler only sets an atomic
+// flag — call CheckShutdownSignal periodically to invoke the callback safely.
 procedure InstallSignalHandler(AOnShutdown: TProc);
+
+// Poll the shutdown flag. If a signal was received, invokes the callback
+// registered via InstallSignalHandler. Safe to call from any thread context.
+procedure CheckShutdownSignal;
 {$ENDIF}
 
 implementation
@@ -48,6 +51,7 @@ uses
   Winapi.Windows;
 {$ELSE}
 uses
+  System.SyncObjs,
   Posix.Signal,
   Posix.Unistd;
 {$ENDIF}
@@ -83,12 +87,25 @@ end;
 
 {$IFNDEF MSWINDOWS}
 var
+  // Atomic flag set by signal handler — async-signal-safe (no heap, no locks).
+  // The main thread polls this via CheckShutdownSignal.
+  GShutdownFlag: Integer = 0;
   GShutdownProc: TProc;
 
 procedure _SigTermHandler(ASigNum: Integer); cdecl;
 begin
-  if Assigned(GShutdownProc) then
-    GShutdownProc();
+  // Only set an atomic flag — async-signal-safe.
+  // TProc invocation moved to CheckShutdownSignal (called from main loop).
+  GShutdownFlag := 1;
+end;
+
+procedure CheckShutdownSignal;
+begin
+  if TInterlocked.CompareExchange(GShutdownFlag, 0, 1) = 1 then
+  begin
+    if Assigned(GShutdownProc) then
+      GShutdownProc();
+  end;
 end;
 
 procedure InstallSignalHandler(AOnShutdown: TProc);
@@ -96,6 +113,7 @@ var
   LSA: sigaction_t;
 begin
   GShutdownProc := AOnShutdown;
+  GShutdownFlag := 0;
   FillChar(LSA, SizeOf(LSA), 0);
   LSA._u.sa_handler := @_SigTermHandler;
   LSA.sa_flags := 0;
