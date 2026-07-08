@@ -3,31 +3,31 @@ unit Poseidon.Net.Security;
 // Pure validation functions for HTTP security checks.
 // No I/O, no server state — fully unit-testable in isolation.
 //
-// S-1  IsMethodAllowed  — enforces an allowlist of HTTP verbs
-// S-2  IsPathSafe       — rejects path-traversal sequences
-// S-3  StripCRLF        — removes CR/LF/NUL from response header values
-// S-4  HasRequestSmuggling — detects Content-Length + chunked conflict (RFC 7230 §3.3.3)
-// Metrics  IsIPInCIDR   — checks whether a remote address string falls inside a CIDR block
+// IsMethodAllowed      — enforces an allowlist of HTTP verbs
+// IsPathSafe           — rejects path-traversal sequences
+// StripCRLF            — removes CR/LF/NUL from response header values
+// HasRequestSmuggling  — detects Content-Length + chunked conflict (RFC 7230 §3.3.3)
+// IsIPInCIDR           — checks whether a remote address string falls inside a CIDR block
 
 interface
 
 uses
   System.SysUtils;
 
-// S-1: Returns True when AMethod is in AAllowed (case-insensitive).
+// Returns True when AMethod is in AAllowed (case-insensitive).
 // When AAllowed is empty every method is accepted (backward-compatible default).
 function IsMethodAllowed(const AMethod: string;
   const AAllowed: TArray<string>): Boolean;
 
-// S-2: Returns True when APath contains no directory-traversal sequences.
+// Returns True when APath contains no directory-traversal sequences.
 // Rejects: "..", "%2e%2e", backslash, NUL bytes.
 function IsPathSafe(const APath: string): Boolean;
 
-// S-3: Returns AValue with all CR (#13), LF (#10) and NUL (#0) removed.
+// Returns AValue with all CR (#13), LF (#10) and NUL (#0) removed.
 // Apply to every response header value supplied by the application handler.
 function StripCRLF(const AValue: string): string;
 
-// S-4: Returns True when both Content-Length and Transfer-Encoding: chunked are
+// Returns True when both Content-Length and Transfer-Encoding: chunked are
 // present in the same request — a classic request-smuggling vector (RFC 7230 §3.3.3).
 // ACLPresent: whether a Content-Length header was found.
 // AIsChunked:  whether Transfer-Encoding contains "chunked".
@@ -63,7 +63,6 @@ function IsPathSafe(const APath: string): Boolean;
 var
   LLower: string;
 begin
-  // NUL byte — literal or percent-encoded (%00)
   if Pos(#0, APath) > 0 then
   begin
     Result := False;
@@ -74,20 +73,17 @@ begin
     Result := False;
     Exit;
   end;
-  // Backslash (Windows path separator used in traversal)
   if Pos('\', APath) > 0 then
   begin
     Result := False;
     Exit;
   end;
   LLower := LowerCase(APath);
-  // URL-encoded dot-dot
   if Pos('%2e%2e', LLower) > 0 then
   begin
     Result := False;
     Exit;
   end;
-  // Traversal segments: /../ inside path, /.. at end, ../ at start, or bare ..
   if Pos('/../', LLower) > 0 then
   begin
     Result := False;
@@ -131,40 +127,35 @@ end;
 
 function IsIPInCIDR(const ARemoteAddr, ACIDR: string): Boolean;
 var
-  LSlash:    Integer;
-  LPrefix:   Integer;
+  LSlash: Integer;
+  LPrefix: Integer;
   LCIDRHost: string;
-  LIPStr:    string;
+  LIPStr: string;
   LColonPos: Integer;
-  LMask:     LongWord;
-  LIPParts:  TArray<string>;
-  LNParts:   TArray<string>;
-  LIPNum:    LongWord;
-  LNetNum:   LongWord;
-  LByte:     LongWord;
-  I:         Integer;
+  LMask: LongWord;
+  LIPParts: TArray<string>;
+  LNParts: TArray<string>;
+  LIPNum: LongWord;
+  LNetNum: LongWord;
+  LByte: LongWord;
+  I: Integer;
 begin
   Result := True;  // fail-open: parse errors do not block scraping
   try
-    // Strip port from ARemoteAddr ("1.2.3.4:port" → "1.2.3.4")
-    // TStringHelper.LastDelimiter returns a 0-based index (-1 if not found)
     LColonPos := ARemoteAddr.LastDelimiter(':');
     if LColonPos >= 0 then
       LIPStr := Copy(ARemoteAddr, 1, LColonPos)
     else
       LIPStr := ARemoteAddr;
-    // Remove brackets from IPv6 literal "[::1]" — CIDR check only works for IPv4
     LIPStr := StringReplace(LIPStr, '[', '', []);
     LIPStr := StringReplace(LIPStr, ']', '', []);
 
-    // Parse CIDR "a.b.c.d/prefix"
     LSlash := Pos('/', ACIDR);
     if LSlash <= 0 then Exit;  // not a valid CIDR — fail-open
     LCIDRHost := Copy(ACIDR, 1, LSlash - 1);
     LPrefix   := StrToIntDef(Copy(ACIDR, LSlash + 1, MaxInt), -1);
     if (LPrefix < 0) or (LPrefix > 32) then Exit;
 
-    // Convert dotted-decimal to 32-bit big-endian
     LIPParts := LIPStr.Split(['.']);
     LNParts  := LCIDRHost.Split(['.']);
     if (Length(LIPParts) <> 4) or (Length(LNParts) <> 4) then Exit;
@@ -188,7 +179,8 @@ begin
 
     Result := (LIPNum and LMask) = (LNetNum and LMask);
   except
-    Result := True;  // never raise — fail-open
+    on E: Exception do
+      Result := True;  // never raise — fail-open
   end;
 end;
 

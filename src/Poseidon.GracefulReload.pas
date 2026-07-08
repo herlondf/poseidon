@@ -1,6 +1,6 @@
 unit Poseidon.GracefulReload;
 
-// #32: Graceful reload (zero-downtime restart) support.
+// Graceful reload (zero-downtime restart) support.
 //
 // Provides:
 //   - PID file management: write on startup, remove on shutdown
@@ -60,7 +60,7 @@ begin
     WriteLn(LFile, GetProcessID);
     CloseFile(LFile);
   except
-    // Best-effort — don't crash if /run is read-only
+    on E: Exception do; // Best-effort — don't crash if /run is read-only
   end;
 end;
 
@@ -70,6 +70,7 @@ begin
     try
       DeleteFile(APath);
     except
+      on E: Exception do;
     end;
 end;
 

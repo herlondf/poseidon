@@ -27,8 +27,8 @@ type
 
   TH2HpackCodec = class
   private
-    FDynTable:        TArray<TH2DynEntry>;
-    FDynTableSize:    Integer;
+    FDynTable: TArray<TH2DynEntry>;
+    FDynTableSize: Integer;
     FDynTableMaxSize: Integer;
 
     // -----------------------------------------------------------------------
@@ -97,6 +97,10 @@ const
 
 implementation
 
+const
+  CDefaultDynTableMaxSize = 4096;   // RFC 7541 default
+  CHuffTreeInitSize = 8192;
+
 // ===========================================================================
 // Huffman decode tree — built once at unit initialization
 // ===========================================================================
@@ -104,7 +108,7 @@ implementation
 type
   TH2HuffNode = record
     Children: array[0..1] of Integer; // -1 = absent
-    Symbol:   Integer;                // -1 = internal; 0-255 = byte; 256 = EOS
+    Symbol: Integer;                  // -1 = internal; 0-255 = byte; 256 = EOS
   end;
 
   THuffEntry = record Code: Cardinal; Bits: Byte; end;
@@ -112,10 +116,10 @@ type
   TStaticEntry = record Name, Value: string; end;
 
 var
-  GHuffTree:      array of TH2HuffNode;
+  GHuffTree: array of TH2HuffNode;
   GHuffTreeBuilt: Boolean = False;
-  GHuffLock:      TCriticalSection;
-  GStaticTable:   array[1..STATIC_TABLE_SIZE] of TStaticEntry;
+  GHuffLock: TCriticalSection;
+  GStaticTable: array[1..STATIC_TABLE_SIZE] of TStaticEntry;
 
 const
   HUFF_TABLE: array[0..256] of THuffEntry = (
@@ -290,13 +294,13 @@ const
 procedure _BuildHuffTree;
 var
   LNodeCount: Integer;
-  LEntry:     THuffEntry;
-  I, B:       Integer;
-  LNode:      Integer;
-  LBit:       Integer;
-  LChild:     Integer;
+  LEntry: THuffEntry;
+  I, B: Integer;
+  LNode: Integer;
+  LBit: Integer;
+  LChild: Integer;
 begin
-  SetLength(GHuffTree, 8192);
+  SetLength(GHuffTree, CHuffTreeInitSize);
   LNodeCount := 1;
   GHuffTree[0].Children[0] := -1;
   GHuffTree[0].Children[1] := -1;
@@ -305,10 +309,10 @@ begin
   for I := 0 to 256 do
   begin
     LEntry := HUFF_TABLE[I];
-    LNode  := 0;
+    LNode := 0;
     for B := LEntry.Bits - 1 downto 0 do
     begin
-      LBit   := (LEntry.Code shr B) and 1;
+      LBit := (LEntry.Code shr B) and 1;
       LChild := GHuffTree[LNode].Children[LBit];
       if LChild = -1 then
       begin
@@ -423,8 +427,8 @@ constructor TH2HpackCodec.Create;
 begin
   inherited Create;
   SetLength(FDynTable, 0);
-  FDynTableSize    := 0;
-  FDynTableMaxSize := 4096; // default per RFC 7541
+  FDynTableSize := 0;
+  FDynTableMaxSize := CDefaultDynTableMaxSize;
 
   // Ensure shared Huffman tree is built
   GHuffLock.Enter;
@@ -529,13 +533,13 @@ end;
 procedure TH2HpackCodec._HpackHuffmanDecode(ABuf: PByte; ALen: Integer;
   out AResult: string);
 var
-  LBytes:  TBytes;
-  LBLen:   Integer;
-  LNode:   Integer;
-  I, B:    Integer;
-  LBit:    Integer;
-  LChild:  Integer;
-  LSym:    Integer;
+  LBytes: TBytes;
+  LBLen: Integer;
+  LNode: Integer;
+  I, B: Integer;
+  LBit: Integer;
+  LChild: Integer;
+  LSym: Integer;
 begin
   SetLength(LBytes, ALen * 2); // upper bound
   LBLen := 0;
@@ -544,11 +548,11 @@ begin
   begin
     for B := 7 downto 0 do
     begin
-      LBit   := (ABuf[I] shr B) and 1;
+      LBit := (ABuf[I] shr B) and 1;
       LChild := GHuffTree[LNode].Children[LBit];
       if LChild = -1 then Break; // padding or invalid — stop
-      LNode  := LChild;
-      LSym   := GHuffTree[LNode].Symbol;
+      LNode := LChild;
+      LSym := GHuffTree[LNode].Symbol;
       if LSym >= 0 then
       begin
         if LSym = 256 then Break; // EOS
@@ -567,9 +571,9 @@ function TH2HpackCodec._HpackDecodeStr(ABuf: PByte; ABufLen: Integer;
   var APos: Integer): string;
 var
   LHuffman: Boolean;
-  LLen:     Cardinal;
-  LRaw:     PByte;
-  LSlice:   TBytes;
+  LLen: Cardinal;
+  LRaw: PByte;
+  LSlice: TBytes;
 begin
   if APos >= ABufLen then
   begin
@@ -600,7 +604,7 @@ procedure TH2HpackCodec._HpackEncodeStr(var ABuf: TBytes; var APos: Integer;
   const AStr: string);
 var
   LEncoded: TBytes;
-  LLen:     Integer;
+  LLen: Integer;
 begin
   LEncoded := TEncoding.UTF8.GetBytes(AStr);
   LLen := Length(LEncoded);
@@ -665,8 +669,8 @@ end;
 procedure TH2HpackCodec._HpackAddDyn(const AName, AValue: string);
 var
   LEntrySize: Integer;
-  LLen:       Integer;
-  J:          Integer;
+  LLen: Integer;
+  J: Integer;
 begin
   LEntrySize := 32 + Length(AName) + Length(AValue); // RFC 7541 §4.1
 
@@ -696,23 +700,23 @@ function TH2HpackCodec.DecodeHeaders(ABuf: PByte; ALen: Integer;
   out AHeaders: TArray<TPair<string, string>>;
   AOnGoAway: TProc): Boolean;
 var
-  LPos:        Integer;
-  LByte:       Byte;
-  LIdx:        Cardinal;
-  LName:       string;
-  LValue:      string;
-  LNameOnly:   Boolean;
-  LAddDyn:     Boolean;
+  LPos: Integer;
+  LByte: Byte;
+  LIdx: Cardinal;
+  LName: string;
+  LValue: string;
+  LNameOnly: Boolean;
+  LAddDyn: Boolean;
   LPrefixBits: Byte;
-  LHdrCount:   Integer;
-  LPair:       TPair<string, string>;
+  LHdrCount: Integer;
+  LPair: TPair<string, string>;
 begin
-  Result    := True;
-  LPos      := 0;
+  Result := True;
+  LPos := 0;
   LHdrCount := 0;
-  AMethod   := '';
-  APath     := '';
-  AScheme   := '';
+  AMethod := '';
+  APath := '';
+  AScheme := '';
   AAuthority := '';
   SetLength(AHeaders, 0);
 
@@ -744,8 +748,8 @@ begin
     begin
       // §6.2.1 Literal with Incremental Indexing
       LPrefixBits := 6;
-      LIdx     := _HpackDecodeInt(ABuf, ALen, LPrefixBits, LPos);
-      LAddDyn  := True;
+      LIdx := _HpackDecodeInt(ABuf, ALen, LPrefixBits, LPos);
+      LAddDyn := True;
       LNameOnly := (LIdx = 0);
       if not LNameOnly then
       begin
@@ -760,8 +764,8 @@ begin
     begin
       // §6.2.3 Literal Never Indexed
       LPrefixBits := 4;
-      LIdx     := _HpackDecodeInt(ABuf, ALen, LPrefixBits, LPos);
-      LAddDyn  := False;
+      LIdx := _HpackDecodeInt(ABuf, ALen, LPrefixBits, LPos);
+      LAddDyn := False;
       LNameOnly := (LIdx = 0);
       if not LNameOnly then
       begin
@@ -776,8 +780,8 @@ begin
     begin
       // §6.2.2 Literal without Indexing
       LPrefixBits := 4;
-      LIdx     := _HpackDecodeInt(ABuf, ALen, LPrefixBits, LPos);
-      LAddDyn  := False;
+      LIdx := _HpackDecodeInt(ABuf, ALen, LPrefixBits, LPos);
+      LAddDyn := False;
       LNameOnly := (LIdx = 0);
       if not LNameOnly then
       begin
@@ -818,7 +822,7 @@ begin
     else if LName = ':authority' then AAuthority := LValue
     else
     begin
-      LPair.Key   := LName;
+      LPair.Key := LName;
       LPair.Value := LValue;
       SetLength(AHeaders, LHdrCount + 1);
       AHeaders[LHdrCount] := LPair;
@@ -835,11 +839,11 @@ function TH2HpackCodec.EncodeResponseHeaders(AStatus: Integer;
   const AContentType: string; ABodyLen: Integer;
   const AExtra: TArray<TPair<string, string>>): TBytes;
 var
-  LBuf:    TBytes;
-  LPos:    Integer;
-  LIdxB:   Byte;
+  LBuf: TBytes;
+  LPos: Integer;
+  LIdxB: Byte;
   LStatus: string;
-  I:       Integer;
+  I: Integer;
 
   procedure EmitLiteralHeader(const AName, AValue: string);
   begin

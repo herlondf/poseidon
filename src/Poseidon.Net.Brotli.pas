@@ -68,7 +68,13 @@ implementation
 
 const
   BROTLI_DEFAULT_LGWIN = 22;   // ~4 MB window; valid for quality 0-11
-  BROTLI_MODE_GENERIC  = 0;    // generic data; 1=text, 2=font
+  BROTLI_MODE_GENERIC = 0; // generic data; 1=text, 2=font
+  CCompressOverheadDiv = 4;
+  CCompressOverheadBase = 1024;
+  CDecompressInitFactor = 8;
+  CDecompressInitBase = 4096;
+  CDecompressRetryFactor = 32;
+  CDecompressRetryBase = 65536;
 
 class constructor TPoseidonBrotli.Create;
 begin
@@ -106,8 +112,7 @@ begin
   try
     if FInitDone then Exit;
 
-    // --- Encoder ---
-    // Try combined lib first, then dedicated encoder lib
+    // Encoder: try combined lib first, then dedicated encoder lib
 {$IFDEF MSWINDOWS}
     LLib := TryLoadLib('brotli.dll');
     if LLib = 0 then LLib := TryLoadLib('brotlienc.dll');
@@ -125,14 +130,12 @@ begin
         FreeLibrary(LLib);
     end;
 
-    // --- Decoder ---
-    // First check if the already-loaded encoder lib also exports the decoder
+    // Decoder: check if encoder lib also exports the decoder
     if FLibEnc <> 0 then
       @FDecoderDecompress := TryGetProc(FLibEnc, 'BrotliDecoderDecompress');
 
     if @FDecoderDecompress = nil then
     begin
-      // Try a separate decoder library
 {$IFDEF MSWINDOWS}
       LLib := TryLoadLib('brotlidec.dll');
 {$ELSE}
@@ -179,8 +182,7 @@ begin
   if AInput = nil then
     raise EPoseidonBrotli.Create('Brotli.Compress: AInput is nil');
 
-  // BrotliEncoderMaxCompressedSize gives a safe upper bound; approximate: input + 1KB
-  LMaxOut := Length(AInput) + Length(AInput) div 4 + 1024;
+  LMaxOut := Length(AInput) + Length(AInput) div CCompressOverheadDiv + CCompressOverheadBase;
   SetLength(Result, LMaxOut);
   LOutLen := LMaxOut;
 
@@ -195,7 +197,7 @@ end;
 class function TPoseidonBrotli.Decompress(const AInput: TBytes): TBytes;
 var
   LBufSize: NativeUInt;
-  LOutLen:  NativeUInt;
+  LOutLen: NativeUInt;
 begin
   EnsureInit;
   if @FDecoderDecompress = nil then
@@ -203,16 +205,14 @@ begin
   if AInput = nil then
     raise EPoseidonBrotli.Create('Brotli.Decompress: AInput is nil');
 
-  // Allocate initial output buffer; expand if needed (rare for test data)
-  LBufSize := Length(AInput) * 8 + 4096;
+  LBufSize := Length(AInput) * CDecompressInitFactor + CDecompressInitBase;
   SetLength(Result, LBufSize);
   LOutLen := LBufSize;
 
   if FDecoderDecompress(Length(AInput), @AInput[0],
        @LOutLen, @Result[0]) = 0 then
   begin
-    // Retry with a much larger buffer (for highly compressed inputs)
-    LBufSize := Length(AInput) * 32 + 65536;
+    LBufSize := Length(AInput) * CDecompressRetryFactor + CDecompressRetryBase;
     SetLength(Result, LBufSize);
     LOutLen := LBufSize;
     if FDecoderDecompress(Length(AInput), @AInput[0],

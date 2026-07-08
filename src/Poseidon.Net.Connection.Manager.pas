@@ -1,6 +1,6 @@
 unit Poseidon.Net.Connection.Manager;
 
-// TConnectionManager (#84) — connection admission, per-IP tracking, limits.
+// TConnectionManager — connection admission, per-IP tracking, limits.
 //
 // Extracted from TPoseidonNativeServer to follow SRP.
 // Thread-safe: all public methods acquire FLock internally.
@@ -17,10 +17,10 @@ uses
 type
   TConnectionManager = class
   private
-    FLock:               TCriticalSection;
-    FConnList:           TList;
-    FPerIPCount:         TDictionary<string, Integer>;
-    FMaxConnections:     Integer;
+    FLock: TCriticalSection;
+    FConnList: TList;
+    FPerIPCount: TDictionary<string, Integer>;
+    FMaxConnections: Integer;
     FMaxConnectionsPerIP: Integer;
   public
     constructor Create;
@@ -71,10 +71,10 @@ end;
 constructor TConnectionManager.Create;
 begin
   inherited Create;
-  FLock               := TCriticalSection.Create;
-  FConnList           := TList.Create;
-  FPerIPCount         := TDictionary<string, Integer>.Create;
-  FMaxConnections     := 0;
+  FLock := TCriticalSection.Create;
+  FConnList := TList.Create;
+  FPerIPCount := TDictionary<string, Integer>.Create;
+  FMaxConnections := 0;
   FMaxConnectionsPerIP := 0;
 end;
 

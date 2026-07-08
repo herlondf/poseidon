@@ -59,61 +59,61 @@ implementation
 const
   PP2_SIG: array[0..11] of Byte = (
     $0D, $0A, $0D, $0A, $00, $0D, $0A, $51, $55, $49, $54, $0A);
+  CPP2SigSize = 12;
   PP2_HDR_SIZE = 16;  // 12 sig + 1 ver/cmd + 1 fam + 2 addr_len
-  PP1_SIG      = 'PROXY ';
+  PP1_SIG = 'PROXY ';
+  CPP1SigSize = 6;
+  CPP2IPv6AddrSize = 36;
+  CPP1MaxLineLen = 108;
 
 function TryParseProxyProtocolV2(ABuf: PByte; ABufLen: Integer;
   out ARemoteAddr: string; out ARemotePort: Word;
   out AConsumed: Integer;
   out AIncomplete, AInvalid: Boolean): Boolean;
 var
-  I:        Integer;
-  LVerCmd:  Byte;
+  I: Integer;
+  LVerCmd: Byte;
   LFamProt: Byte;
-  LFamily:  Byte;
+  LFamily: Byte;
   LAddrLen: Word;
-  LTotal:   Integer;
-  LAddr:    PByte;
-  LIP:      array[0..3] of Byte;
-  LPort:    Word;
-  LIPv6:    array[0..15] of Byte;
+  LTotal: Integer;
+  LAddr: PByte;
+  LIP: array[0..3] of Byte;
+  LPort: Word;
+  LIPv6: array[0..15] of Byte;
 begin
-  Result     := False;
+  Result := False;
   ARemoteAddr := '';
   ARemotePort := 0;
-  AConsumed  := 0;
+  AConsumed := 0;
   AIncomplete := False;
-  AInvalid    := False;
+  AInvalid := False;
 
-  // Check signature
-  if ABufLen < 12 then
+  if ABufLen < CPP2SigSize then
   begin
     AIncomplete := True;
     Exit;
   end;
-  for I := 0 to 11 do
-    if ABuf[I] <> PP2_SIG[I] then Exit;  // not v2
+  for I := 0 to CPP2SigSize - 1 do
+    if ABuf[I] <> PP2_SIG[I] then Exit;
 
-  // Need full fixed header (16 bytes)
   if ABufLen < PP2_HDR_SIZE then
   begin
     AIncomplete := True;
     Exit;
   end;
 
-  LVerCmd  := ABuf[12];
+  LVerCmd := ABuf[12];
   LFamProt := ABuf[13];
   LAddrLen := (Word(ABuf[14]) shl 8) or ABuf[15];
-  LTotal   := PP2_HDR_SIZE + LAddrLen;
+  LTotal := PP2_HDR_SIZE + LAddrLen;
 
-  // Version must be 2
   if (LVerCmd shr 4) <> 2 then
   begin
     AInvalid := True;
     Exit;
   end;
 
-  // Wait for complete addr block
   if ABufLen < LTotal then
   begin
     AIncomplete := True;
@@ -121,17 +121,15 @@ begin
   end;
 
   LFamily := LFamProt shr 4;
-  LAddr   := ABuf + PP2_HDR_SIZE;
+  LAddr := ABuf + PP2_HDR_SIZE;
 
-  // LOCAL command (health checks) — consume header, no address update
   if (LVerCmd and $0F) = 0 then
   begin
     AConsumed := LTotal;
-    Result    := True;
+    Result := True;
     Exit;
   end;
 
-  // PROXY command
   case LFamily of
     1: // AF_INET
     begin
@@ -143,7 +141,7 @@ begin
     end;
     2: // AF_INET6
     begin
-      if LAddrLen < 36 then begin AInvalid := True; Exit; end;
+      if LAddrLen < CPP2IPv6AddrSize then begin AInvalid := True; Exit; end;
       Move(LAddr[0], LIPv6[0], 16);
       ARemoteAddr := Format(
         '%x:%x:%x:%x:%x:%x:%x:%x',
@@ -161,13 +159,13 @@ begin
     begin
       // AF_UNSPEC or AF_UNIX — consume but keep original addr
       AConsumed := LTotal;
-      Result    := True;
+      Result := True;
       Exit;
     end;
   end;
 
   AConsumed := LTotal;
-  Result    := True;
+  Result := True;
 end;
 
 function TryParseProxyProtocolV1(ABuf: PByte; ABufLen: Integer;
@@ -175,20 +173,19 @@ function TryParseProxyProtocolV1(ABuf: PByte; ABufLen: Integer;
   out AConsumed: Integer;
   out AIncomplete, AInvalid: Boolean): Boolean;
 var
-  I:       Integer;
-  LCRLF:   Integer;
-  LLine:   AnsiString;
-  LParts:  TArray<string>;
+  I: Integer;
+  LCRLF: Integer;
+  LLine: AnsiString;
+  LParts: TArray<string>;
 begin
-  Result     := False;
+  Result := False;
   ARemoteAddr := '';
   ARemotePort := 0;
-  AConsumed  := 0;
+  AConsumed := 0;
   AIncomplete := False;
-  AInvalid    := False;
+  AInvalid := False;
 
-  // Check "PROXY " signature (6 bytes)
-  if ABufLen < 6 then
+  if ABufLen < CPP1SigSize then
   begin
     AIncomplete := True;
     Exit;
@@ -196,11 +193,10 @@ begin
   if (ABuf[0] <> Ord('P')) or (ABuf[1] <> Ord('R')) or
      (ABuf[2] <> Ord('O')) or (ABuf[3] <> Ord('X')) or
      (ABuf[4] <> Ord('Y')) or (ABuf[5] <> Ord(' ')) then
-    Exit;  // not v1
+    Exit;
 
-  // Find CRLF (max 108 bytes per spec)
   LCRLf := -1;
-  for I := 0 to Min(ABufLen - 2, 106) do
+  for I := 0 to Min(ABufLen - 2, CPP1MaxLineLen - 2) do
     if (ABuf[I] = $0D) and (ABuf[I + 1] = $0A) then
     begin
       LCRLf := I;
@@ -209,7 +205,7 @@ begin
 
   if LCRLf < 0 then
   begin
-    if ABufLen > 108 then AInvalid := True
+    if ABufLen > CPP1MaxLineLen then AInvalid := True
     else AIncomplete := True;
     Exit;
   end;
@@ -217,15 +213,13 @@ begin
   SetString(LLine, PAnsiChar(ABuf), LCRLf);
   LParts := string(LLine).Split([' ']);
 
-  // "PROXY UNKNOWN" — consume, keep original addr
   if (Length(LParts) >= 2) and SameText(LParts[1], 'UNKNOWN') then
   begin
     AConsumed := LCRLf + 2;
-    Result    := True;
+    Result := True;
     Exit;
   end;
 
-  // "PROXY TCP4/TCP6 src dst srcport dstport"
   if Length(LParts) < 6 then begin AInvalid := True; Exit; end;
   if not (SameText(LParts[1], 'TCP4') or SameText(LParts[1], 'TCP6')) then
   begin
@@ -235,8 +229,8 @@ begin
 
   ARemoteAddr := LParts[2];
   ARemotePort := Word(StrToIntDef(LParts[4], 0));
-  AConsumed   := LCRLf + 2;
-  Result      := True;
+  AConsumed := LCRLf + 2;
+  Result := True;
 end;
 
 function TryParseProxyProtocolAuto(AMode: TProxyProtocolMode;
@@ -255,24 +249,20 @@ begin
         AConsumed, AIncomplete, AInvalid);
     ppAuto:
     begin
-      // Try v2 first (binary signature is unambiguous)
       Result := TryParseProxyProtocolV2(ABuf, ABufLen, ARemoteAddr, ARemotePort,
         AConsumed, AIncomplete, AInvalid);
       if Result or AIncomplete or AInvalid then Exit;
-      // Try v1 text
       Result := TryParseProxyProtocolV1(ABuf, ABufLen, ARemoteAddr, ARemotePort,
         AConsumed, AIncomplete, AInvalid);
       if Result or AIncomplete or AInvalid then Exit;
-      // No known signature found — not a PP connection
-      if ABufLen >= 6 then
+      if ABufLen >= CPP1SigSize then
         ANoSignature := True
       else
         AIncomplete := True;
     end;
     else
     begin
-      // ppDisabled — should not be called
-      Result       := False;
+      Result := False;
       ANoSignature := True;
     end;
   end;

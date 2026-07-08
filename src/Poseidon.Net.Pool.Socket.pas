@@ -1,6 +1,6 @@
 unit Poseidon.Net.Pool.Socket;
 
-// #77: Socket recycling pool using DisconnectEx + TF_REUSE_SOCKET.
+// Socket recycling pool using DisconnectEx + TF_REUSE_SOCKET.
 //
 // Instead of closesocket() + socket(), DisconnectEx resets a connected
 // socket to the listening state without kernel object teardown.
@@ -42,7 +42,7 @@ type
     // Returns INVALID_SOCKET if pool is empty.
     class function Acquire: TSocket; static;
 
-    // #106: Add an already-disconnected socket directly to the pool.
+    // Add an already-disconnected socket directly to the pool.
     // Used by async DisconnectEx completion path.
     class function AddRecycled(ASocket: TSocket): Boolean; static;
   end;
@@ -145,7 +145,6 @@ begin
   end;
 end;
 
-// #106: Add an already-disconnected socket directly to the pool
 class function TSocketPool.AddRecycled(ASocket: TSocket): Boolean;
 begin
   Result := False;

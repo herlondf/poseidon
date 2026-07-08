@@ -60,25 +60,23 @@ type
     public
       Work: TElasticWorkItem;
     end;
-    // #63: per-worker deque for work-stealing
     PWorkerDeque = ^TWorkerDeque;
     TWorkerDeque = record
       Queue: TQueue<TWorkWrapper>;
-      Lock:  TCriticalSection;
+      Lock: TCriticalSection;
     end;
   private
-    FMinWorkers:    Integer;
-    FMaxWorkers:    Integer;
+    FMinWorkers: Integer;
+    FMaxWorkers: Integer;
     FIdleTimeoutMs: Integer;
-    // #63: per-worker deques replace single shared queue
-    FDeques:        array of TWorkerDeque;
-    FDequeCount:    Integer;
-    FNextDeque:     Integer;  // atomic round-robin counter for Post()
-    _PadNextDeque:  array[0..14] of Integer; // #69: cache-line padding
+    FDeques: array of TWorkerDeque;
+    FDequeCount: Integer;
+    FNextDeque: Integer;  // atomic round-robin counter for Post()
+    FPadNextDeque: array[0..14] of Integer;
     FActiveWorkers: Integer;  // atomic — total alive threads (including idle)
-    _PadActive:     array[0..14] of Integer; // #69: cache-line padding
-    FIdleWorkers:   Integer;  // atomic — threads blocked on semaphore
-    _PadIdle:       array[0..14] of Integer; // #69: cache-line padding
+    FPadActive: array[0..14] of Integer;
+    FIdleWorkers: Integer;  // atomic — threads blocked on semaphore
+    FPadIdle: array[0..14] of Integer;
     FSemaphore:     TSemaphore;
     FShutdown:      Boolean;
     procedure _WorkerLoop(ADequeIdx: Integer);
@@ -96,7 +94,7 @@ type
     procedure Shutdown(ATimeoutMs: Integer = 30000);
 
     property ActiveWorkers: Integer read FActiveWorkers;
-    property IdleWorkers:   Integer read FIdleWorkers;
+    property IdleWorkers: Integer read FIdleWorkers;
   end;
 
 implementation
@@ -108,22 +106,21 @@ var
   I: Integer;
 begin
   inherited Create;
-  FMinWorkers    := AMin;
-  FMaxWorkers    := AMax;
+  FMinWorkers := AMin;
+  FMaxWorkers := AMax;
   FIdleTimeoutMs := AIdleTimeoutMs;
-  FShutdown      := False;
+  FShutdown := False;
   FActiveWorkers := 0;
-  FIdleWorkers   := 0;
-  FNextDeque     := 0;
+  FIdleWorkers := 0;
+  FNextDeque := 0;
 
-  // #63: create per-worker deques (one per min worker)
   FDequeCount := AMin;
   if FDequeCount < 1 then FDequeCount := 1;
   SetLength(FDeques, FDequeCount);
   for I := 0 to FDequeCount - 1 do
   begin
     FDeques[I].Queue := TQueue<TWorkWrapper>.Create;
-    FDeques[I].Lock  := TCriticalSection.Create;
+    FDeques[I].Lock := TCriticalSection.Create;
   end;
 
   FSemaphore := TSemaphore.Create(nil, 0, MaxInt, '');
@@ -148,7 +145,7 @@ end;
 
 procedure TElasticWorkerPool._SpawnWorker(ADequeIdx: Integer);
 var
-  LIdx:    Integer;
+  LIdx: Integer;
   LThread: TThread;
 begin
   LIdx := ADequeIdx;
@@ -158,7 +155,6 @@ begin
   LThread.Start;
 end;
 
-// #63: try to steal work from another worker's deque
 function TElasticWorkerPool._TrySteal(AMyIdx: Integer; out AWrapper: TWorkWrapper): Boolean;
 var
   I, LTarget: Integer;
@@ -184,12 +180,12 @@ end;
 
 procedure TElasticWorkerPool._WorkerLoop(ADequeIdx: Integer);
 var
-  LWrapper:        TWorkWrapper;
-  LWork:           TElasticWorkItem;
-  LResult:         TWaitResult;
-  LCurActive:      Integer;
+  LWrapper: TWorkWrapper;
+  LWork: TElasticWorkItem;
+  LResult: TWaitResult;
+  LCurActive: Integer;
   LAlreadyDropped: Boolean;
-  LDeque:          PWorkerDeque;
+  LDeque: PWorkerDeque;
 begin
   TInterlocked.Increment(FActiveWorkers);
   LAlreadyDropped := False;
@@ -220,7 +216,6 @@ begin
         Continue;
       end;
 
-      // #63: try local deque first (LIFO — better cache locality)
       LWrapper := nil;
       LDeque^.Lock.Enter;
       try
@@ -230,7 +225,6 @@ begin
         LDeque^.Lock.Leave;
       end;
 
-      // #63: local empty — steal from another worker (FIFO)
       if not Assigned(LWrapper) then
         _TrySteal(ADequeIdx, LWrapper);
 
@@ -257,17 +251,16 @@ end;
 
 procedure TElasticWorkerPool.Post(AWork: TElasticWorkItem);
 var
-  LWrapper:  TWorkWrapper;
-  LIdle:     Integer;
-  LActive:   Integer;
+  LWrapper: TWorkWrapper;
+  LIdle: Integer;
+  LActive: Integer;
   LDequeIdx: Integer;
 begin
   if FShutdown then Exit;
 
-  LWrapper      := TWorkWrapper.Create;
+  LWrapper := TWorkWrapper.Create;
   LWrapper.Work := AWork;
 
-  // #63: round-robin assignment to per-worker deques
   LDequeIdx := TInterlocked.Increment(FNextDeque) mod FDequeCount;
   FDeques[LDequeIdx].Lock.Enter;
   try
@@ -279,7 +272,7 @@ begin
   FSemaphore.Release(1);
 
   // Spawn a new worker when all existing workers are busy and below max.
-  LIdle   := TInterlocked.Add(FIdleWorkers, 0);
+  LIdle := TInterlocked.Add(FIdleWorkers, 0);
   LActive := TInterlocked.Add(FActiveWorkers, 0);
   if (LIdle = 0) and (LActive < FMaxWorkers) then
     _SpawnWorker(LDequeIdx);
@@ -287,10 +280,10 @@ end;
 
 procedure TElasticWorkerPool.Shutdown(ATimeoutMs: Integer);
 var
-  LActive:  Integer;
-  LStart:   Int64;
+  LActive: Integer;
+  LStart: Int64;
   LWrapper: TWorkWrapper;
-  I:        Integer;
+  I: Integer;
 begin
   if FShutdown then Exit;
   FShutdown := True;

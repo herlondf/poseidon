@@ -57,11 +57,11 @@ procedure _InstallLibcMM;
 var
   LMM: TMemoryManagerEx;
 begin
-  LMM.GetMem     := LibcGetMem;
-  LMM.FreeMem    := LibcFreeMem;
+  LMM.GetMem := LibcGetMem;
+  LMM.FreeMem := LibcFreeMem;
   LMM.ReallocMem := LibcReallocMem;
-  LMM.AllocMem   := LibcAllocMem;
-  LMM.RegisterExpectedMemoryLeak   := nil;
+  LMM.AllocMem := LibcAllocMem;
+  LMM.RegisterExpectedMemoryLeak := nil;
   LMM.UnregisterExpectedMemoryLeak := nil;
   SetMemoryManager(LMM);
 end;

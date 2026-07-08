@@ -1,6 +1,6 @@
 unit Poseidon.Native.Router;
 
-// #93: Native router — hash-map for static routes, linear scan for param routes.
+// Native router — hash-map for static routes, linear scan for param routes.
 //
 // Static routes: O(1) lookup via TDictionary (key = 'GET/ping') → index into
 //   FStaticEntries list. Returns stable pointer via List[I].

@@ -20,20 +20,20 @@ uses
 
 const
   OPCODE_CONTINUATION = $0;
-  OPCODE_TEXT         = $1;
-  OPCODE_BINARY       = $2;
-  OPCODE_CLOSE        = $8;
-  OPCODE_PING         = $9;
-  OPCODE_PONG         = $A;
+  OPCODE_TEXT = $1;
+  OPCODE_BINARY = $2;
+  OPCODE_CLOSE = $8;
+  OPCODE_PING = $9;
+  OPCODE_PONG = $A;
 
   WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 type
   TWebSocketFrame = record
-    FinFlag:  Boolean;
-    RSV1:     Boolean;   // permessage-deflate: True when payload is compressed
-    Opcode:   Byte;
-    Payload:  TBytes;
+    FinFlag: Boolean;
+    RSV1: Boolean;   // permessage-deflate: True when payload is compressed
+    Opcode: Byte;
+    Payload: TBytes;
   end;
 
   // Codec for WebSocket permessage-deflate (RFC 7692).
@@ -48,8 +48,8 @@ type
 
   TWebSocketUtils = class
   strict private
-    // P-3: Zero-copy frame builder kernel.
-    // Extends APayload by LHdrLen bytes at the front (shifts data right),
+    // Zero-copy frame builder kernel.
+    // Extends APayload at the front (shifts data right),
     // then writes the RFC 6455 frame header in place — no second allocation.
     class procedure _PrependHeader(AOpcode: Byte; AFin: Boolean;
       var APayload: TBytes); static;
@@ -92,7 +92,7 @@ type
   end;
 
   TWSRawSendProc = reference to procedure(const AData: TBytes);
-  TWSCloseProc   = reference to procedure;
+  TWSCloseProc = reference to procedure;
 
   IPoseidonWSConn = interface
     ['{B2C3D4E5-F607-8901-BCDE-F01234567891}']
@@ -112,12 +112,12 @@ type
 
   TPoseidonWSConn = class(TInterfacedObject, IPoseidonWSConn)
   private
-    FRemoteAddr:     string;
-    FSend:           TWSRawSendProc;
-    FCloseConn:      TWSCloseProc;
-    FClosed:         Boolean;
+    FRemoteAddr: string;
+    FSend: TWSRawSendProc;
+    FCloseConn: TWSCloseProc;
+    FClosed: Boolean;
     FDeflateEnabled: Boolean;
-    FLock:           TCriticalSection;
+    FLock: TCriticalSection;
   public
     constructor Create(const ARemoteAddr: string; const ASend: TWSRawSendProc;
       const AClose: TWSCloseProc; ADeflateEnabled: Boolean = False);
@@ -146,12 +146,12 @@ constructor TPoseidonWSConn.Create(const ARemoteAddr: string;
   ADeflateEnabled: Boolean);
 begin
   inherited Create;
-  FRemoteAddr     := ARemoteAddr;
-  FSend           := ASend;
-  FCloseConn      := AClose;
-  FClosed         := False;
+  FRemoteAddr := ARemoteAddr;
+  FSend := ASend;
+  FCloseConn := AClose;
+  FClosed := False;
   FDeflateEnabled := ADeflateEnabled;
-  FLock           := TCriticalSection.Create;
+  FLock := TCriticalSection.Create;
 end;
 
 destructor TPoseidonWSConn.Destroy;
@@ -164,8 +164,8 @@ procedure TPoseidonWSConn.Invalidate;
 begin
   FLock.Enter;
   try
-    FClosed    := True;
-    FSend      := nil;
+    FClosed := True;
+    FSend := nil;
     FCloseConn := nil;
   finally
     FLock.Leave;
@@ -174,7 +174,7 @@ end;
 
 procedure TPoseidonWSConn.Send(const AText: string);
 var
-  LRaw:  TBytes;
+  LRaw: TBytes;
   LData: TBytes;
   LSend: TWSRawSendProc;
 begin
@@ -187,7 +187,7 @@ begin
   end;
   if FDeflateEnabled then
   begin
-    LRaw  := TEncoding.UTF8.GetBytes(AText);
+    LRaw := TEncoding.UTF8.GetBytes(AText);
     LData := TWebSocketUtils.BuildFrame(OPCODE_TEXT, True, True,
                TWSDeflateUtils.Compress(LRaw));
   end
@@ -218,17 +218,17 @@ end;
 
 procedure TPoseidonWSConn.Close(ACode: Word);
 var
-  LData:  TBytes;
-  LSend:  TWSRawSendProc;
+  LData: TBytes;
+  LSend: TWSRawSendProc;
   LClose: TWSCloseProc;
 begin
   FLock.Enter;
   try
     if FClosed then Exit;
-    FClosed    := True;
-    LSend      := FSend;
-    LClose     := FCloseConn;
-    FSend      := nil;
+    FClosed := True;
+    LSend := FSend;
+    LClose := FCloseConn;
+    FSend := nil;
     FCloseConn := nil;
   finally
     FLock.Leave;
@@ -324,11 +324,11 @@ const
   // Sync-flush marker that was stripped before sending (RFC 7692 §7.2.2)
   SYNC_FLUSH: array[0..3] of Byte = ($00, $00, $FF, $FF);
 var
-  LIn:   TBytesStream;
+  LIn: TBytesStream;
   LData: TBytes;
-  LOut:  TBytesStream;
-  LZ:    TZDecompressionStream;
-  LBuf:  TBytes;
+  LOut: TBytesStream;
+  LZ: TZDecompressionStream;
+  LBuf: TBytes;
   LRead: Integer;
 begin
   SetLength(Result, 0);
@@ -374,10 +374,10 @@ end;
 
 class function TWebSocketUtils.HandshakeAccept(const AClientKey: string): string;
 var
-  LSrc:   string;
-  LHash:  TBytes;
+  LSrc: string;
+  LHash: TBytes;
 begin
-  LSrc  := AClientKey + WS_GUID;
+  LSrc := AClientKey + WS_GUID;
   LHash := THashSHA1.GetHashBytes(LSrc);
   Result := TNetEncoding.Base64.EncodeBytesToString(LHash);
 end;
@@ -404,26 +404,26 @@ end;
 class function TWebSocketUtils.ParseFrame(const ABuf: PByte; ABufLen: Integer;
   out AFrame: TWebSocketFrame; out AConsumed: Integer): Boolean;
 var
-  LPos:        Integer;
-  LMasked:     Boolean;
-  LPLen:       Int64;
+  LPos: Integer;
+  LMasked: Boolean;
+  LPLen: Int64;
   LPayloadLen: Byte;
-  LMaskKey:    array[0..3] of Byte;
-  I:           Integer;
+  LMaskKey: array[0..3] of Byte;
+  I: Integer;
 begin
-  Result    := False;
+  Result := False;
   AConsumed := 0;
   AFrame.FinFlag := False;
-  AFrame.Opcode  := 0;
+  AFrame.Opcode := 0;
   SetLength(AFrame.Payload, 0);
 
   if ABufLen < 2 then Exit;
 
   AFrame.FinFlag := (ABuf[0] and $80) <> 0;
-  AFrame.RSV1    := (ABuf[0] and $40) <> 0;  // permessage-deflate compressed
-  AFrame.Opcode  := ABuf[0] and $0F;
-  LMasked        := (ABuf[1] and $80) <> 0;
-  LPayloadLen    := ABuf[1] and $7F;
+  AFrame.RSV1 := (ABuf[0] and $40) <> 0;  // permessage-deflate compressed
+  AFrame.Opcode := ABuf[0] and $0F;
+  LMasked := (ABuf[1] and $80) <> 0;
+  LPayloadLen := ABuf[1] and $7F;
   LPos := 2;
 
   if LPayloadLen < 126 then
@@ -451,7 +451,7 @@ begin
   if LMasked then
   begin
     if ABufLen < LPos + 4 then Exit;
-    LMaskKey[0] := ABuf[LPos    ];
+    LMaskKey[0] := ABuf[LPos];
     LMaskKey[1] := ABuf[LPos + 1];
     LMaskKey[2] := ABuf[LPos + 2];
     LMaskKey[3] := ABuf[LPos + 3];
@@ -470,15 +470,15 @@ begin
   end;
 
   AConsumed := LPos + Integer(LPLen);
-  Result    := True;
+  Result := True;
 end;
 
 class procedure TWebSocketUtils._PrependHeader(AOpcode: Byte; AFin: Boolean;
   var APayload: TBytes);
 var
-  LLen:    Int64;
+  LLen: Int64;
   LHdrLen: Integer;
-  LB0:     Byte;
+  LB0: Byte;
 begin
   LLen := Length(APayload);
 
@@ -523,9 +523,9 @@ end;
 class function TWebSocketUtils.BuildFrame(AOpcode: Byte; AFin: Boolean;
   const APayload: TBytes): TBytes;
 var
-  LLen:    Int64;
+  LLen: Int64;
   LHdrLen: Integer;
-  LB0:     Byte;
+  LB0: Byte;
 begin
   LLen := Length(APayload);
 
@@ -575,9 +575,9 @@ end;
 class function TWebSocketUtils.BuildFrame(AOpcode: Byte; AFin: Boolean;
   ADeflate: Boolean; const APayload: TBytes): TBytes;
 var
-  LLen:    Int64;
+  LLen: Int64;
   LHdrLen: Integer;
-  LB0:     Byte;
+  LB0: Byte;
 begin
   if not ADeflate then
   begin
@@ -628,7 +628,6 @@ end;
 
 class function TWebSocketUtils.TextFrame(const AText: string): TBytes;
 begin
-  // P-3: zero-copy — encode UTF-8 into Result, then prepend header in place.
   Result := TEncoding.UTF8.GetBytes(AText);
   _PrependHeader(OPCODE_TEXT, True, Result);
 end;
@@ -640,7 +639,6 @@ end;
 
 class function TWebSocketUtils.CloseFrame(ACode: Word): TBytes;
 begin
-  // P-3: zero-copy — build 2-byte status body directly in Result, prepend header in place.
   SetLength(Result, 2);
   Result[0] := Byte(ACode shr 8);
   Result[1] := Byte(ACode and $FF);

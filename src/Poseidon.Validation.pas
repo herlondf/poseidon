@@ -199,6 +199,7 @@ var
   LValue: TValue;
   LError: string;
   LErrors: TArray<TPoseidonValidationError>;
+  LEntry: TPoseidonValidationError;
 begin
   LCtx := TRttiContext.Create;
   try
@@ -215,7 +216,6 @@ begin
           LError := '';
           if not PoseidonValidationAttribute(LAttr).Validate(LValue, LField.Name, LError) then
           begin
-            var LEntry: TPoseidonValidationError;
             LEntry.Field := LField.Name;
             LEntry.Message := LError;
             LErrors := LErrors + [LEntry];

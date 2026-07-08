@@ -1,6 +1,6 @@
 unit Poseidon.Net.IO.RIO;
 
-// #78: TRIOBackend — Windows Registered I/O backend.
+// TRIOBackend — Windows Registered I/O backend.
 //
 // RIO (Windows 8+) uses shared-memory completion queues. In polled mode,
 // dequeue completions with ZERO syscalls — similar to io_uring SQPOLL.
@@ -100,13 +100,11 @@ type
     FRecvFreeStack: array of Integer;
     FRecvFreeTop: Integer;
     FRecvPoolLock: TCriticalSection;
-    // #107: Pre-allocated send pool
     FSendPool: Pointer;
     FSendPoolBufId: TRIO_BUFFERID;
     FSendFreeStack: array of Integer;
     FSendFreeTop: Integer;
     FSendPoolLock: TCriticalSection;
-    // #107: Per-worker IOCP for hybrid notification
     FWorkerIOCPs: TArray<THandle>;
     FWorkerOvls: TArray<POverlapped>;
     procedure _LoadRIO;
@@ -149,10 +147,11 @@ const
 
   CRIOInvalidBufId = TRIO_BUFFERID(NativeUInt(-1));
 
-  CRecvBufSize  = 32768;
+  CTCP_FASTOPEN = 15;
+  CRecvBufSize = 32768;
   CRecvPoolSize = 512;
   CRecvPoolBytes = CRecvPoolSize * CRecvBufSize;
-  CSendBufSize  = 32768;
+  CSendBufSize = 32768;
   CSendPoolSize = 512;
   CSendPoolBytes = CSendPoolSize * CSendBufSize;
   CRIOCQSize = 4096;
@@ -186,7 +185,7 @@ type
   TRIOSendCtx = record
     Conn: TNativeConn;
     SendBuf: TBytes;
-    SlotIdx: Integer;       // #107: send pool slot, -1 = per-op fallback
+    SlotIdx: Integer;
     BufId: TRIO_BUFFERID;   // only used when SlotIdx = -1
     ActualLen: Integer;
   end;
@@ -203,6 +202,8 @@ function _WsaAccept(s: TSocket; addr: PSockAddrIn; addrlen: PInteger): TSocket; 
 // ---------------------------------------------------------------------------
 
 constructor TRIOBackend.Create;
+var
+  I: Integer;
 begin
   inherited Create;
   FListenSocket := INVALID_SOCKET;
@@ -216,7 +217,6 @@ begin
   FSendPoolBufId := nil;
   _LoadRIO;
 
-  // Pre-allocate contiguous recv buffer pool and register with RIO
   FRecvPool := VirtualAlloc(nil, CRecvPoolBytes, MEM_COMMIT or MEM_RESERVE,
     PAGE_READWRITE);
   if FRecvPool = nil then
@@ -229,11 +229,9 @@ begin
 
   SetLength(FRecvFreeStack, CRecvPoolSize);
   FRecvFreeTop := CRecvPoolSize;
-  var I: Integer;
   for I := 0 to CRecvPoolSize - 1 do
     FRecvFreeStack[I] := I;
 
-  // #107: Pre-allocate contiguous send buffer pool and register with RIO
   FSendPool := VirtualAlloc(nil, CSendPoolBytes, MEM_COMMIT or MEM_RESERVE,
     PAGE_READWRITE);
   if FSendPool = nil then
@@ -332,7 +330,7 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// Send pool (#107)
+// Send pool
 // ---------------------------------------------------------------------------
 
 function TRIOBackend._SendPoolAcquire: Integer;
@@ -378,6 +376,8 @@ var
   LAddr: TSockAddrIn;
   LOne: Integer;
   I: Integer;
+  LNotify: TRIO_NOTIFICATION_COMPLETION;
+  LIdx: Integer;
 begin
   FCallbacks := ACallbacks;
   FShutdown := False;
@@ -391,7 +391,7 @@ begin
   setsockopt(FListenSocket, SOL_SOCKET, SO_REUSEADDR,
     PAnsiChar(@LOne), SizeOf(LOne));
   if AFastOpen then
-    setsockopt(FListenSocket, IPPROTO_TCP, 15 {TCP_FASTOPEN},
+    setsockopt(FListenSocket, IPPROTO_TCP, CTCP_FASTOPEN,
       PAnsiChar(@LOne), SizeOf(LOne));
 
   FillChar(LAddr, SizeOf(LAddr), 0);
@@ -409,7 +409,6 @@ begin
 
   TSocketPool.LoadDisconnectEx(FListenSocket);
 
-  // #107: Per-worker IOCP-notified completion queues (hybrid notification)
   SetLength(FCQs, AWorkerCount);
   SetLength(FCQLocks, AWorkerCount);
   SetLength(FWorkerIOCPs, AWorkerCount);
@@ -422,7 +421,6 @@ begin
     New(FWorkerOvls[I]);
     FillChar(FWorkerOvls[I]^, SizeOf(TOverlapped), 0);
 
-    var LNotify: TRIO_NOTIFICATION_COMPLETION;
     FillChar(LNotify, SizeOf(LNotify), 0);
     LNotify.Typ := CRIONotifyIOCP;
     LNotify.IocpHandle := FWorkerIOCPs[I];
@@ -438,7 +436,7 @@ begin
   SetLength(FWorkers, AWorkerCount);
   for I := 0 to AWorkerCount - 1 do
   begin
-    var LIdx := I;
+    LIdx := I;
     FWorkers[I] := TThread.CreateAnonymousThread(
       procedure begin _WorkerLoop(LIdx); end);
     FWorkers[I].FreeOnTerminate := False;
@@ -473,7 +471,6 @@ var
   I: Integer;
 begin
   FShutdown := True;
-  // #107: Wake workers blocked on GetQueuedCompletionStatus
   for I := 0 to High(FWorkerIOCPs) do
     PostQueuedCompletionStatus(FWorkerIOCPs[I], 0, 0, nil);
 end;
@@ -499,7 +496,6 @@ begin
   SetLength(FCQs, 0);
   SetLength(FCQLocks, 0);
 
-  // #107: Clean up per-worker IOCPs
   for I := 0 to High(FWorkerIOCPs) do
   begin
     if FWorkerIOCPs[I] <> 0 then
@@ -601,7 +597,6 @@ begin
   LSendCtx^.SendBuf := AData;
   LSendCtx^.ActualLen := LSendLen;
 
-  // #107: Try pre-registered send pool first (eliminates per-send register/deregister)
   LSlotIdx := -1;
   if LSendLen <= CSendBufSize then
     LSlotIdx := _SendPoolAcquire;
@@ -741,7 +736,6 @@ var
 begin
   while not FShutdown do
   begin
-    // #107: Arm IOCP notification — fires when CQEs arrive
     TFnNotify(FRio.RIONotify)(FCQs[ACQIdx]);
 
     // Block until notification or timeout (100ms handles Notify/drain race)
@@ -787,7 +781,7 @@ begin
             // SEND completion
             LSendCtx := PRIOSendCtx(Pointer(LReqCtx and $FFFFFFFFFFFFFFFE));
 
-            // #107: Release send pool slot or deregister per-op buffer
+            // Release send pool slot or deregister per-op buffer
             if LSendCtx^.SlotIdx >= 0 then
               _SendPoolRelease(LSendCtx^.SlotIdx)
             else if LSendCtx^.BufId <> CRIOInvalidBufId then

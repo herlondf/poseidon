@@ -1,6 +1,6 @@
 unit Poseidon.Net.SendFile;
 
-// #81: Zero-copy file transfer via sendfile(2) on Linux.
+// Zero-copy file transfer via sendfile(2) on Linux.
 // Falls back to read+send on Windows.
 
 interface
@@ -67,9 +67,11 @@ end;
 
 function PoseidonSendFile(ASocket: Integer; const AFilePath: string;
   AOffset, ACount: Int64): Int64;
+const
+  CReadBufSize = 65536;
 var
   LStream: TFileStream;
-  LBuf: array[0..65535] of Byte;
+  LBuf: array[0..CReadBufSize - 1] of Byte;
   LRemain: Int64;
   LChunk: Integer;
   LRead: Integer;
@@ -81,7 +83,7 @@ begin
     LRemain := ACount;
     while LRemain > 0 do
     begin
-      LChunk := 65536;
+      LChunk := CReadBufSize;
       if LRemain < LChunk then
         LChunk := Integer(LRemain);
       LRead := LStream.Read(LBuf[0], LChunk);

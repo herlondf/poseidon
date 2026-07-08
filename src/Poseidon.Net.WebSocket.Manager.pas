@@ -1,6 +1,6 @@
 unit Poseidon.Net.WebSocket.Manager;
 
-// TWebSocketManager (#86) — handler registration, upgrade handshake, frame dispatch.
+// TWebSocketManager — handler registration, upgrade handshake, frame dispatch.
 //
 // Extracted from TPoseidonNativeServer. Owns FWSHandlers + FWSLock.
 // Transport operations are provided via constructor-injected callbacks.
@@ -50,6 +50,9 @@ type
 
 implementation
 
+const
+  CDefaultMaxWSFrameSize = 16 * 1024 * 1024;  // 16 MB
+
 constructor TWebSocketManager.Create(ASend: TWSTransportSend;
   AClose: TWSTransportClose; ARecv: TWSTransportRecv;
   ABuildResponse: TWSBuildResponse);
@@ -57,7 +60,7 @@ begin
   inherited Create;
   FWSHandlers := TDictionary<string, TWSMessageCallback>.Create;
   FWSLock := TCriticalSection.Create;
-  FMaxWSFrameSize := 16 * 1024 * 1024;  // 16 MB
+  FMaxWSFrameSize := CDefaultMaxWSFrameSize;
   FSend := ASend;
   FClose := AClose;
   FRecv := ARecv;
@@ -111,7 +114,7 @@ begin
   end;
 
   LResp := TWebSocketUtils.BuildHandshakeResponse(LKey, LDeflate);
-  LConn.WSMode := CM_WEBSOCKET;
+  LConn.WSMode := CCMWebSocket;
   LConn.WSPath := AReq.Path;
   LConn.WSDeflate := LDeflate;
   LConn.KeepAlive := True;

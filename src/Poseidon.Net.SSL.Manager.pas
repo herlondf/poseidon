@@ -1,6 +1,6 @@
 unit Poseidon.Net.SSL.Manager;
 
-// TSSLManager (#85) — SSL/TLS configuration: context creation, SNI, mTLS.
+// TSSLManager — SSL/TLS configuration: context creation, SNI, mTLS.
 //
 // Extracted from TPoseidonNativeServer. Owns FSSLCtx, FCertCtxByHost,
 // FSSLEnabled, FMinTLSVersion. Runtime SSL I/O (_EncryptAndSend,

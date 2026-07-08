@@ -1,6 +1,6 @@
 unit Poseidon.Net.Pool.Buffer;
 
-// P-2: Multi-tier object pool for AccumBuf buffers.
+// Multi-tier object pool for AccumBuf buffers.
 //
 // Three tiers by buffer size:
 //   Tier 0 —   8 KB (256 slots) — initial connection buffer, ping/small requests
@@ -188,7 +188,7 @@ end;
 
 class procedure TBufferPool.Release(var ABuf: TBytes);
 var
-  LLen:   Integer;
+  LLen: Integer;
   LCache: TThreadLocalBufCache;
 begin
   LLen := Length(ABuf);

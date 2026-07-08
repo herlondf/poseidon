@@ -1,6 +1,6 @@
 unit Poseidon.Net.Dispatcher;
 
-// TProtocolDispatcher — Pipeline pattern (#83).
+// TProtocolDispatcher — Pipeline pattern.
 //
 // Replaces the dual _DispatchFull/_DispatchLightweight paths with a composable
 // array of TDispatchStep methods walked in a tight loop.  The pipeline is
@@ -32,6 +32,9 @@ uses
   Poseidon.Net.ResponseBuilder,
   Poseidon.Net.Interfaces;
 
+const
+  CMaxDispatchSteps = 7;
+
 type
   // --------------------------------------------------------------------------
   // Config snapshot — fields read on every request; copied from server fields.
@@ -61,7 +64,7 @@ type
     procedure PostRecv(AConn: Pointer);
     procedure CloseConn(AConn: Pointer);
     procedure SendResponse(AConn: Pointer; const AData: TBytes; AActualLen: Integer);
-    // #61: Vectored send — headers + body separately, no concatenation
+    // Vectored send — headers + body separately, no concatenation
     procedure SendResponseV(AConn: Pointer;
       const AHeaders: TBytes; AHdrLen: Integer;
       const ABody: TBytes; ABodyLen: Integer);
@@ -116,9 +119,9 @@ type
 
   TProtocolDispatcher = class
   private
-    FCallbacks:  IDispatchCallbacks;
-    FSteps:      array[0..7] of TDispatchStep;
-    FStepCount:  Integer;
+    FCallbacks: IDispatchCallbacks;
+    FSteps: array[0..CMaxDispatchSteps] of TDispatchStep;
+    FStepCount: Integer;
     FLightweight: Boolean;
 
     // Step methods — each ~20-40 lines, single responsibility
@@ -153,20 +156,18 @@ constructor TProtocolDispatcher.Create(ACallbacks: IDispatchCallbacks;
   ALightweight: Boolean);
 begin
   inherited Create;
-  FCallbacks   := ACallbacks;
+  FCallbacks := ACallbacks;
   FLightweight := ALightweight;
-  FStepCount   := 0;
+  FStepCount := 0;
 
   if ALightweight then
   begin
-    // Lightweight: minimal pipeline for maximum throughput
     FSteps[FStepCount] := StepSizeCheck;              Inc(FStepCount);
     FSteps[FStepCount] := StepParseHTTP1Lightweight;  Inc(FStepCount);
     FSteps[FStepCount] := StepInvokeAndRespondLightweight; Inc(FStepCount);
   end
   else
   begin
-    // Full: all protocol checks and features
     FSteps[FStepCount] := StepProxyProtocol;     Inc(FStepCount);
     FSteps[FStepCount] := StepSizeCheck;         Inc(FStepCount);
     FSteps[FStepCount] := StepH2Branch;          Inc(FStepCount);
@@ -188,8 +189,8 @@ var
   I:    Integer;
 begin
   LCtx := Default(TDispatchContext);
-  LCtx.Conn    := AConn;
-  LCtx.Config  := @AConfig;
+  LCtx.Conn := AConn;
+  LCtx.Config := @AConfig;
   LCtx.Handled := False;
 
   for I := 0 to FStepCount - 1 do
@@ -320,7 +321,7 @@ var
 begin
   LConn := TNativeConn(ACtx.Conn);
 
-  if LConn.WSMode <> CM_WEBSOCKET then
+  if LConn.WSMode <> CCMWebSocket then
     Exit;
 
   if FCallbacks.DispatchWSFrames(ACtx.Conn) then
@@ -472,7 +473,7 @@ begin
   FCallbacks.InvokeRequest(ACtx.Req, ACtx.Status, ACtx.ContentType,
     ACtx.Body, ACtx.Extra);
 
-  // #61: vectored send — build headers separately, body sent as-is
+  // Vectored send — build headers separately, body sent as-is
   LHdrBuf := BuildHTTPResponseHeaders(ACtx.Status, ACtx.ContentType,
     Length(ACtx.Body), ACtx.Req.KeepAlive, ACtx.Extra,
     ACtx.Config^.SecureHeadersEnabled, ACtx.Config^.ServerBanner,
@@ -506,7 +507,7 @@ begin
   FCallbacks.InvokeRequest(ACtx.Req, ACtx.Status, ACtx.ContentType,
     ACtx.Body, ACtx.Extra);
 
-  // #61: vectored send — headers + body separately
+  // Vectored send — headers + body separately
   LHdrBuf := BuildHTTPResponseHeaders(ACtx.Status, ACtx.ContentType,
     Length(ACtx.Body), ACtx.Req.KeepAlive, ACtx.Extra, False, '',
     LHdrLen);

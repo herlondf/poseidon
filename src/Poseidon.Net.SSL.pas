@@ -29,17 +29,17 @@ const
   SSL_TLSEXT_ERR_ALERT_FATAL         = 2;
   SSL_TLSEXT_ERR_NOACK               = 3;
 
-  // S-5: mTLS — client certificate verification modes
+  // mTLS — client certificate verification modes
   SSL_VERIFY_NONE                  = $00;
   SSL_VERIFY_PEER                  = $01;
   SSL_VERIFY_FAIL_IF_NO_PEER_CERT  = $02;
 
-  // S-6: minimum TLS protocol version (OpenSSL 1.1.0+)
+  // Minimum TLS protocol version (OpenSSL 1.1.0+)
   SSL_CTRL_SET_MIN_PROTO_VERSION   = 123;
   TLS1_2_VERSION                   = $0303;
   TLS1_3_VERSION                   = $0304;
 
-  // A-4: TLS session cache (macros over SSL_CTX_ctrl)
+  // TLS session cache (macros over SSL_CTX_ctrl)
   SSL_CTRL_SET_SESS_CACHE_SIZE     = 42;
   SSL_CTRL_SET_SESS_CACHE_MODE     = 44;
   SSL_SESS_CACHE_OFF               = $0000;
@@ -80,41 +80,41 @@ type
 
   TPoseidonSSL = class
   private
-    class var FLock:      TCriticalSection;
-    class var FLoaded:    Boolean;
-    class var FLibSSL:    TPoseidonLibHandle;
+    class var FLock: TCriticalSection;
+    class var FLoaded: Boolean;
+    class var FLibSSL: TPoseidonLibHandle;
     class var FLibCrypto: TPoseidonLibHandle;
 
-    class var f_TLS_server_method:            TFn_method;
-    class var f_SSL_CTX_new:                  TFn_ctx_new;
-    class var f_SSL_CTX_free:                 TFn_ctx_free;
+    class var f_TLS_server_method: TFn_method;
+    class var f_SSL_CTX_new: TFn_ctx_new;
+    class var f_SSL_CTX_free: TFn_ctx_free;
     class var f_SSL_CTX_use_certificate_file: TFn_ctx_file;
-    class var f_SSL_CTX_use_PrivateKey_file:  TFn_ctx_file;
-    class var f_SSL_CTX_check_private_key:    TFn_ctx_chkkey;
-    class var f_SSL_new:                      TFn_ssl_new;
-    class var f_SSL_free:                     TFn_ssl_free;
-    class var f_SSL_set_accept_state:         TFn_ssl_state;
-    class var f_SSL_do_handshake:             TFn_ssl_hands;
-    class var f_SSL_read:                     TFn_ssl_rw;
-    class var f_SSL_write:                    TFn_ssl_rw;
-    class var f_SSL_get_error:                TFn_ssl_err;
-    class var f_SSL_pending:                  TFn_ssl_pend;
-    class var f_SSL_set_bio:                  TFn_ssl_setbio;
-    class var f_BIO_s_mem:                    TFn_bio_smem;
-    class var f_BIO_new:                      TFn_bio_new;
-    class var f_BIO_write:                    TFn_bio_rw;
-    class var f_BIO_read:                     TFn_bio_rw;
-    class var f_BIO_ctrl:                     TFn_bio_ctrl;
-    class var f_SSL_CTX_ctrl:                 TFn_ctx_ctrl;
-    class var f_SSL_CTX_callback_ctrl:        TFn_ctx_cbctrl;
-    class var f_SSL_get_servername:           TFn_ssl_getname;
-    class var f_SSL_set_SSL_CTX:              TFn_ssl_setctx;
-    class var f_ERR_get_error:                TFn_err_get;
-    class var f_ERR_error_string:             TFn_err_str;
-    class var f_SSL_CTX_set_alpn_select_cb:       TFn_ctx_alpn_cb;
-    class var f_SSL_get0_alpn_selected:           TFn_ssl_get0_alpn;
-    class var f_SSL_CTX_set_verify:               TFn_ctx_set_verify;
-    class var f_SSL_CTX_load_verify_locations:    TFn_ctx_load_verify;
+    class var f_SSL_CTX_use_PrivateKey_file: TFn_ctx_file;
+    class var f_SSL_CTX_check_private_key: TFn_ctx_chkkey;
+    class var f_SSL_new: TFn_ssl_new;
+    class var f_SSL_free: TFn_ssl_free;
+    class var f_SSL_set_accept_state: TFn_ssl_state;
+    class var f_SSL_do_handshake: TFn_ssl_hands;
+    class var f_SSL_read: TFn_ssl_rw;
+    class var f_SSL_write: TFn_ssl_rw;
+    class var f_SSL_get_error: TFn_ssl_err;
+    class var f_SSL_pending: TFn_ssl_pend;
+    class var f_SSL_set_bio: TFn_ssl_setbio;
+    class var f_BIO_s_mem: TFn_bio_smem;
+    class var f_BIO_new: TFn_bio_new;
+    class var f_BIO_write: TFn_bio_rw;
+    class var f_BIO_read: TFn_bio_rw;
+    class var f_BIO_ctrl: TFn_bio_ctrl;
+    class var f_SSL_CTX_ctrl: TFn_ctx_ctrl;
+    class var f_SSL_CTX_callback_ctrl: TFn_ctx_cbctrl;
+    class var f_SSL_get_servername: TFn_ssl_getname;
+    class var f_SSL_set_SSL_CTX: TFn_ssl_setctx;
+    class var f_ERR_get_error: TFn_err_get;
+    class var f_ERR_error_string: TFn_err_str;
+    class var f_SSL_CTX_set_alpn_select_cb: TFn_ctx_alpn_cb;
+    class var f_SSL_get0_alpn_selected: TFn_ssl_get0_alpn;
+    class var f_SSL_CTX_set_verify: TFn_ctx_set_verify;
+    class var f_SSL_CTX_load_verify_locations: TFn_ctx_load_verify;
 
     class function  TryLoadLib(const AName: string): TPoseidonLibHandle;
     class function  RequireProc(ALib: TPoseidonLibHandle; const AName: string): Pointer;
@@ -154,16 +154,16 @@ type
     class procedure CTX_SetALPN(ACtx: Pointer; AArg: Pointer); static;
     class function  SSL_GetSelectedProtocol(ASSL: Pointer): string; static;
 
-    // S-5: mTLS — require client certificate signed by ACAFile (PEM CA bundle).
+    // mTLS — require client certificate signed by ACAFile (PEM CA bundle).
     // Call after CTX_New. Raises EPoseidonSSL when ACAFile cannot be loaded.
     class procedure CTX_ConfigureMTLS(ACtx: Pointer; const ACAFile: string);
 
-    // S-6: reject TLS handshakes below AMinVersion.
+    // Reject TLS handshakes below AMinVersion.
     // Use constants TLS1_2_VERSION ($0303) or TLS1_3_VERSION ($0304).
     // No-op when AMinVersion = 0 (library default — OpenSSL 3.x: TLS 1.2).
     class procedure CTX_SetMinVersion(ACtx: Pointer; AMinVersion: Integer);
 
-    // A-4: enable server-side TLS session cache to reduce handshake cost on
+    // Enable server-side TLS session cache to reduce handshake cost on
     // reconnections. ACacheSize is the max number of cached sessions (default 1024).
     class procedure CTX_EnableSessionCache(ACtx: Pointer; ACacheSize: Integer = 1024);
   end;
@@ -179,9 +179,9 @@ uses
 
 class constructor TPoseidonSSL.Create;
 begin
-  FLock      := TCriticalSection.Create;
-  FLoaded    := False;
-  FLibSSL    := 0;
+  FLock := TCriticalSection.Create;
+  FLoaded := False;
+  FLibSSL := 0;
   FLibCrypto := 0;
 end;
 
@@ -260,32 +260,32 @@ begin
 {$ENDIF}
   if @LInit <> nil then LInit;
 
-  @f_TLS_server_method             := RequireProc(FLibSSL, 'TLS_server_method');
-  @f_SSL_CTX_new                   := RequireProc(FLibSSL, 'SSL_CTX_new');
-  @f_SSL_CTX_free                  := RequireProc(FLibSSL, 'SSL_CTX_free');
-  @f_SSL_CTX_use_certificate_file  := RequireProc(FLibSSL, 'SSL_CTX_use_certificate_file');
-  @f_SSL_CTX_use_PrivateKey_file   := RequireProc(FLibSSL, 'SSL_CTX_use_PrivateKey_file');
-  @f_SSL_CTX_check_private_key     := RequireProc(FLibSSL, 'SSL_CTX_check_private_key');
-  @f_SSL_new                       := RequireProc(FLibSSL, 'SSL_new');
-  @f_SSL_free                      := RequireProc(FLibSSL, 'SSL_free');
-  @f_SSL_set_accept_state          := RequireProc(FLibSSL, 'SSL_set_accept_state');
-  @f_SSL_do_handshake              := RequireProc(FLibSSL, 'SSL_do_handshake');
-  @f_SSL_read                      := RequireProc(FLibSSL, 'SSL_read');
-  @f_SSL_write                     := RequireProc(FLibSSL, 'SSL_write');
-  @f_SSL_get_error                 := RequireProc(FLibSSL, 'SSL_get_error');
-  @f_SSL_pending                   := RequireProc(FLibSSL, 'SSL_pending');
-  @f_SSL_set_bio                   := RequireProc(FLibSSL, 'SSL_set_bio');
-  @f_BIO_s_mem                     := RequireProc(FLibCrypto, 'BIO_s_mem');
-  @f_BIO_new                       := RequireProc(FLibCrypto, 'BIO_new');
-  @f_BIO_write                     := RequireProc(FLibCrypto, 'BIO_write');
-  @f_BIO_read                      := RequireProc(FLibCrypto, 'BIO_read');
-  @f_BIO_ctrl                      := RequireProc(FLibCrypto, 'BIO_ctrl');
-  @f_SSL_CTX_ctrl                  := RequireProc(FLibSSL,    'SSL_CTX_ctrl');
-  @f_SSL_CTX_callback_ctrl         := RequireProc(FLibSSL,    'SSL_CTX_callback_ctrl');
-  @f_SSL_get_servername            := RequireProc(FLibSSL,    'SSL_get_servername');
-  @f_SSL_set_SSL_CTX               := RequireProc(FLibSSL,    'SSL_set_SSL_CTX');
-  @f_ERR_get_error                 := RequireProc(FLibCrypto, 'ERR_get_error');
-  @f_ERR_error_string              := RequireProc(FLibCrypto, 'ERR_error_string');
+  @f_TLS_server_method := RequireProc(FLibSSL, 'TLS_server_method');
+  @f_SSL_CTX_new := RequireProc(FLibSSL, 'SSL_CTX_new');
+  @f_SSL_CTX_free := RequireProc(FLibSSL, 'SSL_CTX_free');
+  @f_SSL_CTX_use_certificate_file := RequireProc(FLibSSL, 'SSL_CTX_use_certificate_file');
+  @f_SSL_CTX_use_PrivateKey_file := RequireProc(FLibSSL, 'SSL_CTX_use_PrivateKey_file');
+  @f_SSL_CTX_check_private_key := RequireProc(FLibSSL, 'SSL_CTX_check_private_key');
+  @f_SSL_new := RequireProc(FLibSSL, 'SSL_new');
+  @f_SSL_free := RequireProc(FLibSSL, 'SSL_free');
+  @f_SSL_set_accept_state := RequireProc(FLibSSL, 'SSL_set_accept_state');
+  @f_SSL_do_handshake := RequireProc(FLibSSL, 'SSL_do_handshake');
+  @f_SSL_read := RequireProc(FLibSSL, 'SSL_read');
+  @f_SSL_write := RequireProc(FLibSSL, 'SSL_write');
+  @f_SSL_get_error := RequireProc(FLibSSL, 'SSL_get_error');
+  @f_SSL_pending := RequireProc(FLibSSL, 'SSL_pending');
+  @f_SSL_set_bio := RequireProc(FLibSSL, 'SSL_set_bio');
+  @f_BIO_s_mem := RequireProc(FLibCrypto, 'BIO_s_mem');
+  @f_BIO_new := RequireProc(FLibCrypto, 'BIO_new');
+  @f_BIO_write := RequireProc(FLibCrypto, 'BIO_write');
+  @f_BIO_read := RequireProc(FLibCrypto, 'BIO_read');
+  @f_BIO_ctrl := RequireProc(FLibCrypto, 'BIO_ctrl');
+  @f_SSL_CTX_ctrl := RequireProc(FLibSSL, 'SSL_CTX_ctrl');
+  @f_SSL_CTX_callback_ctrl := RequireProc(FLibSSL, 'SSL_CTX_callback_ctrl');
+  @f_SSL_get_servername := RequireProc(FLibSSL, 'SSL_get_servername');
+  @f_SSL_set_SSL_CTX := RequireProc(FLibSSL, 'SSL_set_SSL_CTX');
+  @f_ERR_get_error := RequireProc(FLibCrypto, 'ERR_get_error');
+  @f_ERR_error_string := RequireProc(FLibCrypto, 'ERR_error_string');
 
   // ALPN — optional, requires OpenSSL 1.0.2+
 {$IFDEF MSWINDOWS}
@@ -296,7 +296,7 @@ begin
   @f_SSL_get0_alpn_selected     := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_get0_alpn_selected')));
 {$ENDIF}
 
-  // S-5/S-6 — present in all OpenSSL versions; loaded as optional for safety
+  // Present in all OpenSSL versions; loaded as optional for safety
 {$IFDEF MSWINDOWS}
   @f_SSL_CTX_set_verify            := GetProcAddress(FLibSSL, 'SSL_CTX_set_verify');
   @f_SSL_CTX_load_verify_locations := GetProcAddress(FLibSSL, 'SSL_CTX_load_verify_locations');
@@ -510,7 +510,7 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// S-5: mTLS — require client certificate
+// mTLS — require client certificate
 // ---------------------------------------------------------------------------
 
 class procedure TPoseidonSSL.CTX_ConfigureMTLS(ACtx: Pointer; const ACAFile: string);
@@ -527,7 +527,7 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// S-6: minimum TLS version
+// Minimum TLS version
 // SSL_CTX_set_min_proto_version is a macro: SSL_CTX_ctrl(ctx, 123, version, NULL)
 // ---------------------------------------------------------------------------
 
@@ -538,7 +538,7 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// A-4: TLS session resumption — reduces handshake RTT on reconnections
+// TLS session resumption — reduces handshake RTT on reconnections
 // SSL_CTX_set_session_cache_mode and SSL_CTX_sess_set_cache_size are macros
 // over SSL_CTX_ctrl, so f_SSL_CTX_ctrl (already loaded) handles both.
 // ---------------------------------------------------------------------------
@@ -546,7 +546,7 @@ end;
 class procedure TPoseidonSSL.CTX_EnableSessionCache(ACtx: Pointer; ACacheSize: Integer);
 begin
   f_SSL_CTX_ctrl(ACtx, SSL_CTRL_SET_SESS_CACHE_MODE, SSL_SESS_CACHE_SERVER, nil);
-  f_SSL_CTX_ctrl(ACtx, SSL_CTRL_SET_SESS_CACHE_SIZE,  ACacheSize,            nil);
+  f_SSL_CTX_ctrl(ACtx, SSL_CTRL_SET_SESS_CACHE_SIZE, ACacheSize, nil);
 end;
 
 end.

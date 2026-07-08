@@ -5,11 +5,11 @@ unit Poseidon.Net.Connection;
 // Owns the socket handle, the accumulation buffer, SSL BIO pointers, WebSocket
 // and HTTP/2 upgrade state, and (on Linux) the non-blocking send state.
 //
-// Lifecycle (#43 — IOCP race fix):
-//   Created  → FRefCount = 1  (server "owns" one ref)
-//   PostRecv / PostSend → AddRef before WSARecv/WSASend (one ref per in-flight op)
-//   Worker loop completion → Release after the callback (drops the IOCP-op ref)
-//   _CloseConn → Release (drops the server ref); may not reach zero yet if ops
+// Lifecycle (IOCP race fix):
+//   Created  -> FRefCount = 1  (server "owns" one ref)
+//   PostRecv / PostSend -> AddRef before WSARecv/WSASend (one ref per in-flight op)
+//   Worker loop completion -> Release after the callback (drops the IOCP-op ref)
+//   _CloseConn -> Release (drops the server ref); may not reach zero yet if ops
 //                are still in-flight — the object lives until the last Release.
 //   AddRef/Release are thread-safe via TInterlocked.
 
@@ -27,50 +27,50 @@ uses
   Poseidon.Net.WebSocket;
 
 const
-  CM_HTTP      = 0;
-  CM_WEBSOCKET = 1;
+  CCMHttp = 0;
+  CCMWebSocket = 1;
 
 type
   TNativeConn = class
   private
-    FRefCount:     Integer;   // #43: atomic ref count; reaches 0 → Destroy
-    _PadRef:       array[0..14] of Integer; // #69: cache-line padding — isolate FRefCount
+    FRefCount: Integer; // Atomic ref count; reaches 0 -> Destroy
+    FPadRef: array[0..14] of Integer; // Cache-line padding — isolate FRefCount
   public
 {$IFDEF MSWINDOWS}
-    Socket:     TSocket;
-    RioRQ:      Pointer;     // #78: RIO request queue handle (nil when using IOCP)
+    Socket: TSocket;
+    RioRQ: Pointer;
 {$ELSE}
-    Socket:     Integer;
+    Socket: Integer;
 {$ENDIF}
-    RemoteAddr:    string;
-    AccumBuf:      TBytes;
-    AccumLen:      Integer;
-    KeepAlive:     Boolean;
-    LastActivityTick: UInt64;    // TThread.GetTickCount64 — drives idle-timeout
-    InFlightPool:  Integer;      // atomic counter: >0 while pool lambdas hold this connection; idle-sweep skips it
-    _PadInflight:  array[0..14] of Integer; // #69: cache-line padding — isolate InFlightPool
-    SSLHandle:     Pointer;    // SSL* (nil when plain HTTP)
-    SSLReadBio:    Pointer;    // BIO* — encrypted bytes from network
-    SSLWriteBio:   Pointer;    // BIO* — encrypted bytes to network
-    SSLHandshook:  Boolean;
-    WSMode:        Byte;
-    WSPath:        string;
-    WSConn:        IPoseidonWSConn;
-    WSDeflate:     Boolean;    // True when permessage-deflate was negotiated
-    H2Conn:        TH2Conn;    // non-nil when connection uses HTTP/2 (via ALPN)
-    PPParsed:      Boolean;    // True once Proxy Protocol header has been consumed
+    RemoteAddr: string;
+    AccumBuf: TBytes;
+    AccumLen: Integer;
+    KeepAlive: Boolean;
+    LastActivityTick: UInt64;
+    InFlightPool: Integer;
+    FPadInflight: array[0..14] of Integer; // Cache-line padding — isolate InFlightPool
+    SSLHandle: Pointer;
+    SSLReadBio: Pointer;
+    SSLWriteBio: Pointer;
+    SSLHandshook: Boolean;
+    WSMode: Byte;
+    WSPath: string;
+    WSConn: IPoseidonWSConn;
+    WSDeflate: Boolean;
+    H2Conn: TH2Conn;
+    PPParsed: Boolean;
 {$IFNDEF MSWINDOWS}
-    PendingSend:       TBytes;
-    PendingSendActual: Integer; // P-4: bytes to send; 0 = use Length(PendingSend)
-    SentBytes:         Integer;
-    OwnerEpollFd:      Integer; // #66: per-core epoll fd that owns this connection
+    PendingSend: TBytes;
+    PendingSendActual: Integer;
+    SentBytes: Integer;
+    OwnerEpollFd: Integer;
 {$ENDIF}
     // R-1: ASocket is NativeUInt so callers need no {$IFDEF} for socket type.
     // Internally cast to TSocket (Windows) or Integer (Linux).
     constructor Create(ASocket: NativeUInt; const AAddr: string);
     destructor Destroy; override;
 
-    // #43: ref-counting — thread-safe via TInterlocked.
+    // Ref-counting — thread-safe via TInterlocked.
     // Do NOT call Free directly; use Release instead.
     procedure AddRef;
     procedure Release;
@@ -78,7 +78,7 @@ type
 
 implementation
 
-// #43: import TInterlocked via SyncObjs alias — already in interface uses.
+// TInterlocked imported via SyncObjs — already in interface uses.
 
 procedure TNativeConn.AddRef;
 begin
@@ -94,30 +94,30 @@ end;
 constructor TNativeConn.Create(ASocket: NativeUInt; const AAddr: string);
 begin
 {$IFDEF MSWINDOWS}
-  Socket       := TSocket(ASocket);
-  RioRQ        := nil;
+  Socket := TSocket(ASocket);
+  RioRQ := nil;
 {$ELSE}
-  Socket       := Integer(ASocket);
+  Socket := Integer(ASocket);
 {$ENDIF}
-  RemoteAddr   := AAddr;
-  FRefCount    := 1;                    // #43: server owns one ref
-  AccumBuf     := TBufferPool.Acquire;  // pooled 8 KB
-  AccumLen     := 0;
-  KeepAlive    := False;
+  RemoteAddr := AAddr;
+  FRefCount := 1;
+  AccumBuf := TBufferPool.Acquire;
+  AccumLen := 0;
+  KeepAlive := False;
   LastActivityTick := TThread.GetTickCount64;
   InFlightPool := 0;
-  SSLHandle    := nil;
-  SSLReadBio   := nil;
-  SSLWriteBio  := nil;
+  SSLHandle := nil;
+  SSLReadBio := nil;
+  SSLWriteBio := nil;
   SSLHandshook := False;
-  WSMode       := CM_HTTP;
-  WSPath       := '';
-  WSConn       := nil;
-  WSDeflate    := False;
-  H2Conn       := nil;
-  PPParsed     := False;
+  WSMode := CCMHttp;
+  WSPath := '';
+  WSConn := nil;
+  WSDeflate := False;
+  H2Conn := nil;
+  PPParsed := False;
 {$IFNDEF MSWINDOWS}
-  OwnerEpollFd := -1;   // #66: set by epoll backend on RegisterConn
+  OwnerEpollFd := -1;
 {$ENDIF}
 end;
 

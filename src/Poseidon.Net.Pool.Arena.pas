@@ -1,6 +1,6 @@
 unit Poseidon.Net.Pool.Arena;
 
-// THeaderArena (#72) — thread-local reusable TBytes for HTTP response headers.
+// THeaderArena — thread-local reusable TBytes for HTTP response headers.
 //
 // Eliminates TBufferPool.Acquire/Release overhead in the hot dispatch path.
 // Each IO thread has one persistent TBytes that grows to accommodate the

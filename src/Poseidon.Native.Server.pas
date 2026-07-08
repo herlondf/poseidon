@@ -1,6 +1,6 @@
 unit Poseidon.Native.Server;
 
-// #94: TPoseidonServer — instance-based native API.
+// TPoseidonServer — instance-based native API.
 //
 // Zero-copy hot path: TNativeRequestContext is stack-allocated,
 // no WebBroker objects, no pool round-trips, no per-request closures.
@@ -178,7 +178,7 @@ end;
 destructor TPoseidonServer.Destroy;
 begin
   if FRunning then
-    try Stop except end;
+    try Stop except on E: Exception do; end;
   FreeAndNil(FShutdownEvent);
   FreeAndNil(FGroups);
   FreeAndNil(FRouter);

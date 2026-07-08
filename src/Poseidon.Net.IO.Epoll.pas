@@ -2,7 +2,7 @@ unit Poseidon.Net.IO.Epoll;
 
 // TEpollBackend — Linux epoll(7) backend.
 //
-// #66: Shared-nothing per-core architecture.
+// Shared-nothing per-core architecture.
 // Each worker thread has its OWN epoll fd + listen socket (SO_REUSEPORT).
 // Accept, recv, dispatch, and send all happen inline on the same thread.
 // The kernel distributes incoming connections across listen sockets via hash.
@@ -30,7 +30,7 @@ type
   private
     FWorkers: TArray<TThread>;
     FListenSockets: TArray<Integer>;
-    FEpollFds: TArray<Integer>;           // #66: per-core epoll fds
+    FEpollFds: TArray<Integer>;
     FShutdownPipes: TArray<array[0..1] of Integer>;
     FCallbacks: IIOCallbacks;
     FShutdown: Boolean;
@@ -39,7 +39,7 @@ type
     procedure _FlushSend(AConn: Pointer);
   public
     constructor Create;
-    destructor  Destroy; override;
+    destructor Destroy; override;
     // IIOBackend
     procedure StartListening(const AHost: string; APort: Integer;
       AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
@@ -65,25 +65,27 @@ implementation
 
 const
   CRecvBufSize = 32768;
-  CMaxEvents   = 256;
-  EPOLLIN      = $00000001;
-  EPOLLOUT     = $00000004;
-  EPOLLERR     = $00000008;
-  EPOLLHUP     = $00000010;
+  CMaxEvents = 256;
+  EPOLLIN = $00000001;
+  EPOLLOUT = $00000004;
+  EPOLLERR = $00000008;
+  EPOLLHUP = $00000010;
   EPOLLONESHOT = Integer($40000000);
   EPOLL_CTL_ADD = 1;
   EPOLL_CTL_DEL = 2;
   EPOLL_CTL_MOD = 3;
   EPOLL_CLOEXEC = $80000;
-  SO_REUSEPORT  = 15;
-  EAGAIN        = 11;
-  EINTR         = 4;
-  MSG_NOSIGNAL  = $4000;
+  SO_REUSEPORT = 15;
+  EAGAIN = 11;
+  EINTR = 4;
+  MSG_NOSIGNAL = $4000;
   SOCK_NONBLOCK = $800;
-  SOCK_CLOEXEC  = $80000;
+  SOCK_CLOEXEC = $80000;
 
-  TCP_CORK         = 3;
-  // #102: SO_ZEROCOPY / MSG_ZEROCOPY removed — requires error queue polling
+  TCP_CORK = 3;
+  CTCP_FASTOPEN = 23;
+  CTCP_DEFER_ACCEPT = 9;
+  // SO_ZEROCOPY / MSG_ZEROCOPY removed — requires error queue polling
   // (MSG_ERRQUEUE) to avoid data corruption. SO_BUSY_POLL removed from default
   // path — burns CPU, should be opt-in for latency-critical scenarios.
 
@@ -93,17 +95,17 @@ type
   epoll_data_t = record
     case Integer of
       0: (ptr: Pointer);
-      1: (fd:  Integer);
+      1: (fd: Integer);
   end;
   epoll_event = packed record
     events: UInt32;
-    data:   epoll_data_t;
+    data: epoll_data_t;
   end;
 
-  // #61: Vectored I/O
+  // Vectored I/O
   iovec = record
     iov_base: Pointer;
-    iov_len:  NativeUInt;
+    iov_len: NativeUInt;
   end;
 
 function epoll_create1(flags: Integer): Integer; cdecl;
@@ -138,12 +140,11 @@ function _LinuxSend(sockfd: Integer; buf: Pointer; len: NativeUInt; flags: Integ
 function _LinuxWritev(fd: Integer; iov: Pointer; iovcnt: Integer): NativeInt; cdecl;
   external 'libc.so.6' name 'writev';
 
-// #66: threadvar so _OnNewSocket can set OwnerEpollFd on new connections
 threadvar
   GCurrentEpollFd: Integer;
 
 type
-  // #66: helper thread class to capture core index by value (avoids closure bug)
+  // Helper thread class to capture core index by value (avoids closure bug)
   TCoreWorkerThread = class(TThread)
   private
     FBackend: TEpollBackend;
@@ -189,9 +190,8 @@ procedure TEpollBackend.StartListening(const AHost: string; APort: Integer;
   function CreateListenSocket: Integer;
   var
     LAddr: sockaddr_in;
-    LOne:  Integer;
+    LOne: Integer;
   begin
-    // #66: SOCK_NONBLOCK required — accept loop must not block the worker
     Result := _LinuxSocket(AF_INET, SOCK_STREAM or SOCK_NONBLOCK or SOCK_CLOEXEC, 0);
     if Result < 0 then
       raise Exception.Create('socket() failed: ' + IntToStr(GetLastError));
@@ -200,12 +200,12 @@ procedure TEpollBackend.StartListening(const AHost: string; APort: Integer;
     _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEADDR, @LOne, SizeOf(LOne));
     _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEPORT, @LOne, SizeOf(LOne));
     if AFastOpen then
-      _LinuxSetsockopt(Result, IPPROTO_TCP, 23 {TCP_FASTOPEN}, @LOne, SizeOf(LOne));
-    _LinuxSetsockopt(Result, IPPROTO_TCP, 9 {TCP_DEFER_ACCEPT}, @LOne, SizeOf(LOne));
+      _LinuxSetsockopt(Result, IPPROTO_TCP, CTCP_FASTOPEN, @LOne, SizeOf(LOne));
+    _LinuxSetsockopt(Result, IPPROTO_TCP, CTCP_DEFER_ACCEPT, @LOne, SizeOf(LOne));
 
     FillChar(LAddr, SizeOf(LAddr), 0);
     LAddr.sin_family := AF_INET;
-    LAddr.sin_port   := htons(APort);
+    LAddr.sin_port := htons(APort);
     if (AHost = '0.0.0.0') or (AHost = '') then
       LAddr.sin_addr.s_addr := INADDR_ANY
     else
@@ -223,9 +223,8 @@ var
   LCoreN: Integer;
 begin
   FCallbacks := ACallbacks;
-  FShutdown  := False;
+  FShutdown := False;
 
-  // #66: N cores, each with its own epoll + listen socket
   LCoreN := AWorkerCount;
   if LCoreN < 1 then LCoreN := 1;
 
@@ -246,16 +245,15 @@ begin
       raise Exception.Create('epoll_create1 failed for core ' + IntToStr(I));
 
     FillChar(LEv, SizeOf(LEv), 0);
-    LEv.events   := EPOLLIN;
+    LEv.events := EPOLLIN;
     LEv.data.ptr := nil;
     epoll_ctl(FEpollFds[I], EPOLL_CTL_ADD, FShutdownPipes[I][0], @LEv);
 
     FillChar(LEv, SizeOf(LEv), 0);
-    LEv.events   := EPOLLIN;
+    LEv.events := EPOLLIN;
     LEv.data.ptr := CListenSentinel;
     epoll_ctl(FEpollFds[I], EPOLL_CTL_ADD, FListenSockets[I], @LEv);
 
-    // #66: use TCoreWorkerThread — captures core index by value (no closure bug)
     FWorkers[I] := TCoreWorkerThread.Create(Self, I);
     FWorkers[I].Start;
   end;
@@ -263,9 +261,8 @@ end;
 
 procedure TEpollBackend.StopAccept;
 begin
-  // #108: just set shutdown flag — listen sockets are closed in JoinWorkers
-  // after workers have exited, avoiding race where a worker calls accept4 on
-  // a closed fd.
+  // Listen sockets are closed in JoinWorkers after workers have exited,
+  // avoiding race where a worker calls accept4 on a closed fd.
   FShutdown := True;
 end;
 
@@ -304,7 +301,6 @@ begin
   end;
   SetLength(FEpollFds, 0);
   SetLength(FShutdownPipes, 0);
-  // #108: close listen sockets AFTER workers have exited
   for I := 0 to High(FListenSockets) do
   begin
     if FListenSockets[I] >= 0 then
@@ -314,27 +310,25 @@ begin
   SetLength(FListenSockets, 0);
 end;
 
-// #66: RegisterConn sets OwnerEpollFd from the calling thread's GCurrentEpollFd
 procedure TEpollBackend.RegisterConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
-  LEv:   epoll_event;
+  LEv: epoll_event;
 begin
   LConn.OwnerEpollFd := GCurrentEpollFd;
   FillChar(LEv, SizeOf(LEv), 0);
-  LEv.events   := EPOLLIN or EPOLLONESHOT;
+  LEv.events := EPOLLIN or EPOLLONESHOT;
   LEv.data.ptr := AConn;
   epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_ADD, LConn.Socket, @LEv);
 end;
 
-// #66: PostRecv uses the connection's OwnerEpollFd
 procedure TEpollBackend.PostRecv(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
-  LEv:   epoll_event;
+  LEv: epoll_event;
 begin
   FillChar(LEv, SizeOf(LEv), 0);
-  LEv.events   := EPOLLIN or EPOLLONESHOT;
+  LEv.events := EPOLLIN or EPOLLONESHOT;
   LEv.data.ptr := AConn;
   epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_MOD, LConn.Socket, @LEv);
 end;
@@ -355,17 +349,16 @@ begin
     Exit;
   end;
 
-  // #71: TCP_CORK — accumulate data into one TCP segment
   LCork := 1;
   _LinuxSetsockopt(LConn.Socket, IPPROTO_TCP, TCP_CORK, @LCork, SizeOf(LCork));
 
-  LConn.PendingSend       := AData;
+  LConn.PendingSend := AData;
   LConn.PendingSendActual := AActualLen;
-  LConn.SentBytes         := 0;
+  LConn.SentBytes := 0;
   _FlushSend(AConn);
 end;
 
-// #61: Vectored send — writev() headers+body in one syscall
+// Vectored send — writev() headers+body in one syscall
 procedure TEpollBackend.PostSendV(AConn: Pointer;
   const AHeaders: TBytes; AHdrLen: Integer;
   const ABody: TBytes; ABodyLen: Integer);
@@ -398,17 +391,16 @@ begin
   if LHLen > 0 then
   begin
     LVec[LCount].iov_base := @AHeaders[0];
-    LVec[LCount].iov_len  := LHLen;
+    LVec[LCount].iov_len := LHLen;
     Inc(LCount);
   end;
   if LBLen > 0 then
   begin
     LVec[LCount].iov_base := @ABody[0];
-    LVec[LCount].iov_len  := LBLen;
+    LVec[LCount].iov_len := LBLen;
     Inc(LCount);
   end;
 
-  // #71: TCP_CORK — accumulate data into one TCP segment
   LCork := 1;
   _LinuxSetsockopt(LConn.Socket, IPPROTO_TCP, TCP_CORK, @LCork, SizeOf(LCork));
 
@@ -447,9 +439,9 @@ begin
   LTmpH := AHeaders; TBufferPool.Release(LTmpH);
   LTmpB := ABody;    TBufferPool.Release(LTmpB);
 
-  LConn.PendingSend       := LConcat;
+  LConn.PendingSend := LConcat;
   LConn.PendingSendActual := LTotal - Integer(LN);
-  LConn.SentBytes         := 0;
+  LConn.SentBytes := 0;
   _FlushSend(AConn);
 end;
 
@@ -492,7 +484,7 @@ begin
       if GetLastError = EAGAIN then
       begin
         FillChar(LEv, SizeOf(LEv), 0);
-        LEv.events   := EPOLLOUT or EPOLLONESHOT;
+        LEv.events := EPOLLOUT or EPOLLONESHOT;
         LEv.data.ptr := AConn;
         epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_MOD, LConn.Socket, @LEv);
       end
@@ -502,7 +494,6 @@ begin
     end;
   end;
 
-  // #71: uncork after all bytes sent
   LCork := 0;
   _LinuxSetsockopt(LConn.Socket, IPPROTO_TCP, TCP_CORK, @LCork, SizeOf(LCork));
 
@@ -531,9 +522,8 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// #66: Per-core worker loop — shared-nothing architecture
+// Per-core worker loop — shared-nothing architecture.
 // Each worker owns: listen socket + epoll fd + its connections.
-// Accept, recv, dispatch, and send all happen inline on the same thread.
 // ---------------------------------------------------------------------------
 
 procedure TEpollBackend._CoreWorkerLoop(ACoreIdx: Integer);
@@ -551,9 +541,9 @@ var
   LIP: AnsiString;
   LOne: Integer;
 begin
-  LEpollFd  := FEpollFds[ACoreIdx];
+  LEpollFd := FEpollFds[ACoreIdx];
   LListenFd := FListenSockets[ACoreIdx];
-  LDone     := False;
+  LDone := False;
 
   while not LDone do
   begin
@@ -573,7 +563,6 @@ begin
         Break;
       end;
 
-      // #66: Listen socket ready — accept new connections inline
       if LEvents[I].data.ptr = CListenSentinel then
       begin
         while not FShutdown do
@@ -589,7 +578,6 @@ begin
           _LinuxSetsockopt(LNewFd, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
 
           LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
-          // #66: set threadvar BEFORE OnNewConn so RegisterConn uses this core's epoll
           GCurrentEpollFd := LEpollFd;
           try
             FCallbacks.OnNewConn(NativeUInt(LNewFd),

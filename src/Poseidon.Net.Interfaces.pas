@@ -1,6 +1,6 @@
 unit Poseidon.Net.Interfaces;
 
-// R-6: Dependency-Inversion contracts for TPoseidonNativeServer.
+// Dependency-Inversion contracts for TPoseidonNativeServer.
 //
 // Defines two injectable interfaces that decouple the server from its
 // concrete dependencies. Each interface has a default implementation backed
@@ -35,15 +35,12 @@ type
   // -----------------------------------------------------------------------
   ISSLProvider = interface
     ['{C3D4E5F6-A7B8-4C5D-0E1F-2A3B4C5D6E7F}']
-    // Returns True when OpenSSL shared libraries are loaded and usable.
     function  IsAvailable: Boolean;
-
-    // Ensure the library is loaded; raises if unavailable.
     procedure EnsureLoaded;
 
     // SSL_CTX lifecycle
-    function  NewContext: Pointer;                    // SSL_CTX_new
-    procedure FreeContext(ACtx: Pointer);             // SSL_CTX_free
+    function  NewContext: Pointer; // SSL_CTX_new
+    procedure FreeContext(ACtx: Pointer); // SSL_CTX_free
 
     // Certificate / key loading
     procedure LoadCert(ACtx: Pointer; const AFile: string);
@@ -61,9 +58,9 @@ type
     procedure SetCTXOnSSL(ASSL: Pointer; ACtx: Pointer); // SSL_set_SSL_CTX (SNI switch)
 
     // SSL object lifecycle
-    function  NewSSL(ACtx: Pointer): Pointer;            // SSL_new
+    function  NewSSL(ACtx: Pointer): Pointer; // SSL_new
     procedure SetupServerBIOs(ASSL: Pointer; out AReadBIO, AWriteBIO: Pointer);
-    procedure FreeSSL(ASSL: Pointer);                    // SSL_free
+    procedure FreeSSL(ASSL: Pointer); // SSL_free
     function  GetSelectedProtocol(ASSL: Pointer): string; // ALPN
 
     // BIO I/O
@@ -290,7 +287,7 @@ end;
 // ===========================================================================
 
 var
-  GBufferPool:  IBufferPool;
+  GBufferPool: IBufferPool;
   GSSLProvider: ISSLProvider;
 
 function DefaultBufferPool: IBufferPool;
@@ -308,11 +305,11 @@ begin
 end;
 
 initialization
-  GBufferPool  := nil;
+  GBufferPool := nil;
   GSSLProvider := nil;
 
 finalization
-  GBufferPool  := nil;
+  GBufferPool := nil;
   GSSLProvider := nil;
 
 end.

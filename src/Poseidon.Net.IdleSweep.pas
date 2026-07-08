@@ -1,6 +1,6 @@
 unit Poseidon.Net.IdleSweep;
 
-// TIdleSweepManager (#88) — background thread that closes idle connections.
+// TIdleSweepManager — background thread that closes idle connections.
 //
 // Extracted from TPoseidonNativeServer._IdleSweepLoop to follow SRP.
 // Uses TConnectionManager.Snapshot for thread-safe enumeration and
@@ -20,13 +20,13 @@ uses
 type
   TIdleSweepManager = class
   private
-    FIdleTimeoutMs:  Integer;
-    FSweepThread:    TThread;
-    FStopEvent:      TEvent;
-    FConnManager:    TConnectionManager;
-    FIOBackend:      IIOBackend;
-    FOnLog:          TOnPoseidonLog;
-    FActive:         PBoolean;  // points to server's FActive flag
+    FIdleTimeoutMs: Integer;
+    FSweepThread: TThread;
+    FStopEvent: TEvent;
+    FConnManager: TConnectionManager;
+    FIOBackend: IIOBackend;
+    FOnLog: TOnPoseidonLog;
+    FActive: PBoolean;
     procedure SweepLoop;
   public
     constructor Create(AConnManager: TConnectionManager;
@@ -43,18 +43,19 @@ type
 implementation
 
 const
+  CDefaultIdleTimeoutMs = 10000;
   CSweepIntervalMs = 1000;
 
 constructor TIdleSweepManager.Create(AConnManager: TConnectionManager;
   AIOBackend: IIOBackend; AActive: PBoolean);
 begin
   inherited Create;
-  FConnManager   := AConnManager;
-  FIOBackend     := AIOBackend;
-  FActive        := AActive;
-  FIdleTimeoutMs := 10000;  // default 10s
-  FStopEvent     := TEvent.Create(nil, True, False, '');
-  FSweepThread   := nil;
+  FConnManager := AConnManager;
+  FIOBackend := AIOBackend;
+  FActive := AActive;
+  FIdleTimeoutMs := CDefaultIdleTimeoutMs;
+  FStopEvent := TEvent.Create(nil, True, False, '');
+  FSweepThread := nil;
 end;
 
 destructor TIdleSweepManager.Destroy;

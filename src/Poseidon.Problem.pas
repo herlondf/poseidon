@@ -10,10 +10,10 @@ uses
 type
   TProblemDetail = record
   public
-    TypeURI:  string;
-    Title:    string;
-    Status:   Integer;
-    Detail:   string;
+    TypeURI: string;
+    Title: string;
+    Status: Integer;
+    Detail: string;
     Instance: string;
     function ToJSON: TJSONObject;
     class function CanonicalTitle(AStatus: Integer): string; static;
@@ -58,10 +58,10 @@ end;
 class function TProblemDetail.FromException(E: EPoseidonException;
   const AInstance: string): TProblemDetail;
 begin
-  Result.TypeURI  := 'about:blank';
-  Result.Status   := E.Status.ToInteger;
-  Result.Title    := CanonicalTitle(Result.Status);
-  Result.Detail   := E.Message;
+  Result.TypeURI := 'about:blank';
+  Result.Status := E.Status.ToInteger;
+  Result.Title := CanonicalTitle(Result.Status);
+  Result.Detail := E.Message;
   Result.Instance := AInstance;
 end;
 

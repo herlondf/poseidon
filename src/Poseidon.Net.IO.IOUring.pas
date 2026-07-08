@@ -61,27 +61,26 @@ type
     FPCQTail: PUInt32;
     FPCQMask: PUInt32;
     FPCQEs: Pointer;
-    FAcceptThreads: TArray<TThread>;    // #58: per-core accept threads
+    FAcceptThreads: TArray<TThread>;
     FCompThread: TThread;
     FCallbacks: IIOCallbacks;
-    FListenSockets: TArray<Integer>;    // #58: per-core listen sockets
+    FListenSockets: TArray<Integer>;
     FSQLock: TCriticalSection;
     FShutdown: Boolean;
-    FSQPoll: Boolean;                   // #60: kernel poll thread active
-    FPSQFlags: PUInt32;                 // #60: sq_off.flags for NEED_WAKEUP check
-    FRecvCtxPool: Pointer;              // #56: contiguous recv context pool
+    FSQPoll: Boolean;
+    FPSQFlags: PUInt32;
+    FRecvCtxPool: Pointer;
     FRecvFreeIdx: array of UInt16;
     FRecvFreeTop: Integer;
     FRecvPoolLock: TCriticalSection;
     FRecvPoolBase: PByte;
-    FMultishotAccept: Boolean;          // #73: multishot accept active
-    FPendingSQEs: Integer;               // #109: count of SQEs pending notification
-    // #75: registered files
-    FRegFiles: Boolean;                   // True if IORING_REGISTER_FILES succeeded
-    FRegFds: array of Int32;              // fd → index mapping table
-    FRegCount: Integer;                   // allocated slots (high-water mark)
-    FRegFreeStack: array of Integer;      // #103: recycled slot indices
-    FRegFreeTop: Integer;                 // #103: free stack top
+    FMultishotAccept: Boolean;
+    FPendingSQEs: Integer;
+    FRegFiles: Boolean;
+    FRegFds: array of Int32;
+    FRegCount: Integer;
+    FRegFreeStack: array of Integer;
+    FRegFreeTop: Integer;
     FRegLock: TCriticalSection;
     function _RegFileIndex(AFd: Integer): Integer;
     function _RegisterFd(AFd: Integer): Integer;
@@ -96,10 +95,10 @@ type
     procedure _ResubmitSend(AConn: TNativeConn);
     function  _RecvPoolAcquire: Pointer;
     procedure _RecvPoolRelease(ACtx: Pointer);
-    procedure _NotifyKernel;  // #60: io_uring_enter or SQPOLL wakeup
+    procedure _NotifyKernel;
   public
     constructor Create;
-    destructor  Destroy; override;
+    destructor Destroy; override;
     // IIOBackend
     procedure StartListening(const AHost: string; APort: Integer;
       AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
@@ -125,36 +124,35 @@ implementation
 
 const
   // Linux x86-64 syscall numbers
-  NR_IO_URING_SETUP    = NativeInt(425);
-  NR_IO_URING_ENTER    = NativeInt(426);
+  NR_IO_URING_SETUP = NativeInt(425);
+  NR_IO_URING_ENTER = NativeInt(426);
   NR_IO_URING_REGISTER = NativeInt(427);
 
   // io_uring_enter flags
-  IORING_ENTER_GETEVENTS  = UInt32(1);
-  IORING_ENTER_SQ_WAKEUP  = UInt32(2);   // #60: wake up idle SQPOLL thread
+  IORING_ENTER_GETEVENTS = UInt32(1);
+  IORING_ENTER_SQ_WAKEUP = UInt32(2);
 
   // io_uring_setup flags
-  IORING_SETUP_SQPOLL     = UInt32(2);   // #60: kernel-side SQ polling thread
-  IORING_SETUP_CQSIZE     = UInt32($200); // #109: custom CQ ring size
-  IORING_SETUP_CLAMP      = UInt32($10);  // clamp entries to max allowed
+  IORING_SETUP_SQPOLL = UInt32(2);
+  IORING_SETUP_CQSIZE = UInt32($200);
+  IORING_SETUP_CLAMP = UInt32($10);
 
   // SQ ring flags (read from sq_off.flags at runtime)
-  IORING_SQ_NEED_WAKEUP   = UInt32(1);   // #60: SQPOLL thread is idle, need wakeup
+  IORING_SQ_NEED_WAKEUP = UInt32(1);
 
   // io_uring feature flags (returned in params.features)
   IORING_FEAT_SINGLE_MMAP = UInt32($0001);
 
   // SQE opcodes
-  IORING_OP_NOP    = Byte(0);
-  IORING_OP_ACCEPT = Byte(13);   // #73: multishot accept
-  IORING_OP_RECV   = Byte(22);
-  IORING_OP_SEND   = Byte(23);
+  IORING_OP_NOP = Byte(0);
+  IORING_OP_ACCEPT = Byte(13);
+  IORING_OP_RECV = Byte(22);
+  IORING_OP_SEND = Byte(23);
 
-  // #73: multishot accept — one SQE generates multiple CQEs
-  IOSQE_ACCEPT_MULTISHOT = UInt16(1 shl 0);  // ioprio flag for multishot accept
+  IOSQE_ACCEPT_MULTISHOT = UInt16(1 shl 0);
 
   // SQE flags
-  IOSQE_FIXED_FILE = Byte(1 shl 0);  // #75: use registered file index instead of fd
+  IOSQE_FIXED_FILE = Byte(1 shl 0);
 
   // CQE flags
   IORING_CQE_F_MORE = UInt32(1 shl 1);  // more CQEs to come from this SQE
@@ -162,29 +160,32 @@ const
   // mmap file offsets for the three ring regions
   IORING_OFF_SQ_RING = Int64(0);
   IORING_OFF_CQ_RING = Int64($8000000);
-  IORING_OFF_SQES    = Int64($10000000);
+  IORING_OFF_SQES = Int64($10000000);
 
-  CUdTagSend   = UInt64(1);
-  CUdTagAccept = UInt64(2);                     // #73: accept completion
-  CUdShutdown  = UInt64($FFFFFFFFFFFFFFFF);
+  CUdTagSend = UInt64(1);
+  CUdTagAccept = UInt64(2);
+  CUdShutdown = UInt64($FFFFFFFFFFFFFFFF);
 
-  CRecvBufSize  = 32768;
-  CRingEntries  = 512;
-  CCQEntries    = 2048;  // #109: larger CQ to prevent overflow
+  CRecvBufSize = 32768;
+  CRingEntries = 512;
+  CCQEntries = 2048;
   CRecvPoolSize = CRingEntries;
 
   // io_uring_register opcodes
-  IORING_REGISTER_FILES        = UInt32(2);   // #75: register fd array
-  IORING_REGISTER_FILES_UPDATE = UInt32(6);   // #75: update registered fds
-  IORING_REGISTER_PROBE        = UInt32(8);   // added in kernel 5.6
+  IORING_REGISTER_FILES = UInt32(2);
+  IORING_REGISTER_FILES_UPDATE = UInt32(6);
+  IORING_REGISTER_PROBE = UInt32(8);
 
   // io_uring_probe_op flag — op is supported by this kernel
   IO_URING_OP_SUPPORTED = UInt16(1);
 
   // Linux setsockopt level/option constants not in the RTL
-  SO_REUSEPORT    = 15;
+  SO_REUSEPORT = 15;
+  CTCP_FASTOPEN = 23;
+  CTCP_DEFER_ACCEPT = 9;
+  CSQPollIdleMs = 10000;
 type
-  // #103: io_uring_files_update struct for IORING_REGISTER_FILES_UPDATE
+  // io_uring_files_update struct for IORING_REGISTER_FILES_UPDATE
   TIOUringFilesUpdate = packed record
     offset: UInt32;
     resv: UInt32;
@@ -392,11 +393,11 @@ begin
     _LinuxClose(LFd);
   end;
 
-  FRingFd       := -1;
-  FSQLock       := TCriticalSection.Create;
+  FRingFd := -1;
+  FSQLock := TCriticalSection.Create;
   FRecvPoolLock := TCriticalSection.Create;
-  FShutdown     := False;
-  FPendingSQEs  := 0;
+  FShutdown := False;
+  FPendingSQEs := 0;
 
   FRecvCtxPool := AllocMem(CRecvPoolSize * SizeOf(TRecvCtx));
   FRecvPoolBase := PByte(FRecvCtxPool);
@@ -405,7 +406,6 @@ begin
   for LI := 0 to CRecvPoolSize - 1 do
     FRecvFreeIdx[LI] := UInt16(LI);
 
-  // #75: registered files — pre-allocate slot table
   FRegLock := TCriticalSection.Create;
   FRegFiles := False;
   FRegCount := 0;
@@ -437,7 +437,7 @@ procedure TIOUringBackend.StartListening(const AHost: string; APort: Integer;
   function CreateListenSocket: Integer;
   var
     LAddr: sockaddr_in;
-    LOne:  Integer;
+    LOne: Integer;
   begin
     Result := _LinuxSocket(AF_INET, SOCK_STREAM or SOCK_CLOEXEC, 0);
     if Result < 0 then
@@ -447,13 +447,13 @@ procedure TIOUringBackend.StartListening(const AHost: string; APort: Integer;
     _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEADDR, @LOne, SizeOf(LOne));
     _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEPORT, @LOne, SizeOf(LOne));
     if AFastOpen then
-      _LinuxSetsockopt(Result, IPPROTO_TCP, 23 {TCP_FASTOPEN}, @LOne, SizeOf(LOne));
-    // #70: TCP_DEFER_ACCEPT — kernel waits for data before waking accept
-    _LinuxSetsockopt(Result, IPPROTO_TCP, 9 {TCP_DEFER_ACCEPT}, @LOne, SizeOf(LOne));
+      _LinuxSetsockopt(Result, IPPROTO_TCP, CTCP_FASTOPEN, @LOne, SizeOf(LOne));
+    // TCP_DEFER_ACCEPT — kernel waits for data before waking accept
+    _LinuxSetsockopt(Result, IPPROTO_TCP, CTCP_DEFER_ACCEPT, @LOne, SizeOf(LOne));
 
     FillChar(LAddr, SizeOf(LAddr), 0);
     LAddr.sin_family := AF_INET;
-    LAddr.sin_port   := htons(APort);
+    LAddr.sin_port := htons(APort);
     if (AHost = '0.0.0.0') or (AHost = '') then
       LAddr.sin_addr.s_addr := INADDR_ANY
     else
@@ -472,22 +472,22 @@ var
   LCQSize: NativeUInt;
   LAcceptN: Integer;
   LFd: Integer;
+  LInitFds: array of Int32;
 begin
   FCallbacks := ACallbacks;
-  FShutdown  := False;
-  LAcceptN   := AAcceptThreads;
+  FShutdown := False;
+  LAcceptN := AAcceptThreads;
   if LAcceptN < 1 then LAcceptN := 1;
 
   SetLength(FListenSockets, LAcceptN);
   for I := 0 to LAcceptN - 1 do
     FListenSockets[I] := CreateListenSocket;
 
-  // #60: try SQPOLL first (kernel 5.11+ or CAP_SYS_NICE); fall back silently
-  // #109: use IORING_SETUP_CQSIZE for larger CQ to prevent overflow
+  // Try SQPOLL first (kernel 5.11+ or CAP_SYS_NICE); fall back silently
   FillChar(LParams, SizeOf(LParams), 0);
-  LParams.flags          := IORING_SETUP_SQPOLL or IORING_SETUP_CQSIZE;
-  LParams.sq_thread_idle := 10000;  // 10ms idle before kernel poller sleeps
-  LParams.cq_entries     := CCQEntries;
+  LParams.flags := IORING_SETUP_SQPOLL or IORING_SETUP_CQSIZE;
+  LParams.sq_thread_idle := CSQPollIdleMs;
+  LParams.cq_entries := CCQEntries;
   FRingFd := _io_uring_setup(CRingEntries, @LParams);
   if FRingFd >= 0 then
     FSQPoll := True
@@ -496,7 +496,7 @@ begin
     // SQPOLL not available — try normal mode with custom CQ size
     FSQPoll := False;
     FillChar(LParams, SizeOf(LParams), 0);
-    LParams.flags      := IORING_SETUP_CQSIZE;
+    LParams.flags := IORING_SETUP_CQSIZE;
     LParams.cq_entries := CCQEntries;
     FRingFd := _io_uring_setup(CRingEntries, @LParams);
     if FRingFd < 0 then
@@ -519,7 +519,7 @@ begin
 
   if (LParams.features and IORING_FEAT_SINGLE_MMAP) <> 0 then
   begin
-    FCQRing     := FSQRing;
+    FCQRing := FSQRing;
     FCQRingSize := 0;
   end
   else
@@ -534,28 +534,26 @@ begin
   end;
 
   FSQEsSize := NativeUInt(LParams.sq_entries) * SizeOf(TIOUringSQE);
-  FSQEs     := _LinuxMmap(nil, FSQEsSize, PROT_READ or PROT_WRITE,
+  FSQEs := _LinuxMmap(nil, FSQEsSize, PROT_READ or PROT_WRITE,
     MAP_SHARED, FRingFd, IORING_OFF_SQES);
   if FSQEs = MAP_FAILED then
     raise Exception.Create('mmap(SQEs) failed');
 
-  FPSQHead  := PUInt32(PByte(FSQRing) + LParams.sq_off.head);
-  FPSQTail  := PUInt32(PByte(FSQRing) + LParams.sq_off.tail);
-  FPSQMask  := PUInt32(PByte(FSQRing) + LParams.sq_off.ring_mask);
-  FPSQFlags := PUInt32(PByte(FSQRing) + LParams.sq_off.flags);  // #60: NEED_WAKEUP
+  FPSQHead := PUInt32(PByte(FSQRing) + LParams.sq_off.head);
+  FPSQTail := PUInt32(PByte(FSQRing) + LParams.sq_off.tail);
+  FPSQMask := PUInt32(PByte(FSQRing) + LParams.sq_off.ring_mask);
+  FPSQFlags := PUInt32(PByte(FSQRing) + LParams.sq_off.flags);
 
-  FPCQHead  := PUInt32(PByte(FCQRing) + LParams.cq_off.head);
-  FPCQTail  := PUInt32(PByte(FCQRing) + LParams.cq_off.tail);
-  FPCQMask  := PUInt32(PByte(FCQRing) + LParams.cq_off.ring_mask);
-  FPCQEs    := Pointer(PByte(FCQRing) + LParams.cq_off.cqes);
+  FPCQHead := PUInt32(PByte(FCQRing) + LParams.cq_off.head);
+  FPCQTail := PUInt32(PByte(FCQRing) + LParams.cq_off.tail);
+  FPCQMask := PUInt32(PByte(FCQRing) + LParams.cq_off.ring_mask);
+  FPCQEs := Pointer(PByte(FCQRing) + LParams.cq_off.cqes);
 
   for I := 0 to Integer(LParams.sq_entries) - 1 do
     PUInt32(PByte(FSQRing) + LParams.sq_off.array_ + NativeUInt(I) * SizeOf(UInt32))^
       := UInt32(I);
 
-  // #75: Register an initial empty file table — allows later REGISTER_FILES_UPDATE
   begin
-    var LInitFds: array of Int32;
     SetLength(LInitFds, CRegFilesMax);
     for I := 0 to CRegFilesMax - 1 do
       LInitFds[I] := -1; // sparse table — all slots empty
@@ -682,7 +680,6 @@ procedure TIOUringBackend.RegisterConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
 begin
-  // #75: register the fd for IOSQE_FIXED_FILE (eliminates fget/fput per I/O)
   _RegisterFd(LConn.Socket);
 end;
 
@@ -693,7 +690,7 @@ var
 begin
   LCtx := _RecvPoolAcquire;
   LCtx^.Conn := LConn;
-  LConn.AddRef;  // #43: keep conn alive while recv CQE is in-flight
+  LConn.AddRef;
   FSQLock.Acquire;
   try
     if not _SubmitSQE(IORING_OP_RECV, LConn.Socket,
@@ -727,13 +724,13 @@ begin
     Exit;
   end;
 
-  LConn.PendingSend       := AData;
+  LConn.PendingSend := AData;
   LConn.PendingSendActual := AActualLen;
-  LConn.SentBytes         := 0;
+  LConn.SentBytes := 0;
   _ResubmitSend(LConn);
 end;
 
-// #61: Vectored send — io_uring SEND doesn't support scatter-gather on sockets,
+// io_uring SEND doesn't support scatter-gather on sockets,
 // so concatenate into a pool buffer and delegate to PostSend.
 procedure TIOUringBackend.PostSendV(AConn: Pointer;
   const AHeaders: TBytes; AHdrLen: Integer;
@@ -765,15 +762,14 @@ procedure TIOUringBackend.SocketClose(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
 begin
-  // #75: unregister fd from the file table before closing
   _UnregisterFd(LConn.Socket);
-  // R-6: TCP half-close — FIN before full teardown so the client reads pending bytes
+  // TCP half-close — FIN before full teardown so the client reads pending bytes
   shutdown(LConn.Socket, SHUT_WR);
   _LinuxClose(LConn.Socket);
 end;
 
 // ---------------------------------------------------------------------------
-// Pre-allocated recv context pool (#56)
+// Pre-allocated recv context pool
 // ---------------------------------------------------------------------------
 
 function TIOUringBackend._RecvPoolAcquire: Pointer;
@@ -817,7 +813,7 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// #75: Registered files — eliminates fget/fput atomic refcount per I/O op
+// Registered files — eliminates fget/fput atomic refcount per I/O op
 // ---------------------------------------------------------------------------
 
 const
@@ -850,7 +846,7 @@ begin
     if AFd >= Length(FRegFds) then
       SetLength(FRegFds, AFd + 256); // grow mapping table
 
-    // #103: recycle freed slots instead of monotonic FRegCount
+    // Recycle freed slots instead of monotonic FRegCount
     LSlot := -1;
     if FRegFreeTop > 0 then
     begin
@@ -864,7 +860,6 @@ begin
     end;
     if LSlot < 0 then Exit; // table full
 
-    // #103: use proper io_uring_files_update struct
     LFdVal := AFd;
     FillChar(LUpdate, SizeOf(LUpdate), 0);
     LUpdate.offset := UInt32(LSlot);
@@ -899,14 +894,12 @@ begin
     if (AFd < 0) or (AFd >= Length(FRegFds)) then Exit;
     LSlot := FRegFds[AFd];
     if LSlot < 0 then Exit;
-    // #103: use proper io_uring_files_update struct
     LFdVal := -1;
     FillChar(LUpdate, SizeOf(LUpdate), 0);
     LUpdate.offset := UInt32(LSlot);
     LUpdate.fds := UInt64(@LFdVal);
     _io_uring_register(FRingFd, IORING_REGISTER_FILES_UPDATE, @LUpdate, 1);
     FRegFds[AFd] := -1;
-    // #103: recycle slot
     FRegFreeStack[FRegFreeTop] := LSlot;
     Inc(FRegFreeTop);
   finally
@@ -915,7 +908,7 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// #60: Notify kernel about new SQEs.  In normal mode, calls io_uring_enter
+// Notify kernel about new SQEs.  In normal mode, calls io_uring_enter
 // with to_submit=1.  In SQPOLL mode, the kernel poller picks up SQEs
 // automatically; we only call io_uring_enter if it went idle (NEED_WAKEUP).
 // ---------------------------------------------------------------------------
@@ -962,16 +955,16 @@ begin
   LIdx := LTail and FPSQMask^;
   LSQE := PIOUringSQE(PByte(FSQEs) + NativeUInt(LIdx) * SizeOf(TIOUringSQE));
   FillChar(LSQE^, SizeOf(TIOUringSQE), 0);
-  LSQE^.opcode    := AOpcode;
-  LSQE^.addr      := UInt64(ABuf);
-  LSQE^.len       := ALen;
+  LSQE^.opcode := AOpcode;
+  LSQE^.addr := UInt64(ABuf);
+  LSQE^.len := ALen;
   LSQE^.user_data := AUserData;
 
-  // #75: use registered file index when available (eliminates fget/fput atomics)
+  // Use registered file index when available (eliminates fget/fput atomics)
   LRegIdx := _RegFileIndex(AFd);
   if LRegIdx >= 0 then
   begin
-    LSQE^.fd    := LRegIdx;
+    LSQE^.fd := LRegIdx;
     LSQE^.flags := IOSQE_FIXED_FILE;
   end
   else
@@ -979,7 +972,7 @@ begin
 
   // x86-64 TSO: plain store sufficient; io_uring_enter acts as full barrier
   FPSQTail^ := LTail + 1;
-  Inc(FPendingSQEs);  // #109: track for batched submission
+  Inc(FPendingSQEs);
 
   Result := True;
 end;
@@ -996,7 +989,7 @@ begin
   if LTotal = 0 then LTotal := Length(AConn.PendingSend);
   LRemain := LTotal - AConn.SentBytes;
 
-  AConn.AddRef;  // #43: keep conn alive while send CQE is in-flight
+  AConn.AddRef;
   FSQLock.Acquire;
   try
     if not _SubmitSQE(IORING_OP_SEND, AConn.Socket,
@@ -1017,7 +1010,7 @@ end;
 // Internal: CQE dispatch
 // ---------------------------------------------------------------------------
 
-// #73: Submit a multishot accept SQE — one submission handles all future accepts
+// Submit a multishot accept SQE — one submission handles all future accepts
 function TIOUringBackend._SubmitAcceptMultishot(AListenFd: Integer): Boolean;
 var
   LTail, LIdx: UInt32;
@@ -1033,10 +1026,10 @@ begin
   LIdx := LTail and FPSQMask^;
   LSQE := PIOUringSQE(PByte(FSQEs) + NativeUInt(LIdx) * SizeOf(TIOUringSQE));
   FillChar(LSQE^, SizeOf(TIOUringSQE), 0);
-  LSQE^.opcode    := IORING_OP_ACCEPT;
-  LSQE^.fd        := AListenFd;
-  LSQE^.ioprio    := IOSQE_ACCEPT_MULTISHOT;  // multishot: one SQE → many CQEs
-  LSQE^.op_flags  := UInt32(SOCK_NONBLOCK or SOCK_CLOEXEC);  // accept4 flags
+  LSQE^.opcode := IORING_OP_ACCEPT;
+  LSQE^.fd := AListenFd;
+  LSQE^.ioprio := IOSQE_ACCEPT_MULTISHOT;
+  LSQE^.op_flags := UInt32(SOCK_NONBLOCK or SOCK_CLOEXEC);
   LSQE^.user_data := CUdTagAccept;
 
   FPSQTail^ := LTail + 1;
@@ -1079,11 +1072,11 @@ begin
         _LinuxClose(ARes);
       end;
     end;
-    // #73: if IORING_CQE_F_MORE not set, kernel cancelled the multishot accept
+    // If IORING_CQE_F_MORE not set, kernel cancelled the multishot accept
     if (AFlags and IORING_CQE_F_MORE) = 0 then
     begin
       FMultishotAccept := False;
-      // #103: re-arm multishot accept — without this, server stops accepting
+      // Re-arm multishot accept — without this, server stops accepting
       if not FShutdown and (Length(FListenSockets) > 0) then
       begin
         FSQLock.Acquire;
@@ -1105,7 +1098,7 @@ begin
     if ARes <= 0 then
     begin
       FCallbacks.OnConnError(LConn);
-      LConn.Release;  // #43: drop send-op ref (AddRef was in _ResubmitSend)
+      LConn.Release;
       Exit;
     end;
 
@@ -1118,15 +1111,15 @@ begin
       // Partial send — re-submit for the remaining bytes.
       // _ResubmitSend does its own AddRef; we Release the current send-op ref.
       _ResubmitSend(LConn);
-      LConn.Release;  // #43: drop this send-op ref; _ResubmitSend owns the next one
+      LConn.Release;
     end
     else
     begin
       // All bytes delivered — return buffer, notify server, then drop our ref.
       TBufferPool.Release(LConn.PendingSend);
       LConn.PendingSendActual := 0;
-      FCallbacks.OnSendComplete(LConn);  // may call PostRecv (which AddRefs)
-      LConn.Release;  // #43: drop send-op ref last, after OnSendComplete
+      FCallbacks.OnSendComplete(LConn);
+      LConn.Release;
     end;
   end
   else
@@ -1144,7 +1137,7 @@ begin
         FCallbacks.OnConnError(LRecvConn);   // real error
     finally
       _RecvPoolRelease(LCtx);
-      LRecvConn.Release;  // #43: drop recv-op ref (AddRef was in PostRecv)
+      LRecvConn.Release;
     end;
   end;
 end;
@@ -1166,8 +1159,7 @@ begin
     LHead := FPCQHead^;
     LTail := FPCQTail^;
 
-    // #109: Batch CQ head update — process all CQEs, then advance head once.
-    // Reduces memory barrier overhead vs per-CQE update.
+    // Batch CQ head update — process all CQEs, then advance head once
     while LHead <> LTail do
     begin
       LCQE := PIOUringCQE(PByte(FPCQEs) +

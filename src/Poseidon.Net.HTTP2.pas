@@ -57,7 +57,7 @@ type
     BodyLen:         Integer;
     EndStream:       Boolean;
     HeadersComplete: Boolean;
-    // A-3: per-stream flow control
+    // Per-stream flow control
     SendWindow:      Integer;   // peer's stream-level send window (how much we can send)
     RecvWindow:      Integer;   // server's stream-level receive window (how much we accept)
     PendingBody:     TBytes;    // response DATA buffered when send window was exhausted
@@ -95,22 +95,22 @@ type
 
     // Peer settings
     FPeerMaxFrameSize: Integer;
-    FPeerInitWinSize:  Integer;
+    FPeerInitWinSize: Integer;
 
-    // R-2: active stream tracking for graceful GOAWAY drain
+    // Active stream tracking for graceful GOAWAY drain
     FActiveStreams: Integer;
-    _PadStreams:    array[0..14] of Integer; // #69: cache-line padding
-    FDeferClose:   Boolean;
+    FPadStreams: array[0..14] of Integer; // cache-line padding
+    FDeferClose: Boolean;
 
     // Server push (RFC 7540 §8.2)
     FNextPushStreamID: Cardinal;  // server-initiated streams are even (2, 4, 6, …)
     FClientEnablePush: Boolean;   // True until client sends ENABLE_PUSH=0
 
-    // P-1: server-side SETTINGS values (sent to client)
+    // Server-side SETTINGS values (sent to client)
     FMaxConcurrentStreams: Cardinal;
     FInitialWindowSize:    Cardinal;
 
-    // A-3: connection-level flow control windows
+    // Connection-level flow control windows
     FConnSendWindow: Integer;  // peer's connection-level window (we decrement when sending)
     FConnRecvWindow: Integer;  // our connection-level receive window (peer's view)
 
@@ -149,7 +149,7 @@ type
       const APush: TPoseidonPushResource;
       const AScheme, AAuthority: string);
 
-    // A-3: flow control helpers
+    // Flow control helpers
     procedure _SendWindowUpdate(AStreamID: Cardinal; AIncrement: Integer);
     procedure _DrainPendingStream(AStream: TH2Stream);
     procedure _CloseStreamAfterSend(AStream: TH2Stream);
@@ -173,7 +173,7 @@ type
     // Send server SETTINGS once after upgrade/preface
     procedure SendInitialSettings;
 
-    // A-5: Dispatch the initial HTTP/1.1 upgrade request as h2c stream 1.
+    // Dispatch the initial HTTP/1.1 upgrade request as h2c stream 1.
     // Creates a synthetic stream 1 and runs it through the normal request handler.
     procedure DispatchH2CInitialRequest(const AMethod, APath, AQueryString,
       ARemoteAddr, AHost, AContentType: string;
@@ -295,7 +295,7 @@ begin
   FMaxConcurrentStreams := AMaxConcurrentStreams;
   FInitialWindowSize    := AInitialWindowSize;
 
-  // A-3: flow control — start at RFC 7540 default (65535); updated by peer SETTINGS
+  // Flow control — start at RFC 7540 default (65535); updated by peer SETTINGS
   FConnSendWindow := 65535;
   FConnRecvWindow := 65535;
 end;
@@ -369,7 +369,7 @@ begin
   LPayload[6] := (AErr  shr  8) and $FF;
   LPayload[7] :=  AErr          and $FF;
   _SendFrame(H2_FRAME_GOAWAY, 0, 0, @LPayload[0], 8);
-  // R-2: defer close until all active streams complete
+  // Defer close until all active streams complete
   if FActiveStreams > 0 then
     FDeferClose := True
   else if Assigned(FCloseProc) then
@@ -377,7 +377,7 @@ begin
 end;
 
 // ===========================================================================
-// A-3: Flow control helpers
+// Flow control helpers
 // ===========================================================================
 
 procedure TH2Conn._SendWindowUpdate(AStreamID: Cardinal; AIncrement: Integer);
@@ -652,7 +652,7 @@ begin
         end;
       H2_SETTINGS_INITIAL_WINDOW_SIZE:
         begin
-          // A-3: RFC 7540 §6.9.2 — update existing stream send windows by the delta
+          // RFC 7540 §6.9.2 — update existing stream send windows by the delta
           if LVal > $7FFFFFFF then
           begin
             _GoAway(FLastStreamID, H2_ERR_FLOW_CONTROL_ERROR);
@@ -723,7 +723,7 @@ end;
 // ===========================================================================
 
 procedure TH2Conn._HandleWindowUpdate(AStreamID: Cardinal; APayload: PByte; APayLen: Integer);
-// A-3: RFC 7540 §6.9 — increment the appropriate flow-control window and drain
+// RFC 7540 §6.9 — increment the appropriate flow-control window and drain
 // any buffered DATA that was waiting for credit.
 var
   LInc:     Integer;
@@ -864,7 +864,7 @@ begin
     LStream := TH2Stream.Create;
     LStream.StreamID   := AStreamID;
     LStream.State      := hssOpen;
-    // A-3: initialize per-stream flow control windows
+    // Initialize per-stream flow control windows
     LStream.SendWindow := FPeerInitWinSize;           // what the peer allows us to send
     LStream.RecvWindow := Integer(FInitialWindowSize); // what we allow the peer to send
     FStreams.Add(AStreamID, LStream);
@@ -963,7 +963,7 @@ begin
     Move(APayload^, LStream.Body[LStream.BodyLen], LDataLen);
     Inc(LStream.BodyLen, LDataLen);
 
-    // A-3: consume from our receive windows; replenish when < 50%
+    // Consume from our receive windows; replenish when < 50%
     Dec(FConnRecvWindow,    LDataLen);
     Dec(LStream.RecvWindow, LDataLen);
     if FConnRecvWindow < 65535 div 2 then
@@ -1019,14 +1019,14 @@ end;
 
 procedure TH2Conn._DispatchStream(AStream: TH2Stream);
 var
-  LReq:          TH2RequestData;
-  LStatus:       Integer;
-  LContentType:  string;
-  LBody:         TBytes;
-  LExtra:        TArray<TPair<string, string>>;
+  LReq: TH2RequestData;
+  LStatus: Integer;
+  LContentType: string;
+  LBody: TBytes;
+  LExtra: TArray<TPair<string, string>>;
   LPushResources: TArray<TPoseidonPushResource>;
-  I:             Integer;
-  LQ:            Integer;
+  I: Integer;
+  LQ: Integer;
 begin
   LReq.StreamID  := AStream.StreamID;
   LReq.Method    := AStream.Method;
@@ -1058,31 +1058,33 @@ begin
       Break;
     end;
 
-  // Body
   if AStream.BodyLen > 0 then
   begin
     SetLength(LReq.Body, AStream.BodyLen);
     Move(AStream.Body[0], LReq.Body[0], AStream.BodyLen);
   end;
 
-  // Defaults
-  LStatus      := 200;
+  LStatus := 200;
   LContentType := 'text/plain';
   SetLength(LBody, 0);
   SetLength(LExtra, 0);
   SetLength(LPushResources, 0);
 
-  // R-2: track active streams
+  // Track active streams
   TInterlocked.Increment(FActiveStreams);
   try
     try
       if Assigned(FOnRequest) then
         FOnRequest(LReq, LStatus, LContentType, LBody, LExtra, LPushResources);
     except
-      LStatus      := 500;
-      LContentType := 'text/plain';
-      SetLength(LBody, 0);
-      SetLength(LPushResources, 0);
+      on E: Exception do
+      begin
+        Writeln(ErrOutput, '[h2] dispatch error: ', E.Message);
+        LStatus := 500;
+        LContentType := 'text/plain';
+        SetLength(LBody, 0);
+        SetLength(LPushResources, 0);
+      end;
     end;
 
     // Send server push resources before the actual response (RFC 7540 §8.2)
@@ -1093,13 +1095,13 @@ begin
 
     SendResponse(AStream.StreamID, LStatus, LContentType, LBody, LExtra);
   finally
-    // A-3: if SendResponse buffered pending DATA, keep the stream alive until
+    // If SendResponse buffered pending DATA, keep the stream alive until
     // _DrainPendingStream finishes. Cleanup then deferred to _CloseStreamAfterSend.
     if Length(AStream.PendingBody) = 0 then
     begin
       FStreams.Remove(AStream.StreamID);
       AStream.Free;
-      // R-2: signal deferred close when last stream completes
+      // Signal deferred close when last stream completes
       if TInterlocked.Decrement(FActiveStreams) = 0 then
         if FDeferClose and Assigned(FCloseProc) then
           FCloseProc(FConn);
@@ -1115,7 +1117,7 @@ end;
 procedure TH2Conn.SendResponse(AStreamID: Cardinal; AStatus: Integer;
   const AContentType: string; const ABody: TBytes;
   const AExtra: TArray<TPair<string, string>>);
-// A-3: respects per-stream and connection flow-control windows.
+// Respects per-stream and connection flow-control windows.
 // If the send window is exhausted, remaining data is buffered in the stream
 // and flushed when _HandleWindowUpdate grants more credit.
 var
@@ -1256,7 +1258,7 @@ begin
 end;
 
 // ===========================================================================
-// A-5: DispatchH2CInitialRequest — synthetic stream 1 for h2c upgrade
+// DispatchH2CInitialRequest — synthetic stream 1 for h2c upgrade
 // ===========================================================================
 
 procedure TH2Conn.DispatchH2CInitialRequest(const AMethod, APath, AQueryString,
@@ -1266,14 +1268,14 @@ procedure TH2Conn.DispatchH2CInitialRequest(const AMethod, APath, AQueryString,
 // Creates a synthetic stream 1 (the initial h2c request) and routes it
 // through the normal _H2OnRequest callback + SendResponse pipeline.
 var
-  LStream:        TH2Stream;
-  LReq:           TH2RequestData;
-  LStatus:        Integer;
-  LCT:            string;
-  LBody:          TBytes;
-  LExtra:         TArray<TPair<string, string>>;
+  LStream: TH2Stream;
+  LReq: TH2RequestData;
+  LStatus: Integer;
+  LCT: string;
+  LBody: TBytes;
+  LExtra: TArray<TPair<string, string>>;
   LPushResources: TArray<TPoseidonPushResource>;
-  I:              Integer;
+  I: Integer;
 begin
   if FGoAwaySent then Exit;
 
@@ -1299,7 +1301,7 @@ begin
   LReq.Body        := ABody;
 
   LStatus := 200;
-  LCT     := 'application/json';
+  LCT := 'application/json';
   SetLength(LBody, 0);
   SetLength(LExtra, 0);
   SetLength(LPushResources, 0);
@@ -1310,17 +1312,21 @@ begin
       if Assigned(FOnRequest) then
         FOnRequest(LReq, LStatus, LCT, LBody, LExtra, LPushResources);
     except
-      LStatus := 500;
-      LCT     := 'application/json';
-      SetLength(LBody, 0);
-      SetLength(LPushResources, 0);
+      on E: Exception do
+      begin
+        Writeln(ErrOutput, '[h2] dispatch error: ', E.Message);
+        LStatus := 500;
+        LCT := 'application/json';
+        SetLength(LBody, 0);
+        SetLength(LPushResources, 0);
+      end;
     end;
     if FClientEnablePush then
       for I := 0 to Length(LPushResources) - 1 do
         _SendPushPromiseAndResponse(1, LPushResources[I], 'http', AHost);
     SendResponse(1, LStatus, LCT, LBody, LExtra);
   finally
-    // A-3: keep stream alive if pending body; otherwise clean up
+    // Keep stream alive if pending body; otherwise clean up
     if Length(LStream.PendingBody) = 0 then
     begin
       FStreams.Remove(1);

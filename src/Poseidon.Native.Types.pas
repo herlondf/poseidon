@@ -1,6 +1,6 @@
 unit Poseidon.Native.Types;
 
-// #92: Native API types — zero-copy request context and handler signatures.
+// Native API types — zero-copy request context and handler signatures.
 //
 // TNativeRequestContext is stack-allocated by the dispatch pipeline.
 // Fields reference the parsed TPoseidonNativeRequest without copying.

@@ -83,7 +83,7 @@ function DecodeHTTP1Chunked(
 implementation
 
 // ---------------------------------------------------------------------------
-// Byte classification lookup table (#59)
+// Byte classification lookup table
 //
 // Pre-computed flags per byte value — replaces per-byte comparisons in the
 // parsing hot loops with a single indexed read + bitmask test.
@@ -113,7 +113,7 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// #76: Perfect hash for common HTTP headers
+// Perfect hash for common HTTP headers
 // ---------------------------------------------------------------------------
 
 type
@@ -207,7 +207,7 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// #79: Word-scan CRLF — process 4 bytes at a time
+// Word-scan CRLF — process 4 bytes at a time
 // ---------------------------------------------------------------------------
 
 function _FindCRLF(ABuf: PByte; ALen: Integer): Integer;
@@ -378,32 +378,31 @@ const
   end;
 
 var
-  I:             Integer;
-  LHdrEnd:       Integer;
-  LScanEnd:      Integer;
-  LLineStart:    Integer;
-  LLineEnd:      Integer;
-  LSpace1:       Integer;
-  LSpace2:       Integer;
-  LColonPos:     Integer;
-  LQPos:         Integer;
-  LValStart:     Integer;
+  I: Integer;
+  LHdrEnd: Integer;
+  LScanEnd: Integer;
+  LLineStart: Integer;
+  LLineEnd: Integer;
+  LSpace1: Integer;
+  LSpace2: Integer;
+  LColonPos: Integer;
+  LQPos: Integer;
+  LValStart: Integer;
   LName, LValue: string;
-  LCL:           Int64;
-  LBodyStart:    Integer;
-  LConsumed:     Integer;
-  LHdrCount:     Integer;
-  LIsHttp11:     Boolean;
-  LIsChunked:    Boolean;
-  LChunkBody:    TBytes;
-  LChunkBytes:   Integer;
-  LChunkBad:     Boolean;
+  LCL: Int64;
+  LBodyStart: Integer;
+  LConsumed: Integer;
+  LHdrCount: Integer;
+  LIsHttp11: Boolean;
+  LIsChunked: Boolean;
+  LChunkBody: TBytes;
+  LChunkBytes: Integer;
+  LChunkBad: Boolean;
 begin
   Result      := False;
   ABadRequest := False;
   AConsumed   := 0;
 
-  // #79: Word-scan for CRLFCRLF (end of headers)
   LScanEnd := ABufLen;
   if LScanEnd > AMaxHeaderSize + 4 then LScanEnd := AMaxHeaderSize + 4;
   LHdrEnd := _FindCRLFCRLF(@ABuf[0], LScanEnd);
@@ -478,8 +477,7 @@ begin
   begin
     if LHdrCount >= MAX_HEADER_COUNT then Break;
 
-    // Single-pass scan (#59): find CRLF (line end) and colon (name/value
-    // delimiter) in one loop using the LUT, eliminating two separate scans.
+    // Single-pass scan: find CRLF and colon in one loop using the LUT
     LLineEnd  := -1;
     LColonPos := -1;
     for I := LLineStart to LHdrEnd do
@@ -520,7 +518,6 @@ begin
     AHeaders[LHdrCount] := TPair<string,string>.Create(LName, LValue);
     Inc(LHdrCount);
 
-    // #76: perfect hash header identification
     case LookupHeaderId(@ABuf[LLineStart], LColonPos - LLineStart) of
       hiConnection:
         begin
@@ -537,7 +534,7 @@ begin
   end;
   SetLength(AHeaders, LHdrCount);
 
-  // S-4: request smuggling — Content-Length + Transfer-Encoding: chunked (RFC 7230 §3.3.3)
+  // Request smuggling guard — Content-Length + Transfer-Encoding: chunked (RFC 7230 §3.3.3)
   if HasRequestSmuggling(LCL > 0, LIsChunked) then
   begin
     ABadRequest := True;
@@ -616,7 +613,6 @@ begin
   AHdrStart   := 0;
   AHdrEnd     := 0;
 
-  // #79: Word-scan for CRLFCRLF
   LScanEnd := ABufLen;
   if LScanEnd > AMaxHeaderSize + 4 then LScanEnd := AMaxHeaderSize + 4;
   LHdrEnd := _FindCRLFCRLF(@ABuf[0], LScanEnd);
@@ -707,7 +703,6 @@ begin
       Inc(LValStart);
     LValLen := LLineEnd - LValStart;
 
-    // #76: perfect hash header identification (no string allocation)
     case LookupHeaderId(@ABuf[LLineStart], LColonPos - LLineStart) of
       hiContentLength:
         begin

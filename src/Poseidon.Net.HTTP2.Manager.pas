@@ -1,6 +1,6 @@
 unit Poseidon.Net.HTTP2.Manager;
 
-// THTTP2Manager (#87) — HTTP/2 upgrade, stream handling, push.
+// THTTP2Manager — HTTP/2 upgrade, stream handling, push.
 //
 // Extracted from TPoseidonNativeServer. Manages H2 upgrade (h2c cleartext),
 // and provides callbacks for TH2Conn (send, close, request dispatch).
@@ -58,6 +58,10 @@ type
 
 implementation
 
+const
+  CDefaultH2MaxConcurrentStreams = 100;
+  CDefaultH2InitialWindowSize = 65535;  // RFC 7540 default
+
 var
   DefaultErrorBody: TBytes;
 
@@ -69,8 +73,8 @@ begin
   FClose := AClose;
   FRecv := ARecv;
   FH2Enabled := False;
-  FH2MaxConcurrentStreams := 100;
-  FH2InitialWindowSize := 65535;
+  FH2MaxConcurrentStreams := CDefaultH2MaxConcurrentStreams;
+  FH2InitialWindowSize := CDefaultH2InitialWindowSize;
   FOnH2Push := nil;
   FOnRequest := nil;
   FInFlightCount := nil;

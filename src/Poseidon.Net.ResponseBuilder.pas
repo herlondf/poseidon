@@ -33,7 +33,7 @@ function BuildHTTPResponse(
   ASecureHeaders:   Boolean;
   const AServerBanner: string): TBytes;
 
-// P-4: Pool-backed variant of BuildHTTPResponse.
+// Pool-backed variant of BuildHTTPResponse.
 // Returns a TBytes acquired from TBufferPool (may be larger than AActualLen).
 // AActualLen is the number of valid response bytes in the returned buffer.
 // Caller must pass AActualLen to the send function and call
@@ -48,10 +48,10 @@ function BuildHTTPResponsePooled(
   const AServerBanner: string;
   out AActualLen:   Integer): TBytes;
 
-// #61: Build only HTTP headers (no body copy). Returns pool-backed TBytes.
+// Build only HTTP headers (no body copy). Returns pool-backed TBytes.
 // AHdrActualLen = bytes actually written. Body is sent separately via vectored I/O.
-// #72: When AUseArena=True, uses thread-local THeaderArena (no pool round-trip).
-//      Caller must NOT release the returned buffer (it's reused across requests).
+// When AUseArena=True, uses thread-local THeaderArena (no pool round-trip).
+// Caller must NOT release the returned buffer (it's reused across requests).
 function BuildHTTPResponseHeaders(
   AStatus:          Integer;
   const AContentType: string;
@@ -82,11 +82,11 @@ var
   G_STATUS_400, G_STATUS_401, G_STATUS_403, G_STATUS_404, G_STATUS_405,
   G_STATUS_409, G_STATUS_413, G_STATUS_422, G_STATUS_429,
   G_STATUS_500, G_STATUS_503: TBytes;
-  G_CT_PREFIX:   TBytes;   // 'Content-Type: '
-  G_CL_PREFIX:   TBytes;   // 'Content-Length: '
-  G_CONN_KA:     TBytes;   // 'Connection: keep-alive'#13#10
-  G_CONN_CLOSE:  TBytes;   // 'Connection: close'#13#10
-  G_CRLF:        TBytes;   // #13#10
+  G_CT_PREFIX: TBytes;
+  G_CL_PREFIX: TBytes;
+  G_CONN_KA: TBytes;
+  G_CONN_CLOSE: TBytes;
+  G_CRLF: TBytes;
   // Pre-encoded common Content-Type values — Move()'d into Result when the
   // response uses one of these (~95% of REST APIs hit application/json).
   G_CT_JSON, G_CT_TEXT, G_CT_HTML, G_CT_PROBLEM, G_CT_FORM, G_CT_OCTET: TBytes;
@@ -96,7 +96,7 @@ var
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-// S-3: Sanitize a response header value by truncating at the first CR/LF/NUL.
+// Sanitize a response header value by truncating at the first CR/LF/NUL.
 // Truncating (rather than stripping) ensures injected text never reaches the
 // wire — e.g. "value\r\nX-Evil: hdr" → "value", not "valueX-Evil: hdr".
 function _SanitizeHeaderValue(const AValue: string): string;
@@ -139,7 +139,7 @@ begin
     Exit;
   end;
   LLen := 0;
-  LV   := AValue;
+  LV := AValue;
   while LV > 0 do
   begin
     LScratch[LLen] := Byte($30 + (LV mod 10));
@@ -209,34 +209,33 @@ function _BuildCore(ABuf: TBytes; AStatus: Integer;
   ASecureHeaders: Boolean; const AServerBanner: string): Integer;
 var
   LStatusBytes: TBytes;
-  LConnBytes:   TBytes;
-  LCTValue:     TBytes;
-  LCTAlloced:   Boolean;
-  LExtraStr:    string;
+  LConnBytes: TBytes;
+  LCTValue: TBytes;
+  LCTAlloced: Boolean;
+  LExtraStr: string;
   LBodyLen, LCLLen, LExtraLen: Integer;
-  LPos:         Integer;
-  I:            Integer;
+  LPos: Integer;
+  I: Integer;
 begin
   LStatusBytes := GetStatusLineBytes(AStatus);
   if AKeepAlive then LConnBytes := G_CONN_KA
-  else               LConnBytes := G_CONN_CLOSE;
+  else LConnBytes := G_CONN_CLOSE;
 
   LCTValue := GetContentTypeValueBytes(AContentType, LCTAlloced);
   LBodyLen := Length(ABody);
-  LCLLen   := DigitCount(LBodyLen);
+  LCLLen := DigitCount(LBodyLen);
 
   LExtraStr := '';
   for I := 0 to High(AExtra) do
-    // S-3: truncate header values at first CR/LF/NUL to prevent header injection
     LExtraStr := LExtraStr + AExtra[I].Key + ': ' +
       _SanitizeHeaderValue(AExtra[I].Value) + #13#10;
-  // A-1: opt-in security headers
+  // Opt-in security headers
   if ASecureHeaders then
     LExtraStr := LExtraStr
       + 'X-Content-Type-Options: nosniff'#13#10
       + 'X-Frame-Options: DENY'#13#10
       + 'Referrer-Policy: strict-origin-when-cross-origin'#13#10;
-  // A-2: configurable Server: banner
+  // Configurable Server: banner
   if AServerBanner <> '' then
     LExtraStr := LExtraStr + 'Server: ' + AServerBanner + #13#10;
   LExtraLen := Length(LExtraStr);
@@ -288,19 +287,19 @@ function _CalcTotal(AStatus: Integer; const AContentType: string;
   ASecureHeaders: Boolean; const AServerBanner: string): Integer;
 var
   LStatusBytes: TBytes;
-  LConnBytes:   TBytes;
-  LCTValue:     TBytes;
-  LCTAlloced:   Boolean;
-  LExtraStr:    string;
+  LConnBytes: TBytes;
+  LCTValue: TBytes;
+  LCTAlloced: Boolean;
+  LExtraStr: string;
   LBodyLen, LCLLen, LExtraLen, LCTLen: Integer;
-  I:            Integer;
+  I: Integer;
 begin
   LStatusBytes := GetStatusLineBytes(AStatus);
   if AKeepAlive then LConnBytes := G_CONN_KA
-  else               LConnBytes := G_CONN_CLOSE;
+  else LConnBytes := G_CONN_CLOSE;
   LCTValue := GetContentTypeValueBytes(AContentType, LCTAlloced);
   LBodyLen := Length(ABody);
-  LCLLen   := DigitCount(LBodyLen);
+  LCLLen := DigitCount(LBodyLen);
   LExtraStr := '';
   for I := 0 to High(AExtra) do
     LExtraStr := LExtraStr + AExtra[I].Key + ': ' +
@@ -350,7 +349,7 @@ function BuildHTTPResponsePooled(AStatus: Integer;
   const AExtra: TArray<TPair<string,string>>;
   ASecureHeaders: Boolean; const AServerBanner: string;
   out AActualLen: Integer): TBytes;
-// P-4: Acquires a buffer from TBufferPool instead of heap-allocating.
+// Acquires a buffer from TBufferPool instead of heap-allocating.
 // The returned TBytes may be larger than AActualLen — caller must pass
 // AActualLen to the send layer and release the buffer after send.
 var
@@ -363,7 +362,7 @@ begin
     AExtra, ASecureHeaders, AServerBanner);
 end;
 
-// #61+#72: Build headers only — body sent separately via vectored I/O.
+// Build headers only — body sent separately via vectored I/O.
 // When AUseArena=True, uses thread-local buffer (zero alloc on hot path).
 function BuildHTTPResponseHeaders(AStatus: Integer;
   const AContentType: string; ABodyLen: Integer; AKeepAlive: Boolean;
@@ -372,19 +371,19 @@ function BuildHTTPResponseHeaders(AStatus: Integer;
   out AHdrActualLen: Integer; AUseArena: Boolean): TBytes;
 var
   LStatusBytes: TBytes;
-  LConnBytes:   TBytes;
-  LCTValue:     TBytes;
-  LCTAlloced:   Boolean;
-  LExtraStr:    string;
+  LConnBytes: TBytes;
+  LCTValue: TBytes;
+  LCTAlloced: Boolean;
+  LExtraStr: string;
   LCLLen, LExtraLen, LCTLen: Integer;
   LTotal, LPos: Integer;
-  I:            Integer;
+  I: Integer;
 begin
   LStatusBytes := GetStatusLineBytes(AStatus);
   if AKeepAlive then LConnBytes := G_CONN_KA
-  else               LConnBytes := G_CONN_CLOSE;
+  else LConnBytes := G_CONN_CLOSE;
   LCTValue := GetContentTypeValueBytes(AContentType, LCTAlloced);
-  LCLLen   := DigitCount(ABodyLen);
+  LCLLen := DigitCount(ABodyLen);
 
   LExtraStr := '';
   for I := 0 to High(AExtra) do
@@ -407,7 +406,7 @@ begin
           + Length(G_CL_PREFIX) + LCLLen + 2
           + Length(LConnBytes) + LExtraLen + Length(G_CRLF);
 
-  // #72: thread-local arena avoids pool round-trip in SyncDispatch
+  // Thread-local arena avoids pool round-trip in SyncDispatch
   if AUseArena then
     Result := THeaderArena.Acquire(LTotal)
   else
@@ -451,7 +450,7 @@ begin
 end;
 
 initialization
-  // W3: pre-encode common HTTP response fragments once.
+  // Pre-encode common HTTP response fragments once.
   G_STATUS_200 := TEncoding.ASCII.GetBytes('HTTP/1.1 200 OK'#13#10);
   G_STATUS_201 := TEncoding.ASCII.GetBytes('HTTP/1.1 201 Created'#13#10);
   G_STATUS_204 := TEncoding.ASCII.GetBytes('HTTP/1.1 204 No Content'#13#10);
@@ -470,18 +469,18 @@ initialization
   G_STATUS_429 := TEncoding.ASCII.GetBytes('HTTP/1.1 429 Too Many Requests'#13#10);
   G_STATUS_500 := TEncoding.ASCII.GetBytes('HTTP/1.1 500 Internal Server Error'#13#10);
   G_STATUS_503 := TEncoding.ASCII.GetBytes('HTTP/1.1 503 Service Unavailable'#13#10);
-  G_CT_PREFIX  := TEncoding.ASCII.GetBytes('Content-Type: ');
-  G_CL_PREFIX  := TEncoding.ASCII.GetBytes('Content-Length: ');
-  G_CONN_KA    := TEncoding.ASCII.GetBytes('Connection: keep-alive'#13#10);
+  G_CT_PREFIX := TEncoding.ASCII.GetBytes('Content-Type: ');
+  G_CL_PREFIX := TEncoding.ASCII.GetBytes('Content-Length: ');
+  G_CONN_KA := TEncoding.ASCII.GetBytes('Connection: keep-alive'#13#10);
   G_CONN_CLOSE := TEncoding.ASCII.GetBytes('Connection: close'#13#10);
-  G_CRLF       := TEncoding.ASCII.GetBytes(#13#10);
-  // W3+: pre-encode common content-type values
-  G_CT_JSON    := TEncoding.ASCII.GetBytes('application/json');
-  G_CT_TEXT    := TEncoding.ASCII.GetBytes('text/plain');
-  G_CT_HTML    := TEncoding.ASCII.GetBytes('text/html');
+  G_CRLF := TEncoding.ASCII.GetBytes(#13#10);
+  // Pre-encode common content-type values
+  G_CT_JSON := TEncoding.ASCII.GetBytes('application/json');
+  G_CT_TEXT := TEncoding.ASCII.GetBytes('text/plain');
+  G_CT_HTML := TEncoding.ASCII.GetBytes('text/html');
   G_CT_PROBLEM := TEncoding.ASCII.GetBytes('application/problem+json');
-  G_CT_FORM    := TEncoding.ASCII.GetBytes('application/x-www-form-urlencoded');
-  G_CT_OCTET   := TEncoding.ASCII.GetBytes('application/octet-stream');
+  G_CT_FORM := TEncoding.ASCII.GetBytes('application/x-www-form-urlencoded');
+  G_CT_OCTET := TEncoding.ASCII.GetBytes('application/octet-stream');
   G_DEFAULT_ERROR_BODY := TEncoding.UTF8.GetBytes('{"error":"Internal Server Error"}');
 
 end.

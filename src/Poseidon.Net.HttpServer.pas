@@ -44,40 +44,37 @@ type
 
   TPoseidonNativeServer = class
   private
-    FOnRequest:       TOnNativeRequest;
-    FActive:          Boolean;
-    FConnManager:     TConnectionManager;  // #84: connection admission + tracking
-    FInFlightCount:   Int64;
-    _PadInflight:     array[0..6] of Int64; // #69: cache-line padding — isolate FInFlightCount
-    FIdleTimeoutMs:   Integer;     // 0 = disabled; default 10_000
-    FIdleSweep:       TIdleSweepManager;  // #88: idle connection timeout (created in Listen)
-    FSSLManager:      TSSLManager;     // #85: SSL config + context
-    FWSManager:       TWebSocketManager; // #86: WS handlers + frames
-    FH2Manager:       THTTP2Manager;   // #87: HTTP/2 upgrade + callbacks
-    FWorkerCount:     Integer;         // 0 = auto max (DEFAULT_MAX_WORKERS = 200)
-    FMinWorkerCount:  Integer;         // 0 = auto min (same as IO workers, 4–16)
-    FRequestPool:     TElasticWorkerPool; // elastic request-handler pool
-    FOnLog:           TOnPoseidonLog;
-    FOnRequestLog:    TOnPoseidonRequestLog;  // access log callback; nil = silent
-    FMinTLSVersion:   Integer;         // S-6: 0 = library default; $0303 = TLS 1.2
-    FMaxRequestSize:  Integer;         // R-4: max accumulated request bytes (default 8MB)
-    FMaxHeaderSize:   Integer;         // R-4: max header section bytes (default 64KB)
-    FDrainEvent:      TEvent;          // R-1: signaled on each connection close
-    FDrainTimeoutMs:  Integer;         // R-1: max ms to wait for drain (default 30000)
-    FMaxQueueDepth:   Integer;         // R-5: max concurrent in-flight; 0=unlimited
-    FSecureHeadersEnabled:   Boolean;  // A-1: inject X-Content-Type-Options etc.
-    FServerBanner:    string;          // A-2: Server: header value; '' = omit
-    FTCPFastOpen:     Boolean;         // feat: TCP_FASTOPEN — opt-in; graceful no-op on unsupported OS
-    FPerCoreAccept:   Boolean;         // #58: per-core accept threads with SO_REUSEPORT
-    FSyncDispatch:    Boolean;         // v2-perf: dispatch on IO thread (skip worker pool)
-    FProxyProtocol:     TProxyProtocolMode; // PP v1/v2/auto; default ppDisabled
-    // R-1: platform IO backend — holds IOCP/epoll fd, listen socket, workers.
-    FIOBackend:       IIOBackend;
-    // R-5: protocol dispatcher
-    FDispatcher:      TProtocolDispatcher;
-    // R-6: injected dependencies (DIP) — nil = use DefaultXxx singleton
-    FBufferPool:      IBufferPool;
-    FSSLProvider:     ISSLProvider;
+    FOnRequest: TOnNativeRequest;
+    FActive: Boolean;
+    FConnManager: TConnectionManager;
+    FInFlightCount: Int64;
+    FPadInflight: array[0..6] of Int64; // Cache-line padding — isolate FInFlightCount
+    FIdleTimeoutMs: Integer;
+    FIdleSweep: TIdleSweepManager;
+    FSSLManager: TSSLManager;
+    FWSManager: TWebSocketManager;
+    FH2Manager: THTTP2Manager;
+    FWorkerCount: Integer;
+    FMinWorkerCount: Integer;
+    FRequestPool: TElasticWorkerPool;
+    FOnLog: TOnPoseidonLog;
+    FOnRequestLog: TOnPoseidonRequestLog;
+    FMinTLSVersion: Integer;
+    FMaxRequestSize: Integer;
+    FMaxHeaderSize: Integer;
+    FDrainEvent: TEvent;
+    FDrainTimeoutMs: Integer;
+    FMaxQueueDepth: Integer;
+    FSecureHeadersEnabled: Boolean;
+    FServerBanner: string;
+    FTCPFastOpen: Boolean;
+    FPerCoreAccept: Boolean;
+    FSyncDispatch: Boolean;
+    FProxyProtocol: TProxyProtocolMode;
+    FIOBackend: IIOBackend;
+    FDispatcher: TProtocolDispatcher;
+    FBufferPool: IBufferPool;
+    FSSLProvider: ISSLProvider;
 
     procedure SetSyncDispatch(AValue: Boolean);
     function  GetMaxConnections: Integer;
@@ -116,7 +113,7 @@ type
     procedure _SSLFlushWriteBio(AConn: Pointer);
 
 
-    // #86/#87: WS/H2 methods moved to managers — thin shims for adapter
+    // WS/H2 methods moved to managers — thin shims for adapter
     procedure _UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     procedure _UpgradeToH2C(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     function  _DispatchWSFrames(AConn: Pointer): Boolean;
@@ -143,7 +140,7 @@ type
     // Connections with no _ProcessRecv activity for IdleTimeoutMs are shut down.
     // Default 10000 (10s). Set to 0 to disable. Applies during SSL handshake too.
     property IdleTimeoutMs: Integer read FIdleTimeoutMs write FIdleTimeoutMs;
-    // #84: connection limits delegated to TConnectionManager
+    // Connection limits delegated to TConnectionManager
     property MaxConnections: Integer read GetMaxConnections write SetMaxConnections;
     property MaxConnectionsPerIP: Integer read GetMaxConnectionsPerIP write SetMaxConnectionsPerIP;
     // HTTP/2 via ALPN: when True and SSL is configured, the server negotiates "h2"
@@ -248,21 +245,25 @@ uses
 // ===========================================================================
 
 const
-  MAX_REQUEST_SIZE = 8 * 1024 * 1024;
-  RECV_BUF_SIZE    = 32768;  // was 8192 — match CrossSocket; reduz recv() syscalls em payloads maiores
-  ACCUM_INITIAL    = 8192;
-  WORKER_COUNT_MIN = 4;
+  CMaxRequestSize = 8 * 1024 * 1024;
+  CRecvBufSize = 32768;
+  CAccumInitial = 8192;
+  CWorkerCountMin = 4;
   // W15: cap auto-computed IO workers — ProcessorCount*2 on high-core machines
   // (e.g. 100 logical → 200 threads) wasted stack with no throughput gain.
   // IO workers only handle I/O events (recv/send); request handlers run in
   // the elastic TElasticWorkerPool, so this cap can stay low.
-  WORKER_COUNT_MAX      = 16;
+  CWorkerCountMax = 16;
   // Default ceiling for the elastic request-worker pool. Pools start at
   // min workers (4–16) and grow here only when all workers are busy.
   // 200 × 8MB stack = 1.6GB — well within safe limits.
-  DEFAULT_MAX_WORKERS   = 200;
+  CDefaultMaxWorkers = 200;
   // Workers above MinWorkerCount self-terminate after this many ms idle.
-  WORKER_IDLE_TIMEOUT_MS = 30000;
+  CWorkerIdleTimeoutMs = 30000;
+  CDefaultIdleTimeoutMs = 10000;
+  CDefaultMaxHeaderSize = 65536;
+  CDefaultDrainTimeoutMs = 30000;
+  CShutdownTimeoutMs = 1000;
 
 // ===========================================================================
 // Shared: SSL helpers — encrypt-and-send + handshake write-BIO flush
@@ -392,7 +393,7 @@ begin
   FServer._EncryptAndSend(AConn, AData, AActualLen);
 end;
 
-// #61: Vectored send — SSL falls back to concatenation, plain uses PostSendV
+// Vectored send — SSL falls back to concatenation, plain uses PostSendV
 procedure TServerDispatchAdapter.SendResponseV(AConn: Pointer;
   const AHeaders: TBytes; AHdrLen: Integer;
   const ABody: TBytes; ABodyLen: Integer);
@@ -538,7 +539,7 @@ end;
 // Shared: ConfigureSSL — call before Listen() to enable HTTPS
 // ===========================================================================
 
-// #85: SSL config delegated to TSSLManager
+// SSL config delegated to TSSLManager
 procedure TPoseidonNativeServer.ConfigureSSL(const ACertFile, AKeyFile: string);
 begin
   if FActive then
@@ -585,7 +586,7 @@ procedure TPoseidonNativeServer._ProcessRecvSSL(AConn: Pointer;
   const ABuf: PByte; ALen: Cardinal; out AAborted: Boolean);
 var
   LConn:   TNativeConn absolute AConn;
-  LDecBuf: array[0..RECV_BUF_SIZE - 1] of Byte;
+  LDecBuf: array[0..CRecvBufSize - 1] of Byte;
   LDecN:   Integer;
   LErr:    Integer;
   LHsRet:  Integer;
@@ -643,7 +644,7 @@ begin
 
   // Drain decrypted application data into AccumBuf
   repeat
-    LDecN := FSSLProvider.SSLRead(LConn.SSLHandle, @LDecBuf[0], RECV_BUF_SIZE);
+    LDecN := FSSLProvider.SSLRead(LConn.SSLHandle, @LDecBuf[0], CRecvBufSize);
     if LDecN > 0 then
     begin
       if LConn.AccumLen + LDecN > Length(LConn.AccumBuf) then
@@ -784,7 +785,7 @@ begin
     begin
       _Log(llError, '[recv] ' + LConn.RemoteAddr + ' EX [' + E.ClassName +
         ']: ' + E.Message);
-      try _CloseConn(AConn); except end;
+      try _CloseConn(AConn); except on E: Exception do; end;
     end;
   end;
 end;
@@ -793,7 +794,7 @@ end;
 // Shared: connection-limit admission
 // ===========================================================================
 
-// #84: connection limit getters/setters delegate to FConnManager
+// Connection limit getters/setters delegate to FConnManager
 function TPoseidonNativeServer.GetMaxConnections: Integer;
 begin
   Result := FConnManager.MaxConnections;
@@ -862,7 +863,7 @@ begin
   if FSyncDispatch = AValue then
     Exit;
   FSyncDispatch := AValue;
-  // #83: rebuild pipeline — lightweight vs full is baked into the step array
+  // Rebuild pipeline — lightweight vs full is baked into the step array
   if FDispatcher <> nil then
   begin
     FreeAndNil(FDispatcher);
@@ -876,64 +877,60 @@ constructor TPoseidonNativeServer.Create(
   ASSLProvider: ISSLProvider);
 begin
   inherited Create;
-  // R-6: wire injected dependencies; nil = built-in defaults
-  if ABufferPool  <> nil then FBufferPool  := ABufferPool
-                          else FBufferPool  := DefaultBufferPool;
+  if ABufferPool <> nil then FBufferPool := ABufferPool
+  else FBufferPool := DefaultBufferPool;
   if ASSLProvider <> nil then FSSLProvider := ASSLProvider
-                          else FSSLProvider := DefaultSSLProvider;
-  FConnManager             := TConnectionManager.Create;  // #84
-  FSSLManager              := TSSLManager.Create(FSSLProvider);  // #85
-  FIdleTimeoutMs           := 10000;
-  FMaxRequestSize          := MAX_REQUEST_SIZE;    // R-4: 8MB
-  FMaxHeaderSize           := 65536;               // R-4: 64KB
-  FDrainTimeoutMs          := 30000;               // R-1: 30s
-  FDrainEvent              := TEvent.Create(nil, True, False, '');
-  FMaxQueueDepth           := 0;                   // R-5: unlimited
-  FSecureHeadersEnabled    := False;               // A-1: opt-in
-  FServerBanner            := 'Poseidon/1.0';      // A-2
-  FTCPFastOpen             := False;               // TCP_FASTOPEN: opt-in
-  FPerCoreAccept           := False;               // #58: per-core accept: opt-in
-  FSyncDispatch            := False;               // v2-perf: sync dispatch: opt-in
-  FProxyProtocol           := ppDisabled;
-  // #86: WS manager — needs transport callbacks
-  FWSManager               := TWebSocketManager.Create(
+  else FSSLProvider := DefaultSSLProvider;
+  FConnManager := TConnectionManager.Create;
+  FSSLManager := TSSLManager.Create(FSSLProvider);
+  FIdleTimeoutMs := CDefaultIdleTimeoutMs;
+  FMaxRequestSize := CMaxRequestSize;
+  FMaxHeaderSize := CDefaultMaxHeaderSize;
+  FDrainTimeoutMs := CDefaultDrainTimeoutMs;
+  FDrainEvent := TEvent.Create(nil, True, False, '');
+  FMaxQueueDepth := 0;
+  FSecureHeadersEnabled := False;
+  FServerBanner := 'Poseidon/1.0';
+  FTCPFastOpen := False;
+  FPerCoreAccept := False;
+  FSyncDispatch := False;
+  FProxyProtocol := ppDisabled;
+  FWSManager := TWebSocketManager.Create(
     procedure(AConn: Pointer; const AData: TBytes) begin _EncryptAndSend(AConn, AData); end,
     procedure(AConn: Pointer) begin _CloseConn(AConn); end,
     procedure(AConn: Pointer) begin _PostRecv(AConn); end,
     function(AStatus: Integer; const AContentType: string; const ABody: TBytes;
       AKeepAlive: Boolean; const AExtra: TArray<TPair<string,string>>): TBytes
     begin Result := _BuildResponse(AStatus, AContentType, ABody, AKeepAlive, AExtra); end);
-  // #87: H2 manager — needs transport callbacks
-  FH2Manager               := THTTP2Manager.Create(
+  FH2Manager := THTTP2Manager.Create(
     procedure(AConn: Pointer; const AData: TBytes) begin _EncryptAndSend(AConn, AData); end,
     procedure(AConn: Pointer) begin _CloseConn(AConn); end,
     procedure(AConn: Pointer) begin _PostRecv(AConn); end);
-  // R-5: create the protocol dispatcher with a server-backed adapter
-  FDispatcher              := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self), FSyncDispatch);
-  // R-1: create platform IO backend — ONLY {$IFDEF} remaining in HttpServer.
+  FDispatcher := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self), FSyncDispatch);
+  // Create platform IO backend — ONLY {$IFDEF} remaining in HttpServer.
   // Windows: try RIO (Windows 8+) first; fall back to IOCP silently.
   // Linux:   try io_uring (kernel 5.1+) first; fall back to epoll silently.
   // Define FORCE_IOCP / FORCE_EPOLL to skip the modern backend.
 {$IFDEF MSWINDOWS}
   {$IFDEF FORCE_IOCP}
-  FIOBackend               := TIOCPBackend.Create;
+  FIOBackend := TIOCPBackend.Create;
   {$ELSE}
   try
-    FIOBackend             := TRIOBackend.Create;
+    FIOBackend := TRIOBackend.Create;
   except
     on ENotSupportedException do
-      FIOBackend           := TIOCPBackend.Create;
+      FIOBackend := TIOCPBackend.Create;
   end;
   {$ENDIF}
 {$ELSE}
   {$IFDEF FORCE_EPOLL}
-  FIOBackend               := TEpollBackend.Create;
+  FIOBackend := TEpollBackend.Create;
   {$ELSE}
   try
-    FIOBackend             := TIOUringBackend.Create;
+    FIOBackend := TIOUringBackend.Create;
   except
     on ENotSupportedException do
-      FIOBackend           := TEpollBackend.Create;
+      FIOBackend := TEpollBackend.Create;
   end;
   {$ENDIF}
 {$ENDIF}
@@ -944,20 +941,20 @@ var
   LPair: TPair<string, Pointer>;
 begin
   if FActive then
-    try Stop except end;
+    try Stop except on E: Exception do; end;
   // Guard: if Stop was skipped (e.g. never called Listen), pool may still exist.
   if Assigned(FRequestPool) then
   begin
-    FRequestPool.Shutdown(1000);
+    FRequestPool.Shutdown(CShutdownTimeoutMs);
     FreeAndNil(FRequestPool);
   end;
-  FreeAndNil(FIdleSweep);     // #88
-  FreeAndNil(FH2Manager);     // #87
-  FreeAndNil(FWSManager);     // #86
-  FreeAndNil(FSSLManager);    // #85
-  FreeAndNil(FConnManager);   // #84
+  FreeAndNil(FIdleSweep);
+  FreeAndNil(FH2Manager);
+  FreeAndNil(FWSManager);
+  FreeAndNil(FSSLManager);
+  FreeAndNil(FConnManager);
   FreeAndNil(FDrainEvent);
-  FreeAndNil(FDispatcher);  // R-5: releases adapter interface ref
+  FreeAndNil(FDispatcher);
   inherited Destroy;
 end;
 
@@ -965,7 +962,7 @@ end;
 // Shared: WebSocket — upgrade, frame dispatch, handler registration
 // ===========================================================================
 
-// #86/#87: thin shims — delegate to managers
+// Thin shims — delegate to managers
 procedure TPoseidonNativeServer._UpgradeToWS(AConn: Pointer;
   const AReq: TPoseidonNativeRequest);
 begin
@@ -1006,7 +1003,7 @@ end;
 // normal worker path tears the connection down via _CloseConn.
 // ===========================================================================
 
-// #88: _IdleSweepLoop moved to TIdleSweepManager
+// _IdleSweepLoop moved to TIdleSweepManager
 
 // ===========================================================================
 // R-1: Platform-agnostic Listen / Stop / _OnNewSocket / _PostRecv / _PostSend
@@ -1026,18 +1023,18 @@ begin
 
   FOnRequest := AOnRequest;
   FActive    := True;
-  // #87: wire H2 manager with request handler and inflight counter
+  // Wire H2 manager with request handler and inflight counter
   FH2Manager.OnRequest    := FOnRequest;
   FH2Manager.InFlightCount := @FInFlightCount;
-  // #86: wire WS manager log
+  // Wire WS manager log
   FWSManager.OnLog := FOnLog;
 
   // IO tier: small fixed pool — handles kernel I/O events only (recv/send).
   // W14: ProcessorCount×2 wins ~50% at c=100; cap at 16 to avoid stack waste.
   // IO workers no longer run blocking handlers, so the cap stays low safely.
-  LIOWorkers := Min(Max(WORKER_COUNT_MIN, TThread.ProcessorCount * 2),
-                    WORKER_COUNT_MAX);
-  // #58: per-core accept — one listen socket + accept thread per CPU core
+  LIOWorkers := Min(Max(CWorkerCountMin, TThread.ProcessorCount * 2),
+                    CWorkerCountMax);
+  // Per-core accept — one listen socket + accept thread per CPU core
   if FPerCoreAccept then
     LAcceptN := TThread.ProcessorCount
   else
@@ -1050,9 +1047,9 @@ begin
   LMinReq := FMinWorkerCount;
   if LMinReq <= 0 then LMinReq := LIOWorkers;   // default: same as IO workers
   LMaxReq := FWorkerCount;
-  if LMaxReq <= 0 then LMaxReq := DEFAULT_MAX_WORKERS;  // default: 200
+  if LMaxReq <= 0 then LMaxReq := CDefaultMaxWorkers;  // default: 200
   FRequestPool := TElasticWorkerPool.Create(LMinReq, LMaxReq,
-                    WORKER_IDLE_TIMEOUT_MS);
+                    CWorkerIdleTimeoutMs);
 
   // AOnListen fires here — server is functional (workers + accept running).
   // Sweep is intentionally started after: if AOnListen blocks (e.g. Readln),
@@ -1060,7 +1057,7 @@ begin
   if Assigned(AOnListen) then
     AOnListen();
 
-  // #88: idle sweep delegated to TIdleSweepManager
+  // Idle sweep delegated to TIdleSweepManager
   FIdleSweep := TIdleSweepManager.Create(FConnManager, FIOBackend, @FActive);
   FIdleSweep.IdleTimeoutMs := FIdleTimeoutMs;
   FIdleSweep.OnLog := FOnLog;
@@ -1076,7 +1073,7 @@ begin
   if not FActive then Exit;
   FActive := False;
 
-  // #88: stop idle sweep
+  // Stop idle sweep
   if Assigned(FIdleSweep) then
     FIdleSweep.Stop;
 
@@ -1131,7 +1128,7 @@ begin
   FIOBackend.SignalWorkers;
   FIOBackend.JoinWorkers;
 
-  FreeAndNil(FIdleSweep);  // #88: cleanup sweep manager
+  FreeAndNil(FIdleSweep);
 end;
 
 procedure TPoseidonNativeServer._OnNewSocket(ASocket: NativeUInt;
@@ -1150,16 +1147,16 @@ begin
         LConn.SSLReadBio, LConn.SSLWriteBio);
     except
       FIOBackend.SocketClose(LConn);  // epoll DEL silently fails (ENOENT) — harmless
-      LConn.Release;  // #43: never registered — drop server ref directly
+      LConn.Release;  // Never registered — drop server ref directly
       Exit;
     end;
   end;
-  // #84: connection limit + per-IP enforcement via TConnectionManager
+  // Connection limit + per-IP enforcement via TConnectionManager
   if not FConnManager.Admit(LConn) then
   begin
     if LConn.SSLHandle <> nil then FSSLManager.FreeSSL(LConn.SSLHandle);
     FIOBackend.SocketClose(LConn);
-    LConn.Release;  // #43: never registered — drop server ref directly
+    LConn.Release;  // Never registered — drop server ref directly
     Exit;
   end;
   try
@@ -1189,10 +1186,10 @@ var
   LConn: TNativeConn absolute AConn;
   LIdx:  Integer;
 begin
-  // #84: remove from TConnectionManager (handles per-IP unregister)
+  // Remove from TConnectionManager (handles per-IP unregister)
   LIdx := FConnManager.Remove(AConn);
   if LIdx < 0 then Exit;  // already closed by Stop()
-  if LConn.WSMode = CM_WEBSOCKET then
+  if LConn.WSMode = CCMWebSocket then
   begin
     if LConn.WSConn <> nil then
       (LConn.WSConn as TPoseidonWSConn).Invalidate;
@@ -1207,7 +1204,7 @@ begin
     LConn.SSLWriteBio := nil;
   end;
   FIOBackend.SocketClose(LConn);  // platform-specific: epoll DEL + shutdown + close
-  LConn.Release;  // #43: drop server ref; object lives until all IOCP ops complete
+  LConn.Release;  // Drop server ref; object lives until all IOCP ops complete
   // R-1: wake the drain event so Stop() can proceed without polling
   if Assigned(FDrainEvent) then FDrainEvent.SetEvent;
 end;

@@ -27,18 +27,16 @@ type
     FWorkers: TArray<TThread>;
     FCallbacks: IIOCallbacks;
     FShutdown: Boolean;
-    // #105: AcceptEx
     FAcceptEx: Pointer;
     FGetAcceptExSockaddrs: Pointer;
     FAcceptCtxs: array of Pointer;  // PAcceptCtx, allocated in StartListening
-    // #106: async DisconnectEx
     FDisconnectEx: Pointer;
     procedure _LoadExtensions;
     procedure _PostOneAccept(AIdx: Integer);
     procedure _WorkerLoop;
   public
     constructor Create;
-    destructor  Destroy; override;
+    destructor Destroy; override;
     // IIOBackend
     procedure StartListening(const AHost: string; APort: Integer;
       AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
@@ -70,7 +68,6 @@ function _IocpGet(Port: THandle; pBytes: PDWORD; pKey: PNativeUInt;
   pOvl: PPointer; Ms: DWORD): BOOL; stdcall;
   external 'kernel32.dll' name 'GetQueuedCompletionStatus';
 
-// #104: batch dequeue — up to N completions per syscall
 type
   TOVERLAPPED_ENTRY = record
     lpCompletionKey: NativeUInt;
@@ -89,16 +86,14 @@ function _IocpPost(Port: THandle; Bytes: DWORD; Key: NativeUInt;
   pOvl: Pointer): BOOL; stdcall;
   external 'kernel32.dll' name 'PostQueuedCompletionStatus';
 
-// #68: skip IOCP completion when WSASend/WSARecv completes synchronously
 function _SetFileCompletionNotificationModes(FileHandle: THandle;
   Flags: Byte): BOOL; stdcall;
   external 'kernel32.dll' name 'SetFileCompletionNotificationModes';
 
 const
   FILE_SKIP_COMPLETION_PORT_ON_SUCCESS = $01;
-  FILE_SKIP_SET_EVENT_ON_HANDLE        = $02;
+  FILE_SKIP_SET_EVENT_ON_HANDLE = $02;
 
-// #106: CancelIoEx for shutdown drain
 function _CancelIoEx(hFile: THandle; lpOverlapped: POverlapped): BOOL; stdcall;
   external 'kernel32.dll' name 'CancelIoEx';
 
@@ -108,7 +103,6 @@ function _WsaBind(s: TSocket; addr: PSockAddrIn; addrlen: Integer): Integer; std
 function _WsaListen(s: TSocket; backlog: Integer): Integer; stdcall;
   external 'ws2_32.dll' name 'listen';
 
-// #105: AcceptEx function types and GUIDs
 const
   SIO_GET_EXTENSION_FUNCTION_POINTER = $C8000006;
   WSAID_ACCEPTEX: TGUID = '{B5367DF1-CBAC-11CF-95CA-00805F48A169}';
@@ -126,7 +120,6 @@ type
     var LocalSockaddr: PSockAddr; var LocalSockaddrLength: Integer;
     var RemoteSockaddr: PSockAddr; var RemoteSockaddrLength: Integer); stdcall;
 
-  // #106: DisconnectEx for async socket recycling
   TDisconnectExFunc = function(ASocket: TSocket; AOverlapped: POverlapped;
     AFlags: DWORD; AReserved: DWORD): BOOL; stdcall;
 
@@ -135,11 +128,13 @@ type
 // ---------------------------------------------------------------------------
 
 const
+  CTCP_FASTOPEN = 15;
+  CSO_UPDATE_ACCEPT_CONTEXT = $700B;
   CRecvBufSize = 32768;
-  CIocpBatchSize = 64;    // #104: max completions per GetQueuedCompletionStatusEx call
-  CAcceptPoolSize = 16;   // #105: pre-posted AcceptEx operations
+  CIocpBatchSize = 64;
+  CAcceptPoolSize = 16;
   CAddrBufSize = (SizeOf(TSockAddrIn) + 16) * 2;
-  CTF_REUSE_SOCKET = $02; // #106: for async DisconnectEx
+  CTF_REUSE_SOCKET = $02;
 
 type
   TIocpAction = (iaRecv, iaSend, iaSendV, iaAccept, iaDisconnect);
@@ -160,11 +155,10 @@ type
     Conn: Pointer;
     WsaBuf: TWsaBuf;
     SendBuf: TBytes;
-    ActualLen: Integer;             // P-4: bytes to send; 0 = use Length(SendBuf)
-    SentBytes: Integer;             // #105: partial send tracking
+    ActualLen: Integer;
+    SentBytes: Integer;
   end;
 
-  // #61: Vectored send context — 2 WSABUFs for headers + body
   PSendVCtx = ^TSendVCtx;
   TSendVCtx = record
     Ovl: TOverlapped;               // MUST be first
@@ -175,7 +169,6 @@ type
     BodyBuf: TBytes;
   end;
 
-  // #105: AcceptEx context
   PAcceptCtx = ^TAcceptCtx;
   TAcceptCtx = record
     Ovl: TOverlapped;               // MUST be first
@@ -184,7 +177,6 @@ type
     AddrBuf: array[0..CAddrBufSize - 1] of Byte;
   end;
 
-  // #106: Async DisconnectEx context
   PDisconnectCtx = ^TDisconnectCtx;
   TDisconnectCtx = record
     Ovl: TOverlapped;               // MUST be first
@@ -228,7 +220,6 @@ begin
   inherited Destroy;
 end;
 
-// #105: Load AcceptEx + GetAcceptExSockaddrs + DisconnectEx via WSAIoctl
 procedure TIOCPBackend._LoadExtensions;
 var
   LBytes: DWORD;
@@ -250,14 +241,12 @@ begin
     @LBytes, nil, nil);
 end;
 
-// #105: Post one AcceptEx operation — creates accept socket + posts to IOCP
 procedure TIOCPBackend._PostOneAccept(AIdx: Integer);
 var
   LCtx: PAcceptCtx;
   LAcceptSocket: TSocket;
   LBytes: DWORD;
 begin
-  // Try to get a recycled socket first, otherwise create new
   LAcceptSocket := TSocketPool.Acquire;
   if LAcceptSocket = INVALID_SOCKET then
     LAcceptSocket := WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nil, 0,
@@ -317,11 +306,11 @@ begin
 
   // TCP_FASTOPEN (RFC 7413) — opt-in; Windows 10 1607+
   if AFastOpen then
-    setsockopt(FListenSocket, IPPROTO_TCP, 15 {TCP_FASTOPEN},
+    setsockopt(FListenSocket, IPPROTO_TCP, CTCP_FASTOPEN,
       PAnsiChar(@LOne), SizeOf(LOne));
   FillChar(LAddr, SizeOf(LAddr), 0);
   LAddr.sin_family := AF_INET;
-  LAddr.sin_port   := htons(APort);
+  LAddr.sin_port := htons(APort);
   if (AHost = '0.0.0.0') or (AHost = '') then
     LAddr.sin_addr.S_addr := INADDR_ANY
   else
@@ -332,13 +321,9 @@ begin
   if _WsaListen(FListenSocket, SOMAXCONN) = SOCKET_ERROR then
     RaiseLastOSError;
 
-  // #77: load DisconnectEx from the listen socket for socket recycling
   TSocketPool.LoadDisconnectEx(FListenSocket);
-
-  // #105: load AcceptEx + GetAcceptExSockaddrs + DisconnectEx
   _LoadExtensions;
 
-  // Associate listen socket with IOCP for AcceptEx completions
   if _IocpCreate(THandle(FListenSocket), FIocp, 0, 0) = 0 then
     raise Exception.Create('IOCP associate listen socket failed');
 
@@ -351,7 +336,6 @@ begin
     FWorkers[I].Start;
   end;
 
-  // #105: Pre-post AcceptEx operations (replaces synchronous accept thread)
   if FAcceptEx <> nil then
   begin
     SetLength(FAcceptCtxs, CAcceptPoolSize);
@@ -365,7 +349,6 @@ end;
 
 procedure TIOCPBackend.StopAccept;
 begin
-  // Closing listen socket cancels all pending AcceptEx operations
   FShutdown := True;
   closesocket(FListenSocket);
   FListenSocket := INVALID_SOCKET;
@@ -411,8 +394,8 @@ var
 begin
   if _IocpCreate(THandle(LConn.Socket), FIocp, 0, 0) = 0 then
     raise Exception.Create('IOCP associate failed');
-  // #68: skip IOCP completion packet when WSASend/WSARecv completes synchronously.
-  // Result is inline on the calling thread — avoids kernel→user transition.
+  // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS — synchronous completion
+  // is inline on the calling thread, avoids kernel-to-user transition
   _SetFileCompletionNotificationModes(THandle(LConn.Socket),
     FILE_SKIP_COMPLETION_PORT_ON_SUCCESS or FILE_SKIP_SET_EVENT_ON_HANDLE);
 end;
@@ -426,21 +409,21 @@ var
   LRes: Integer;
 begin
   LCtx := AllocMem(SizeOf(TRecvCtx));
-  LCtx^.Action     := iaRecv;
-  LCtx^.Conn       := AConn;
+  LCtx^.Action := iaRecv;
+  LCtx^.Conn := AConn;
   LCtx^.WsaBuf.len := CRecvBufSize;
   LCtx^.WsaBuf.buf := @LCtx^.Data[0];
   LFlags := 0;
   LBytes := 0;
 
-  LConn.AddRef;  // #43: keep conn alive while this IOCP recv is in-flight
+  LConn.AddRef;
   LRes := WSARecv(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, LFlags,
     PWSAOverlapped(@LCtx^.Ovl), nil);
 
   if LRes = 0 then
   begin
-    // #100: FILE_SKIP_COMPLETION_PORT_ON_SUCCESS — synchronous completion,
-    // no IOCP packet will be posted. Handle inline.
+    // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS — synchronous completion,
+    // no IOCP packet will be posted
     if LBytes = 0 then
     begin
       LConn.Release;
@@ -456,7 +439,7 @@ begin
   end
   else if WSAGetLastError <> WSA_IO_PENDING then
   begin
-    LConn.Release;  // #43: op never posted — drop the ref we just took
+    LConn.Release;
     FreeMem(LCtx);
     FCallbacks.OnConnError(AConn);
   end;
@@ -482,23 +465,21 @@ begin
 
   New(LCtx);
   FillChar(LCtx^.Ovl, SizeOf(TOverlapped), 0);
-  LCtx^.Action     := iaSend;
-  LCtx^.Conn       := AConn;
-  LCtx^.SendBuf    := AData;
-  LCtx^.ActualLen  := LSendLen;
-  LCtx^.SentBytes  := 0;
+  LCtx^.Action := iaSend;
+  LCtx^.Conn := AConn;
+  LCtx^.SendBuf := AData;
+  LCtx^.ActualLen := LSendLen;
+  LCtx^.SentBytes := 0;
   LCtx^.WsaBuf.len := ULONG(LSendLen);
   LCtx^.WsaBuf.buf := @LCtx^.SendBuf[0];
   LBytes := 0;
 
-  LConn.AddRef;  // #43: keep conn alive while this IOCP send is in-flight
+  LConn.AddRef;
   LRes := WSASend(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, 0,
     PWSAOverlapped(@LCtx^.Ovl), nil);
 
   if LRes = 0 then
   begin
-    // #100: sync completion — handle inline
-    // #105: check for partial send
     if Integer(LBytes) < LSendLen then
     begin
       LCtx^.SentBytes := Integer(LBytes);
@@ -533,7 +514,6 @@ begin
   end;
 end;
 
-// #61: Vectored send — WSASend with 2 WSABUFs (headers + body)
 procedure TIOCPBackend.PostSendV(AConn: Pointer;
   const AHeaders: TBytes; AHdrLen: Integer;
   const ABody: TBytes; ABodyLen: Integer);
@@ -559,10 +539,10 @@ begin
 
   New(LCtx);
   FillChar(LCtx^.Ovl, SizeOf(TOverlapped), 0);
-  LCtx^.Action    := iaSendV;
-  LCtx^.Conn      := AConn;
+  LCtx^.Action := iaSendV;
+  LCtx^.Conn := AConn;
   LCtx^.HeaderBuf := AHeaders;
-  LCtx^.BodyBuf   := ABody;
+  LCtx^.BodyBuf := ABody;
 
   LCount := 0;
   if LHLen > 0 then
@@ -585,7 +565,6 @@ begin
 
   if LRes = 0 then
   begin
-    // #100: sync completion — handle inline
     TBufferPool.Release(LCtx^.HeaderBuf);
     TBufferPool.Release(LCtx^.BodyBuf);
     Dispose(LCtx);
@@ -607,10 +586,9 @@ var
   LConn: TNativeConn absolute AConn;
   LCtx: PDisconnectCtx;
 begin
-  // R-6: TCP half-close — FIN before RST so the client receives the last bytes
+  // TCP half-close — FIN before RST so the client receives the last bytes
   shutdown(LConn.Socket, SD_SEND);
 
-  // #106: async DisconnectEx — non-blocking socket recycling via IOCP
   if FDisconnectEx <> nil then
   begin
     New(LCtx);
@@ -658,7 +636,6 @@ var
 begin
   while True do
   begin
-    // #104: batch dequeue — up to CIocpBatchSize completions per syscall
     if not _IocpGetEx(FIocp, @LEntries[0], CIocpBatchSize, @LCount,
       INFINITE, False) then
       Break;
@@ -669,12 +646,11 @@ begin
       LBytes := LEntries[I].dwNumberOfBytesTransferred;
 
       if LOvl = nil then
-        Exit;  // Shutdown signal
+        Exit;
 
       try
         LHdr := PIocpHdr(LOvl);
 
-        // #105: AcceptEx completion — dispatch before accessing Conn
         if LHdr^.Action = iaAccept then
         begin
           LAcceptCtx := PAcceptCtx(LOvl);
@@ -687,9 +663,8 @@ begin
             Continue;
           end;
 
-          // Update accept socket context to inherit listen socket properties
           setsockopt(LAcceptCtx^.AcceptSocket, SOL_SOCKET,
-            $700B {SO_UPDATE_ACCEPT_CONTEXT},
+            CSO_UPDATE_ACCEPT_CONTEXT,
             PAnsiChar(@FListenSocket), SizeOf(FListenSocket));
 
           LOne := 1;
@@ -698,7 +673,6 @@ begin
           setsockopt(LAcceptCtx^.AcceptSocket, SOL_SOCKET, SO_KEEPALIVE,
             PAnsiChar(@LOne), SizeOf(LOne));
 
-          // Extract remote address
           LLocalAddr := nil;
           LRemoteAddr := nil;
           LLocalLen := 0;
@@ -724,7 +698,6 @@ begin
             closesocket(LAcceptCtx^.AcceptSocket);
           end;
 
-          // Find this ctx's index and repost AcceptEx
           for LAcceptIdx := 0 to High(FAcceptCtxs) do
             if FAcceptCtxs[LAcceptIdx] = Pointer(LAcceptCtx) then
             begin
@@ -735,13 +708,11 @@ begin
           Continue;
         end;
 
-        // #106: Async DisconnectEx completion — recycle socket into pool
         if LHdr^.Action = iaDisconnect then
         begin
           LDisCtx := PDisconnectCtx(LOvl);
           if LDisCtx^.Socket <> INVALID_SOCKET then
           begin
-            // Add directly to socket pool (already disconnected)
             if not TSocketPool.AddRecycled(LDisCtx^.Socket) then
               closesocket(LDisCtx^.Socket);
           end;
@@ -781,7 +752,6 @@ begin
           end;
           iaSend:
           begin
-            // #105: partial send tracking
             LSendCtx := PSendCtx(LOvl);
             Inc(LSendCtx^.SentBytes, Integer(LBytes));
             if LSendCtx^.SentBytes < LSendCtx^.ActualLen then
