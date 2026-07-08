@@ -295,7 +295,8 @@ var
 begin
   LClient := THTTPClient.Create;
   try
-    LResponse := LClient.Get(BASE_URL + '/echo/Poseidon');
+    LResponse := LClient.Get(BASE_URL + '/echo/Poseidon',
+      [TNameValuePair.Create('Connection', 'close')]);
     Assert.AreEqual(200, LResponse.StatusCode);
     Assert.IsTrue(LResponse.ContentAsString.Contains('"param":"Poseidon"'));
   finally
@@ -329,7 +330,8 @@ begin
   LClient := THTTPClient.Create;
   try
     LClient.HandleRedirects := False;
-    LResponse := LClient.Get(BASE_URL + '/nao-existe');
+    LResponse := LClient.Get(BASE_URL + '/nao-existe',
+      [TNameValuePair.Create('Connection', 'close')]);
     Assert.AreEqual(404, LResponse.StatusCode);
   finally
     LClient.Free;
@@ -365,7 +367,8 @@ begin
   LBody   := TStringStream.Create(PAYLOAD, TEncoding.UTF8);
   try
     LResponse := LClient.Post(BASE_URL + '/anything', LBody, nil,
-      [TNameValuePair.Create('Content-Type', 'application/json')]);
+      [TNameValuePair.Create('Content-Type', 'application/json'),
+       TNameValuePair.Create('Connection', 'close')]);
     Assert.AreEqual(201, LResponse.StatusCode,
       'POST must return 201');
     Assert.AreEqual(PAYLOAD, LResponse.ContentAsString,
@@ -377,29 +380,43 @@ begin
 end;
 
 procedure TPoseidonHttpServerTests.KeepAlive_MultipleRequests_ReuseConnection;
-// HTTP/1.1 keep-alive: a single THTTPClient maintains a persistent connection
-// and the server must correctly handle multiple sequential requests on it.
+// HTTP/1.1 keep-alive: a single raw TCP socket sends 3 sequential requests
+// on the same connection.  Raw sockets avoid WinHTTP connection-pool races
+// that cause flaky Error 12030 failures with THTTPClient.
 var
-  LClient:    THTTPClient;
-  LResponse1: IHTTPResponse;
-  LResponse2: IHTTPResponse;
-  LResponse3: IHTTPResponse;
+  LSock:    TSocket;
+  LReq:     TBytes;
+  LResp:    TBytes;
+  LRespStr: string;
+  LRecv:    Integer;
+  LTimeout: Integer;
+  I:        Integer;
 begin
-  LClient := THTTPClient.Create;
+  LSock := OpenTCPSocket(INTEST_PORT);
   try
-    LResponse1 := LClient.Get(BASE_URL + '/');
-    Assert.AreEqual(200, LResponse1.StatusCode,
-      'First request on keep-alive connection must return 200');
+    Assert.IsTrue(LSock <> INVALID_SOCKET, 'Could not connect to server');
+    LTimeout := 2000;
+    setsockopt(LSock, SOL_SOCKET, SO_RCVTIMEO,
+      PAnsiChar(@LTimeout), SizeOf(LTimeout));
 
-    LResponse2 := LClient.Get(BASE_URL + '/');
-    Assert.AreEqual(200, LResponse2.StatusCode,
-      'Second request on persistent connection must return 200');
+    LReq := TEncoding.ASCII.GetBytes(
+      'GET / HTTP/1.1'#13#10 +
+      'Host: 127.0.0.1'#13#10 +
+      'Connection: keep-alive'#13#10#13#10);
 
-    LResponse3 := LClient.Get(BASE_URL + '/');
-    Assert.AreEqual(200, LResponse3.StatusCode,
-      'Third request on persistent connection must return 200');
+    for I := 1 to 3 do
+    begin
+      Assert.IsTrue(SendAll(LSock, LReq),
+        Format('Request %d: send failed on keep-alive connection', [I]));
+      LRecv := RecvSome(LSock, LResp, 4096);
+      Assert.IsTrue(LRecv > 0,
+        Format('Request %d: no response on keep-alive connection', [I]));
+      LRespStr := TEncoding.ASCII.GetString(LResp);
+      Assert.IsTrue(Pos('200 OK', LRespStr) > 0,
+        Format('Request %d on keep-alive must return 200', [I]));
+    end;
   finally
-    LClient.Free;
+    closesocket(LSock);
   end;
 end;
 
@@ -903,6 +920,7 @@ var
   LResp: TBytes;
   LRespStr: string;
   LKey: string;
+  LTimeout: Integer;
 begin
   LKey := 'dGhlIHNhbXBsZSBub25jZQ==';  // RFC 6455 test vector key
   LReq := TEncoding.ASCII.GetBytes(
@@ -914,6 +932,9 @@ begin
     'Sec-WebSocket-Version: 13'#13#10#13#10);
   if not SendAll(ASocket, LReq) then
     Exit(False);
+  LTimeout := 2000;
+  setsockopt(ASocket, SOL_SOCKET, SO_RCVTIMEO,
+    PAnsiChar(@LTimeout), SizeOf(LTimeout));
   RecvSome(ASocket, LResp, 1024);
   LRespStr := TEncoding.ASCII.GetString(LResp);
   Result := Pos('101 Switching Protocols', LRespStr) > 0;
@@ -989,11 +1010,12 @@ end;
 procedure TPoseidonHttpServerWSTests.MaxWSFrameSize_OversizedFrame_ConnectionClosed;
 // R-3: Server must close the connection when a frame payload exceeds MaxWSFrameSize.
 var
-  LSock:    TSocket;
-  LPayload: TBytes;
-  LFrame:   TBytes;
-  LResp:    TBytes;
-  LRecv:    Integer;
+  LSock:      TSocket;
+  LPayload:   TBytes;
+  LFrame:     TBytes;
+  LResp:      TBytes;
+  LRecv:      Integer;
+  LTimeoutMs: Integer;
 const
   FRAME_LIMIT = 512;      // very small limit for test
   OVERSIZED   = 600;
@@ -1013,7 +1035,9 @@ begin
 
     // Server should send a close frame (opcode 8) then close the connection.
     // Either we receive data with close opcode, or recv returns 0 (disconnect).
-    Sleep(300);
+    LTimeoutMs := 2000;
+    setsockopt(LSock, SOL_SOCKET, SO_RCVTIMEO,
+      PAnsiChar(@LTimeoutMs), SizeOf(LTimeoutMs));
     LRecv := RecvSome(LSock, LResp, 1024);
     Assert.IsTrue((LRecv = 0) or
       ((LRecv >= 2) and ((LResp[0] and $0F) = $08)),
@@ -1130,10 +1154,15 @@ var
   LReq:       TBytes;
   LResp:      TBytes;
   LRespStr:   string;
+  LTimeout:   Integer;
 begin
   LSock := OpenTCPSocket(H2C_PORT);
   try
     Assert.IsTrue(LSock <> INVALID_SOCKET, 'Could not connect to h2c server');
+
+    LTimeout := 2000;
+    setsockopt(LSock, SOL_SOCKET, SO_RCVTIMEO,
+      PAnsiChar(@LTimeout), SizeOf(LTimeout));
 
     // RFC 7540 §3.2 upgrade request
     // HTTP2-Settings is a base64url of a SETTINGS payload (empty = no settings)
@@ -1146,7 +1175,6 @@ begin
     Assert.IsTrue(SendAll(LSock, LReq), 'Failed to send h2c upgrade request');
 
     // Read server response — should start with HTTP/1.1 101
-    Sleep(300);
     RecvSome(LSock, LResp, 2048);
     LRespStr := TEncoding.ASCII.GetString(LResp);
     Assert.IsTrue(
@@ -1295,22 +1323,23 @@ begin
       'Host: 127.0.0.1'#13#10 +
       'Connection: keep-alive'#13#10#13#10);
 
+    LTimeout := 2000;
+    setsockopt(LSock, SOL_SOCKET, SO_RCVTIMEO,
+      PAnsiChar(@LTimeout), SizeOf(LTimeout));
+
     for I := 1 to 6 do
     begin
       Assert.IsTrue(SendAll(LSock, LReq),
         Format('Request %d failed on active connection', [I]));
-      Sleep(100);
-      RecvSome(LSock, LResp, 4096);
-      Sleep(100);
+      LRecv := RecvSome(LSock, LResp, 4096);
+      Assert.IsTrue(LRecv > 0,
+        Format('Request %d: no response on active connection', [I]));
+      Sleep(200);
     end;
 
     // Connection must still be alive — a fresh request should succeed.
     Assert.IsTrue(SendAll(LSock, LReq),
-      'Active connection should still be open after 1.2 s of activity');
-    Sleep(300);
-    LTimeout := 500;
-    setsockopt(LSock, SOL_SOCKET, SO_RCVTIMEO,
-      PAnsiChar(@LTimeout), SizeOf(LTimeout));
+      'Active connection should still be open after activity');
     LRecv := RecvSome(LSock, LResp, 4096);
     Assert.IsTrue(LRecv > 0,
       'Active connection must still receive a response after continuous activity');
