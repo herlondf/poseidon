@@ -283,7 +283,24 @@ begin
   LRes := WSARecv(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, LFlags,
     PWSAOverlapped(@LCtx^.Ovl), nil);
 
-  if (LRes = SOCKET_ERROR) and (WSAGetLastError <> WSA_IO_PENDING) then
+  if LRes = 0 then
+  begin
+    // #100: FILE_SKIP_COMPLETION_PORT_ON_SUCCESS — synchronous completion,
+    // no IOCP packet will be posted. Handle inline.
+    if LBytes = 0 then
+    begin
+      LConn.Release;
+      FreeMem(LCtx);
+      FCallbacks.OnConnError(AConn);
+    end
+    else
+    begin
+      FCallbacks.OnRecv(LConn, @LCtx^.Data[0], LBytes);
+      FreeMem(LCtx);
+      LConn.Release;
+    end;
+  end
+  else if WSAGetLastError <> WSA_IO_PENDING then
   begin
     LConn.Release;  // #43: op never posted — drop the ref we just took
     FreeMem(LCtx);
@@ -323,11 +340,17 @@ begin
   LRes := WSASend(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, 0,
     PWSAOverlapped(@LCtx^.Ovl), nil);
 
-  if (LRes = SOCKET_ERROR) and (WSAGetLastError <> WSA_IO_PENDING) then
+  if LRes = 0 then
   begin
-    Writeln(ErrOutput, '[iocp] WSASend failed: WSAError=', WSAGetLastError,
-      ' conn=', NativeUInt(AConn));
-    LConn.Release;  // #43: op never posted — drop the ref we just took
+    // #100: sync completion — handle inline
+    TBufferPool.Release(LCtx^.SendBuf);
+    Dispose(LCtx);
+    FCallbacks.OnSendComplete(LConn);
+    LConn.Release;
+  end
+  else if WSAGetLastError <> WSA_IO_PENDING then
+  begin
+    LConn.Release;
     TBufferPool.Release(LCtx^.SendBuf);
     Dispose(LCtx);
     FCallbacks.OnConnError(AConn);
@@ -384,7 +407,16 @@ begin
   LRes := WSASend(LConn.Socket, @LCtx^.WsaBufs[0], LCount, LBytes, 0,
     PWSAOverlapped(@LCtx^.Ovl), nil);
 
-  if (LRes = SOCKET_ERROR) and (WSAGetLastError <> WSA_IO_PENDING) then
+  if LRes = 0 then
+  begin
+    // #100: sync completion — handle inline
+    TBufferPool.Release(LCtx^.HeaderBuf);
+    TBufferPool.Release(LCtx^.BodyBuf);
+    Dispose(LCtx);
+    FCallbacks.OnSendComplete(LConn);
+    LConn.Release;
+  end
+  else if WSAGetLastError <> WSA_IO_PENDING then
   begin
     LConn.Release;
     TBufferPool.Release(LCtx^.HeaderBuf);

@@ -83,11 +83,9 @@ const
   SOCK_CLOEXEC  = $80000;
 
   TCP_CORK         = 3;
-  SO_BUSY_POLL     = 46;
-  CBusyPollMicros  = 50;
-  SO_ZEROCOPY      = 60;
-  MSG_ZEROCOPY     = $4000000;
-  CZeroCopyThreshold = 10240;
+  // #102: SO_ZEROCOPY / MSG_ZEROCOPY removed — requires error queue polling
+  // (MSG_ERRQUEUE) to avoid data corruption. SO_BUSY_POLL removed from default
+  // path — burns CPU, should be opt-in for latency-critical scenarios.
 
   CListenSentinel = Pointer(1);
 
@@ -204,9 +202,6 @@ procedure TEpollBackend.StartListening(const AHost: string; APort: Integer;
     if AFastOpen then
       _LinuxSetsockopt(Result, IPPROTO_TCP, 23 {TCP_FASTOPEN}, @LOne, SizeOf(LOne));
     _LinuxSetsockopt(Result, IPPROTO_TCP, 9 {TCP_DEFER_ACCEPT}, @LOne, SizeOf(LOne));
-
-    LOne := CBusyPollMicros;
-    _LinuxSetsockopt(Result, SOL_SOCKET, SO_BUSY_POLL, @LOne, SizeOf(LOne));
 
     FillChar(LAddr, SizeOf(LAddr), 0);
     LAddr.sin_family := AF_INET;
@@ -484,10 +479,7 @@ begin
   while LConn.SentBytes < LTotalSend do
   begin
     LRemain := LTotalSend - LConn.SentBytes;
-    // #80: MSG_ZEROCOPY for large sends
     LSendFlags := MSG_NOSIGNAL;
-    if LRemain >= CZeroCopyThreshold then
-      LSendFlags := LSendFlags or MSG_ZEROCOPY;
     LN := _LinuxSend(LConn.Socket,
       @LConn.PendingSend[LConn.SentBytes], LRemain, LSendFlags);
     if LN > 0 then
@@ -592,9 +584,6 @@ begin
           LOne := 1;
           _LinuxSetsockopt(LNewFd, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
           _LinuxSetsockopt(LNewFd, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
-          _LinuxSetsockopt(LNewFd, SOL_SOCKET, SO_ZEROCOPY, @LOne, SizeOf(LOne));
-          LOne := CBusyPollMicros;
-          _LinuxSetsockopt(LNewFd, SOL_SOCKET, SO_BUSY_POLL, @LOne, SizeOf(LOne));
 
           LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
           // #66: set threadvar BEFORE OnNewConn so RegisterConn uses this core's epoll

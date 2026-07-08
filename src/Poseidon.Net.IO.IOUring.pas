@@ -78,7 +78,9 @@ type
     // #75: registered files
     FRegFiles: Boolean;                   // True if IORING_REGISTER_FILES succeeded
     FRegFds: array of Int32;              // fd → index mapping table
-    FRegCount: Integer;                   // allocated slots
+    FRegCount: Integer;                   // allocated slots (high-water mark)
+    FRegFreeStack: array of Integer;      // #103: recycled slot indices
+    FRegFreeTop: Integer;                 // #103: free stack top
     FRegLock: TCriticalSection;
     function _RegFileIndex(AFd: Integer): Integer;
     function _RegisterFd(AFd: Integer): Integer;
@@ -177,11 +179,14 @@ const
 
   // Linux setsockopt level/option constants not in the RTL
   SO_REUSEPORT    = 15;
-  SO_BUSY_POLL    = 46;
-  CBusyPollMicros = 50;
-  SO_ZEROCOPY     = 60;
-
 type
+  // #103: io_uring_files_update struct for IORING_REGISTER_FILES_UPDATE
+  TIOUringFilesUpdate = packed record
+    offset: UInt32;
+    resv: UInt32;
+    fds: UInt64; // pointer to fd array
+  end;
+
   // io_uring_setup params: offsets within the SQ ring mmap
   TIOSQRingOffsets = packed record
     head:         UInt32;
@@ -399,6 +404,8 @@ begin
   FRegLock := TCriticalSection.Create;
   FRegFiles := False;
   FRegCount := 0;
+  SetLength(FRegFreeStack, CRegFilesMax);
+  FRegFreeTop := 0;
 end;
 
 destructor TIOUringBackend.Destroy;
@@ -438,9 +445,6 @@ procedure TIOUringBackend.StartListening(const AHost: string; APort: Integer;
       _LinuxSetsockopt(Result, IPPROTO_TCP, 23 {TCP_FASTOPEN}, @LOne, SizeOf(LOne));
     // #70: TCP_DEFER_ACCEPT — kernel waits for data before waking accept
     _LinuxSetsockopt(Result, IPPROTO_TCP, 9 {TCP_DEFER_ACCEPT}, @LOne, SizeOf(LOne));
-
-    LOne := CBusyPollMicros;
-    _LinuxSetsockopt(Result, SOL_SOCKET, SO_BUSY_POLL, @LOne, SizeOf(LOne));
 
     FillChar(LAddr, SizeOf(LAddr), 0);
     LAddr.sin_family := AF_INET;
@@ -820,8 +824,9 @@ end;
 
 function TIOUringBackend._RegisterFd(AFd: Integer): Integer;
 var
-  LUpdate: Int32;
+  LUpdate: TIOUringFilesUpdate;
   LSlot: Integer;
+  LFdVal: Int32;
 begin
   Result := -1;
   if not FRegFiles then Exit;
@@ -830,11 +835,26 @@ begin
     if AFd >= Length(FRegFds) then
       SetLength(FRegFds, AFd + 256); // grow mapping table
 
-    LSlot := FRegCount;
-    if LSlot >= CRegFilesMax then Exit; // table full
-    Inc(FRegCount);
+    // #103: recycle freed slots instead of monotonic FRegCount
+    LSlot := -1;
+    if FRegFreeTop > 0 then
+    begin
+      Dec(FRegFreeTop);
+      LSlot := FRegFreeStack[FRegFreeTop];
+    end
+    else if FRegCount < CRegFilesMax then
+    begin
+      LSlot := FRegCount;
+      Inc(FRegCount);
+    end;
+    if LSlot < 0 then Exit; // table full
 
-    LUpdate := AFd;
+    // #103: use proper io_uring_files_update struct
+    LFdVal := AFd;
+    FillChar(LUpdate, SizeOf(LUpdate), 0);
+    LUpdate.offset := UInt32(LSlot);
+    LUpdate.fds := UInt64(@LFdVal);
+
     if _io_uring_register(FRingFd, IORING_REGISTER_FILES_UPDATE,
       @LUpdate, 1) >= 0 then
     begin
@@ -842,7 +862,11 @@ begin
       Result := LSlot;
     end
     else
-      Dec(FRegCount); // registration failed
+    begin
+      // return slot to free stack
+      FRegFreeStack[FRegFreeTop] := LSlot;
+      Inc(FRegFreeTop);
+    end;
   finally
     FRegLock.Release;
   end;
@@ -851,7 +875,8 @@ end;
 procedure TIOUringBackend._UnregisterFd(AFd: Integer);
 var
   LSlot: Integer;
-  LUpdate: Int32;
+  LUpdate: TIOUringFilesUpdate;
+  LFdVal: Int32;
 begin
   if not FRegFiles then Exit;
   FRegLock.Acquire;
@@ -859,9 +884,16 @@ begin
     if (AFd < 0) or (AFd >= Length(FRegFds)) then Exit;
     LSlot := FRegFds[AFd];
     if LSlot < 0 then Exit;
-    LUpdate := -1; // unregister slot
+    // #103: use proper io_uring_files_update struct
+    LFdVal := -1;
+    FillChar(LUpdate, SizeOf(LUpdate), 0);
+    LUpdate.offset := UInt32(LSlot);
+    LUpdate.fds := UInt64(@LFdVal);
     _io_uring_register(FRingFd, IORING_REGISTER_FILES_UPDATE, @LUpdate, 1);
     FRegFds[AFd] := -1;
+    // #103: recycle slot
+    FRegFreeStack[FRegFreeTop] := LSlot;
+    Inc(FRegFreeTop);
   finally
     FRegLock.Release;
   end;
@@ -1013,9 +1045,6 @@ begin
       LOne := 1;
       _LinuxSetsockopt(ARes, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
       _LinuxSetsockopt(ARes, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
-      _LinuxSetsockopt(ARes, SOL_SOCKET, SO_ZEROCOPY, @LOne, SizeOf(LOne));
-      LOne := CBusyPollMicros;
-      _LinuxSetsockopt(ARes, SOL_SOCKET, SO_BUSY_POLL, @LOne, SizeOf(LOne));
       FillChar(LAddr, SizeOf(LAddr), 0);
       LAddrLen := SizeOf(LAddr);
       getpeername(ARes, sockaddr(LAddr), LAddrLen);
@@ -1029,7 +1058,12 @@ begin
     end;
     // #73: if IORING_CQE_F_MORE not set, kernel cancelled the multishot accept
     if (AFlags and IORING_CQE_F_MORE) = 0 then
+    begin
       FMultishotAccept := False;
+      // #103: re-arm multishot accept — without this, server stops accepting
+      if not FShutdown then
+        _SubmitAcceptMultishot;
+    end;
     Exit;
   end;
 
@@ -1142,9 +1176,6 @@ begin
     LOne := 1;
     _LinuxSetsockopt(LFd, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
     _LinuxSetsockopt(LFd, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
-    _LinuxSetsockopt(LFd, SOL_SOCKET, SO_ZEROCOPY, @LOne, SizeOf(LOne));
-    LOne := CBusyPollMicros;
-    _LinuxSetsockopt(LFd, SOL_SOCKET, SO_BUSY_POLL, @LOne, SizeOf(LOne));
 
     LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
     try

@@ -40,9 +40,9 @@ type
   TRIO_RQ = Pointer;
 
   TRIO_BUF = record
+    BufferId: TRIO_BUFFERID;
     Offset: ULONG;
     Length: ULONG;
-    BufferId: TRIO_BUFFERID;
   end;
   PRIO_BUF = ^TRIO_BUF;
 
@@ -129,6 +129,8 @@ const
   WSAID_MULTIPLE_RIO: TGUID = '{8509E081-96DD-4005-B165-9E2EE8C79E3F}';
   WSA_FLAG_REGISTERED_IO = $100;
 
+  CRIOInvalidBufId = TRIO_BUFFERID(NativeUInt(-1));
+
   CRecvBufSize  = 32768;
   CRecvPoolSize = 512;
   CRecvPoolBytes = CRecvPoolSize * CRecvBufSize;
@@ -145,7 +147,8 @@ type
   TFnCreateCQ = function(QueueSize: DWORD; NotificationCompletion: PRIO_NOTIFICATION_COMPLETION): TRIO_CQ; stdcall;
   TFnCloseCQ = procedure(CQ: TRIO_CQ); stdcall;
   TFnCreateRQ = function(Socket: TSocket; MaxOutstandingRecv, MaxRecvDataBuffers,
-    MaxOutstandingSend, MaxSendDataBuffers: DWORD; RecvCQ, SendCQ: TRIO_CQ): TRIO_RQ; stdcall;
+    MaxOutstandingSend, MaxSendDataBuffers: DWORD; RecvCQ, SendCQ: TRIO_CQ;
+    SocketContext: Pointer): TRIO_RQ; stdcall;
   TFnRegBuf = function(DataBuffer: PAnsiChar; DataLength: DWORD): TRIO_BUFFERID; stdcall;
   TFnDeregBuf = procedure(BufferId: TRIO_BUFFERID); stdcall;
   TFnRecv = function(SocketQueue: TRIO_RQ; pData: PRIO_BUF; DataBufferCount: ULONG;
@@ -194,7 +197,7 @@ begin
 
   FRecvPoolBufId := TFnRegBuf(FRio.RIORegisterBuffer)(PAnsiChar(FRecvPool),
     CRecvPoolBytes);
-  if FRecvPoolBufId = Pointer($FFFFFFFF) then
+  if FRecvPoolBufId = CRIOInvalidBufId then
     raise Exception.Create('RIORegisterBuffer for recv pool failed');
 
   SetLength(FRecvFreeStack, CRecvPoolSize);
@@ -206,7 +209,7 @@ end;
 
 destructor TRIOBackend.Destroy;
 begin
-  if (FRecvPoolBufId <> nil) and (FRecvPoolBufId <> Pointer($FFFFFFFF)) then
+  if (FRecvPoolBufId <> nil) and (FRecvPoolBufId <> CRIOInvalidBufId) then
     TFnDeregBuf(FRio.RIODeregisterBuffer)(FRecvPoolBufId);
   if FRecvPool <> nil then
     VirtualFree(FRecvPool, 0, MEM_RELEASE);
@@ -413,7 +416,7 @@ begin
   try
     LRQ := TFnCreateRQ(FRio.RIOCreateRequestQueue)(
       LConn.Socket, CRIORQRecv, 1, CRIORQSend, 1,
-      FCQs[LCQIdx], FCQs[LCQIdx]);
+      FCQs[LCQIdx], FCQs[LCQIdx], Pointer(LConn));
   finally
     FCQLocks[LCQIdx].Leave;
   end;
@@ -485,7 +488,7 @@ begin
   // Register the send buffer with RIO
   LSendCtx^.BufId := TFnRegBuf(FRio.RIORegisterBuffer)(
     PAnsiChar(@AData[0]), Length(AData));
-  if LSendCtx^.BufId = Pointer($FFFFFFFF) then
+  if LSendCtx^.BufId = CRIOInvalidBufId then
   begin
     Dispose(LSendCtx);
     TBufferPool.Release(AData);
@@ -603,13 +606,10 @@ begin
   LSpinCount := 0;
   while not FShutdown do
   begin
-    FCQLocks[ACQIdx].Enter;
-    try
-      LCount := TFnDequeue(FRio.RIODequeueCompletion)(
-        FCQs[ACQIdx], @LResults[0], 64);
-    finally
-      FCQLocks[ACQIdx].Leave;
-    end;
+    // #101: CQ is owned by exactly one worker — no lock needed for dequeue.
+    // Lock is only needed during RIOCreateRequestQueue (RegisterConn).
+    LCount := TFnDequeue(FRio.RIODequeueCompletion)(
+      FCQs[ACQIdx], @LResults[0], 64);
 
     if LCount = $FFFFFFFF then Break;
 
