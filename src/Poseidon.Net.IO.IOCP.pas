@@ -254,21 +254,28 @@ procedure TIOCPBackend._LoadExtensions;
 var
   LBytes: DWORD;
   LGuid: TGUID;
+  LRes: Integer;
 begin
   LBytes := 0;
   LGuid := WSAID_ACCEPTEX;
-  WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+  LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FAcceptEx, SizeOf(FAcceptEx), @LBytes, nil, nil);
+  if LRes <> 0 then
+    raise Exception.Create('WSAIoctl failed to load AcceptEx');
 
   LGuid := WSAID_GETACCEPTEXSOCKADDRS;
-  WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+  LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FGetAcceptExSockaddrs, SizeOf(FGetAcceptExSockaddrs),
     @LBytes, nil, nil);
+  if LRes <> 0 then
+    raise Exception.Create('WSAIoctl failed to load GetAcceptExSockaddrs');
 
   LGuid := StringToGUID('{7FDA2E11-8630-436F-A031-F536A6EEC157}');
-  WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+  LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FDisconnectEx, SizeOf(FDisconnectEx),
     @LBytes, nil, nil);
+  if LRes <> 0 then
+    FDisconnectEx := nil;  // DisconnectEx is optional; fallback to closesocket
 end;
 
 procedure TIOCPBackend._PostOneAccept(AIdx: Integer);

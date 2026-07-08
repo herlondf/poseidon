@@ -783,7 +783,8 @@ begin
     // here. Mark Remaining=1 so the CQ completion for the first send will
     // clean up SlotH, HeaderBuf and Dispose the context.
     LSendCtx^.Remaining := 1;
-    LSendCtx^.SlotIdx2 := -2;  // mark second slot as not submitted
+    LSendCtx^.ActualLen := -1;  // signal error to CQ completion handler
+    LSendCtx^.SlotIdx2 := -2;   // mark second slot as not submitted
     LConn.Release;  // drop ref for the second (failed) send only
     _SendPoolRelease(LSlotB);
     TBufferPool.Release(LSendCtx^.BodyBuf);

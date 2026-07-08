@@ -88,6 +88,7 @@ var
   I:        Integer;
   LConn:    TNativeConn;
   LNowTick: UInt64;
+  LDiff:    UInt64;
   LIdle:    Int64;
 begin
   while FActive^ do
@@ -104,7 +105,11 @@ begin
       try
         // Skip connections currently being handled by the elastic pool
         if TInterlocked.Add(LConn.InFlightPool, 0) > 0 then Continue;
-        LIdle := Integer(LNowTick - LConn.LastActivityTick);
+        LDiff := LNowTick - LConn.LastActivityTick;
+        if LDiff > UInt64(MaxInt) then
+          LIdle := MaxInt
+        else
+          LIdle := Integer(LDiff);
         if LIdle > FIdleTimeoutMs then
         begin
           if Assigned(FOnLog) then

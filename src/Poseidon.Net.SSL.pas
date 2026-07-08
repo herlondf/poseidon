@@ -102,6 +102,7 @@ type
     class var f_SSL_set_bio: TFn_ssl_setbio;
     class var f_BIO_s_mem: TFn_bio_smem;
     class var f_BIO_new: TFn_bio_new;
+    class var f_BIO_free: TFn_ssl_hands;  // int BIO_free(BIO*)
     class var f_BIO_write: TFn_bio_rw;
     class var f_BIO_read: TFn_bio_rw;
     class var f_BIO_ctrl: TFn_bio_ctrl;
@@ -277,6 +278,7 @@ begin
   @f_SSL_set_bio := RequireProc(FLibSSL, 'SSL_set_bio');
   @f_BIO_s_mem := RequireProc(FLibCrypto, 'BIO_s_mem');
   @f_BIO_new := RequireProc(FLibCrypto, 'BIO_new');
+  @f_BIO_free := RequireProc(FLibCrypto, 'BIO_free');
   @f_BIO_write := RequireProc(FLibCrypto, 'BIO_write');
   @f_BIO_read := RequireProc(FLibCrypto, 'BIO_read');
   @f_BIO_ctrl := RequireProc(FLibCrypto, 'BIO_ctrl');
@@ -333,10 +335,13 @@ var
 begin
   Result := '';
   if not FLoaded then Exit;
+  // Drain entire OpenSSL error queue — first error becomes the result,
+  // remaining errors are consumed to prevent queue pollution.
   LCode := f_ERR_get_error;
   if LCode = 0 then Exit;
   FillChar(LBuf, SizeOf(LBuf), 0);
   Result := string(f_ERR_error_string(LCode, @LBuf[0]));
+  while f_ERR_get_error <> 0 do ;
 end;
 
 class function TPoseidonSSL.CTX_New: Pointer;
@@ -387,7 +392,11 @@ begin
   AReadBIO  := f_BIO_new(LType);
   AWriteBIO := f_BIO_new(LType);
   if (AReadBIO = nil) or (AWriteBIO = nil) then
+  begin
+    if AReadBIO <> nil then f_BIO_free(AReadBIO);
+    if AWriteBIO <> nil then f_BIO_free(AWriteBIO);
     raise EPoseidonSSL.Create('BIO_new failed');
+  end;
   f_SSL_set_bio(ASSL, AReadBIO, AWriteBIO);
   f_SSL_set_accept_state(ASSL);
 end;

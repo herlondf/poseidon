@@ -232,6 +232,11 @@ const
 
 implementation
 
+const
+  // Maximum accumulated HEADERS+CONTINUATION block size (64 KB).
+  // Prevents DoS via unbounded CONTINUATION frames.
+  CMaxContinHeadersSize = 65536;
+
 // Client connection preface — RFC 7540 §3.5 (24 bytes, no null terminator)
 const
   H2_PREFACE_BYTES: array[0..23] of Byte = (
@@ -898,6 +903,11 @@ begin
   begin
     // Headers are split; buffer and wait for CONTINUATION
     FContinStreamID := AStreamID;
+    if FContinHeadersLen + APayLen > CMaxContinHeadersSize then
+    begin
+      _GoAway(FLastStreamID, H2_ERR_ENHANCE_YOUR_CALM);
+      Exit;
+    end;
     if FContinHeadersLen + APayLen > Length(FContinHeaders) then
       SetLength(FContinHeaders, FContinHeadersLen + APayLen + 4096);
     Move(APayload^, FContinHeaders[FContinHeadersLen], APayLen);
@@ -927,6 +937,7 @@ var
   LStream:  TH2Stream;
   LPadLen:  Integer;
   LDataLen: Integer;
+  LRst:     TBytes;
 begin
   if AStreamID = 0 then
   begin
@@ -955,7 +966,17 @@ begin
 
   LDataLen := APayLen;
 
-  if not FStreams.TryGetValue(AStreamID, LStream) then Exit;
+  if not FStreams.TryGetValue(AStreamID, LStream) then
+  begin
+    // RFC 7540 §5.1: DATA on unknown/closed stream → RST_STREAM
+    SetLength(LRst, 4);
+    LRst[0] := (H2_ERR_STREAM_CLOSED shr 24) and $FF;
+    LRst[1] := (H2_ERR_STREAM_CLOSED shr 16) and $FF;
+    LRst[2] := (H2_ERR_STREAM_CLOSED shr  8) and $FF;
+    LRst[3] :=  H2_ERR_STREAM_CLOSED         and $FF;
+    _SendFrame(H2_FRAME_RST_STREAM, 0, AStreamID, @LRst[0], 4);
+    Exit;
+  end;
 
   // Append body
   if LDataLen > 0 then

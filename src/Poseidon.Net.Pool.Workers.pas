@@ -195,14 +195,14 @@ begin
   LDeque := @FDeques[ADequeIdx];
   try
     // If shutdown happened between _SpawnWorker and here, exit immediately.
-    if TInterlocked.Read(FShutdown) <> 0 then Exit;
+    if TInterlocked.Add(FShutdown, 0) <> 0 then Exit;
     while True do
     begin
       TInterlocked.Increment(FIdleWorkers);
       LResult := FSemaphore.WaitFor(LongWord(FIdleTimeoutMs));
       TInterlocked.Decrement(FIdleWorkers);
 
-      if TInterlocked.Read(FShutdown) <> 0 then Break;
+      if TInterlocked.Add(FShutdown, 0) <> 0 then Break;
 
       if LResult = wrTimeout then
       begin
@@ -262,7 +262,7 @@ var
   LActive: Integer;
   LDequeIdx: Integer;
 begin
-  if TInterlocked.Read(FShutdown) <> 0 then Exit;
+  if TInterlocked.Add(FShutdown, 0) <> 0 then Exit;
 
   LWrapper := TWorkWrapper.Create;
   LWrapper.Work := AWork;
@@ -291,7 +291,7 @@ var
   LWrapper: TWorkWrapper;
   I: Integer;
 begin
-  if TInterlocked.Read(FShutdown) <> 0 then Exit;
+  if TInterlocked.Add(FShutdown, 0) <> 0 then Exit;
   TInterlocked.Exchange(FShutdown, 1);
 
   // Wake all blocked workers so they check FShutdown and exit cleanly.
