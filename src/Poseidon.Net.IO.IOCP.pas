@@ -63,6 +63,21 @@ function _IocpGet(Port: THandle; pBytes: PDWORD; pKey: PNativeUInt;
   pOvl: PPointer; Ms: DWORD): BOOL; stdcall;
   external 'kernel32.dll' name 'GetQueuedCompletionStatus';
 
+// #104: batch dequeue — up to N completions per syscall
+type
+  TOVERLAPPED_ENTRY = record
+    lpCompletionKey: NativeUInt;
+    lpOverlapped: Pointer;
+    Internal: NativeUInt;
+    dwNumberOfBytesTransferred: DWORD;
+  end;
+  POVERLAPPED_ENTRY = ^TOVERLAPPED_ENTRY;
+
+function _IocpGetEx(Port: THandle; lpEntries: POVERLAPPED_ENTRY;
+  ulCount: ULONG; ulNumEntriesRemoved: PULONG;
+  dwMs: DWORD; fAlertable: BOOL): BOOL; stdcall;
+  external 'kernel32.dll' name 'GetQueuedCompletionStatusEx';
+
 function _IocpPost(Port: THandle; Bytes: DWORD; Key: NativeUInt;
   pOvl: Pointer): BOOL; stdcall;
   external 'kernel32.dll' name 'PostQueuedCompletionStatus';
@@ -91,6 +106,7 @@ function _WsaListen(s: TSocket; backlog: Integer): Integer; stdcall;
 
 const
   CRecvBufSize = 32768;
+  CIocpBatchSize = 64;    // #104: max completions per GetQueuedCompletionStatusEx call
 
 type
   TIocpAction = (iaRecv, iaSend, iaSendV);
@@ -480,73 +496,84 @@ end;
 
 procedure TIOCPBackend._WorkerLoop;
 var
-  LBytes: DWORD;
-  LKey: NativeUInt;
+  LEntries: array[0..CIocpBatchSize - 1] of TOVERLAPPED_ENTRY;
+  LCount: ULONG;
+  I: Integer;
   LOvl: Pointer;
+  LBytes: DWORD;
   LHdr: PIocpHdr;
   LConn: TNativeConn;
-  LOK: BOOL;
 begin
   while True do
   begin
-    LOvl := nil;
-    LBytes := 0;
-    LKey := 0;
-    LOK := _IocpGet(FIocp, @LBytes, @LKey, @LOvl, INFINITE);
+    // #104: batch dequeue — up to CIocpBatchSize completions per syscall
+    if not _IocpGetEx(FIocp, @LEntries[0], CIocpBatchSize, @LCount,
+      INFINITE, False) then
+      Break;
 
-    if LOvl = nil then Break;
+    for I := 0 to Integer(LCount) - 1 do
+    begin
+      LOvl := LEntries[I].lpOverlapped;
+      LBytes := LEntries[I].dwNumberOfBytesTransferred;
 
-    try
-      LHdr := PIocpHdr(LOvl);
-      LConn := TNativeConn(LHdr^.Conn);
-
-      if (not LOK) or (LBytes = 0) then
+      if LOvl = nil then
       begin
+        // Shutdown signal
+        Exit;
+      end;
+
+      try
+        LHdr := PIocpHdr(LOvl);
+        LConn := TNativeConn(LHdr^.Conn);
+
+        if LBytes = 0 then
+        begin
+          case LHdr^.Action of
+            iaRecv: FreeMem(PRecvCtx(LOvl));
+            iaSend:
+            begin
+              TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
+              Dispose(PSendCtx(LOvl));
+            end;
+            iaSendV:
+            begin
+              TBufferPool.Release(PSendVCtx(LOvl)^.HeaderBuf);
+              TBufferPool.Release(PSendVCtx(LOvl)^.BodyBuf);
+              Dispose(PSendVCtx(LOvl));
+            end;
+          end;
+          FCallbacks.OnConnError(LConn);
+          LConn.Release;
+          Continue;
+        end;
+
         case LHdr^.Action of
-          iaRecv: FreeMem(PRecvCtx(LOvl));
+          iaRecv:
+          begin
+            FCallbacks.OnRecv(LConn, @PRecvCtx(LOvl)^.Data[0], LBytes);
+            FreeMem(PRecvCtx(LOvl));
+            LConn.Release;
+          end;
           iaSend:
           begin
             TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
             Dispose(PSendCtx(LOvl));
+            FCallbacks.OnSendComplete(LConn);
+            LConn.Release;
           end;
           iaSendV:
           begin
             TBufferPool.Release(PSendVCtx(LOvl)^.HeaderBuf);
             TBufferPool.Release(PSendVCtx(LOvl)^.BodyBuf);
             Dispose(PSendVCtx(LOvl));
+            FCallbacks.OnSendComplete(LConn);
+            LConn.Release;
           end;
         end;
-        FCallbacks.OnConnError(LConn);
-        LConn.Release;
-        Continue;
+      except
+        on E: Exception do
+          Writeln(ErrOutput, '[iocp] WORKER_EX [', E.ClassName, ']: ', E.Message);
       end;
-
-      case LHdr^.Action of
-        iaRecv:
-        begin
-          FCallbacks.OnRecv(LConn, @PRecvCtx(LOvl)^.Data[0], LBytes);
-          FreeMem(PRecvCtx(LOvl));
-          LConn.Release;
-        end;
-        iaSend:
-        begin
-          TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
-          Dispose(PSendCtx(LOvl));
-          FCallbacks.OnSendComplete(LConn);
-          LConn.Release;
-        end;
-        iaSendV:
-        begin
-          TBufferPool.Release(PSendVCtx(LOvl)^.HeaderBuf);
-          TBufferPool.Release(PSendVCtx(LOvl)^.BodyBuf);
-          Dispose(PSendVCtx(LOvl));
-          FCallbacks.OnSendComplete(LConn);
-          LConn.Release;
-        end;
-      end;
-    except
-      on E: Exception do
-        Writeln(ErrOutput, '[iocp] WORKER_EX [', E.ClassName, ']: ', E.Message);
     end;
   end;
 end;

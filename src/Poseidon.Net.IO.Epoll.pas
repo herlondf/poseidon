@@ -262,16 +262,11 @@ begin
 end;
 
 procedure TEpollBackend.StopAccept;
-var
-  I: Integer;
 begin
+  // #108: just set shutdown flag — listen sockets are closed in JoinWorkers
+  // after workers have exited, avoiding race where a worker calls accept4 on
+  // a closed fd.
   FShutdown := True;
-  for I := 0 to High(FListenSockets) do
-  begin
-    if FListenSockets[I] >= 0 then
-      _LinuxClose(FListenSockets[I]);
-    FListenSockets[I] := -1;
-  end;
 end;
 
 procedure TEpollBackend.ShutdownConn(AConn: Pointer);
@@ -309,6 +304,14 @@ begin
   end;
   SetLength(FEpollFds, 0);
   SetLength(FShutdownPipes, 0);
+  // #108: close listen sockets AFTER workers have exited
+  for I := 0 to High(FListenSockets) do
+  begin
+    if FListenSockets[I] >= 0 then
+      _LinuxClose(FListenSockets[I]);
+    FListenSockets[I] := -1;
+  end;
+  SetLength(FListenSockets, 0);
 end;
 
 // #66: RegisterConn sets OwnerEpollFd from the calling thread's GCurrentEpollFd
