@@ -204,6 +204,10 @@ type
     // (~50-100us per request) but BLOCKS the IO thread during handler execution.
     // Only enable when handlers are non-blocking (no DB, no file I/O, no Sleep).
     // Default False (async worker pool).
+    // NOTE: the SyncDispatch pipeline is the lightweight parser path, which does
+    // NOT perform WebSocket / HTTP-2 (h2c) upgrade detection. Enable SyncDispatch
+    // only for plain HTTP/1.1 request-response workloads; leave it False when the
+    // server must accept WebSocket or h2c upgrades (issue #165).
     property SyncDispatch: Boolean read FSyncDispatch write SetSyncDispatch;
     // Proxy Protocol: ppDisabled (default) disables PP processing.
     // ppV1/ppV2: enforce a specific version. ppAuto: detect by signature.

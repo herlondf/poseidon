@@ -16,11 +16,16 @@ uses
 
 // Returns True when AMethod is in AAllowed (case-insensitive).
 // When AAllowed is empty every method is accepted (backward-compatible default).
+// Opt-in helper for method-gating: call from a guard middleware with the
+// application's configured verb allowlist (issue #163). Not enforced globally
+// because the core server intentionally accepts any registered method.
 function IsMethodAllowed(const AMethod: string;
   const AAllowed: TArray<string>): Boolean;
 
 // Returns True when APath contains no directory-traversal sequences.
 // Rejects: "..", "%2e%2e", backslash, NUL bytes.
+// Wired into the static-file middleware (the filesystem-facing surface) as the
+// first-line traversal guard (issue #163).
 function IsPathSafe(const APath: string): Boolean;
 
 // Returns AValue with all CR (#13), LF (#10) and NUL (#0) removed.
