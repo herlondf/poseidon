@@ -28,6 +28,10 @@ const
 
   WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
+  // Maximum accepted WebSocket payload (128 MB). Frames exceeding this are
+  // rejected to prevent OOM from malicious 64-bit length values.
+  CMaxWSPayloadSize = 128 * 1024 * 1024;
+
 type
   TWebSocketFrame = record
     FinFlag: Boolean;
@@ -453,6 +457,10 @@ begin
 
   // RFC 6455 §5.2 — MSB of 64-bit payload length must be 0
   if LPLen < 0 then Exit;
+
+  // Reject oversized payloads to prevent OOM from near-MaxInt64 values
+  // that would overflow the LPos + LPLen bounds check below.
+  if LPLen > CMaxWSPayloadSize then Exit;
 
   if LMasked then
   begin
