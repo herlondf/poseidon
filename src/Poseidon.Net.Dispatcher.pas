@@ -291,6 +291,11 @@ begin
     TEncoding.ASCII.GetBytes('Payload Too Large'), False, [],
     ACtx.Config^.SecureHeadersEnabled, ACtx.Config^.ServerBanner);
   FCallbacks.SendResponse(ACtx.Conn, LResp, 0);
+  // #174: the 413 response advertises Connection: close — force the socket to
+  // actually close and drop the offending bytes so OnSendComplete does not
+  // re-dispatch the same oversized buffer in a keep-alive loop.
+  LConn.KeepAlive := False;
+  LConn.AccumLen  := 0;
   ACtx.Handled := True;
 end;
 
@@ -360,6 +365,10 @@ begin
         TEncoding.ASCII.GetBytes('Bad Request'), False, [],
         ACtx.Config^.SecureHeadersEnabled, ACtx.Config^.ServerBanner);
       FCallbacks.SendResponse(ACtx.Conn, LResp, 0);
+      // #174: 400 advertises Connection: close — force-close and drop the
+      // malformed bytes so OnSendComplete does not re-parse them in a loop.
+      LConn.KeepAlive := False;
+      LConn.AccumLen  := 0;
     end
     else
       FCallbacks.PostRecv(ACtx.Conn);
@@ -400,6 +409,9 @@ begin
       LResp := BuildHTTPResponse(400, 'text/plain',
         TEncoding.ASCII.GetBytes('Bad Request'), False, [], False, '');
       FCallbacks.SendResponse(ACtx.Conn, LResp, 0);
+      // #174: force-close and drop malformed bytes to avoid the keep-alive loop.
+      LConn.KeepAlive := False;
+      LConn.AccumLen  := 0;
     end
     else
       FCallbacks.PostRecv(ACtx.Conn);
