@@ -18,6 +18,7 @@ uses
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
+  System.Diagnostics,
   System.Generics.Collections,
   Poseidon.Net.HTTP2.HPACK,
   Poseidon.Net.Types;
@@ -62,6 +63,11 @@ type
     RecvWindow:      Integer;   // server's stream-level receive window (how much we accept)
     PendingBody:     TBytes;    // response DATA buffered when send window was exhausted
     PendingBodyOfs:  Integer;   // bytes of PendingBody already sent
+    // Timestamp (TStopwatch.GetTimeStamp) of when the stream started waiting
+    // for flow-control credit while carrying PendingBody. 0 = not waiting.
+    // Used to break the deadlock when peer advertises INITIAL_WINDOW_SIZE = 0
+    // and never sends WINDOW_UPDATE.
+    PendingSinceTicks: Int64;
     destructor Destroy; override;
   end;
 
@@ -97,10 +103,24 @@ type
     FPeerMaxFrameSize: Integer;
     FPeerInitWinSize: Integer;
 
+    // Server's own MAX_FRAME_SIZE — the value the server ANNOUNCED to the peer
+    // in SETTINGS (what the peer is allowed to send us). Must be validated
+    // against incoming frame sizes at the frame header, BEFORE allocating
+    // payload buffers. Distinct from FPeerMaxFrameSize (max size WE may send).
+    FMaxFrameSize: Integer;
+
     // Active stream tracking for graceful GOAWAY drain
     FActiveStreams: Integer;
     FPadStreams: array[0..14] of Integer; // cache-line padding
     FDeferClose: Boolean;
+
+    // MAX_CONCURRENT_STREAMS enforcement: count of client-initiated streams
+    // currently held in FStreams. Int64 because TInterlocked.Read requires it.
+    FClientStreamCount: Int64;
+
+    // Rapid-reset defense (CVE-2023-44487): rolling window RST_STREAM counter.
+    FRstCount:       Int64;
+    FRstWindowStart: Int64;   // TThread.GetTickCount64 at window start
 
     // Server push (RFC 7540 §8.2)
     FNextPushStreamID: Cardinal;  // server-initiated streams are even (2, 4, 6, …)
@@ -153,6 +173,17 @@ type
     procedure _SendWindowUpdate(AStreamID: Cardinal; AIncrement: Integer);
     procedure _DrainPendingStream(AStream: TH2Stream);
     procedure _CloseStreamAfterSend(AStream: TH2Stream);
+    // Send RST_STREAM(CANCEL) and drop the stream. Used when a buffered
+    // response deadlocks against a peer that advertised INITIAL_WINDOW_SIZE=0
+    // and never opens the window (see PendingSinceTicks / CFlowControlWaitTimeoutMs).
+    procedure _CancelStalledStream(AStream: TH2Stream);
+    // Returns True when AStream has PendingBody and has been waiting for
+    // window credit longer than CFlowControlWaitTimeoutMs.
+    function  _PendingWaitExpired(AStream: TH2Stream): Boolean;
+
+    // Rapid-reset defense + REFUSED_STREAM helper
+    procedure _SendRstRefusedStream(AStreamID: Cardinal);
+    function  _RegisterRstAndCheckRapidReset: Boolean;
 
   public
     constructor Create(AConn: Pointer;
@@ -237,6 +268,29 @@ const
   // Prevents DoS via unbounded CONTINUATION frames.
   CMaxContinHeadersSize = 65536;
 
+  // Per-stream request body cap. Applied BEFORE replenishing flow-control
+  // WINDOW_UPDATE so a single stream cannot force us to buffer unbounded body.
+  CMaxRequestBodySize = 8 * 1024 * 1024;   // 8 MB
+
+  // Rapid-reset defense (CVE-2023-44487): count RST_STREAM per rolling window.
+  // Exceeding CRapidResetMax RST_STREAMs inside CRapidResetWindowMs → GOAWAY.
+  CRapidResetWindowMs = 60 * 1000;         // 60 s
+  CRapidResetMax      = 100;
+
+  // Server's advertised SETTINGS_MAX_FRAME_SIZE (also the minimum allowed by
+  // RFC 7540 §6.5.2). Peers exceeding this on any incoming frame get
+  // FRAME_SIZE_ERROR + GOAWAY. Validated at the frame header, before payload
+  // allocation, so an attacker cannot force a large SetLength via oversized
+  // length triplet.
+  CServerMaxFrameSize = 16384;
+
+  // Deadlock timeout for streams whose send has been buffered awaiting a
+  // stream/connection WINDOW_UPDATE (see PendingSinceTicks in TH2Stream).
+  // Applied when SETTINGS_INITIAL_WINDOW_SIZE = 0 was advertised by the peer
+  // and the peer never actually opens the window. 30 seconds matches typical
+  // idle timeouts.
+  CFlowControlWaitTimeoutMs = 30 * 1000;
+
 // Client connection preface — RFC 7540 §3.5 (24 bytes, no null terminator)
 const
   H2_PREFACE_BYTES: array[0..23] of Byte = (
@@ -287,10 +341,16 @@ begin
 
   FPeerMaxFrameSize := 16384;
   FPeerInitWinSize  := 65535;
+  FMaxFrameSize     := CServerMaxFrameSize;
 
   // R-2
   FActiveStreams := 0;
   FDeferClose    := False;
+
+  // Concurrent-streams limit + rapid-reset defense (CVE-2023-44487)
+  FClientStreamCount := 0;
+  FRstCount          := 0;
+  FRstWindowStart    := TStopwatch.GetTimeStamp;
 
   // Server push (RFC 7540 §8.2)
   FNextPushStreamID := 2;      // first server-initiated stream is even
@@ -385,6 +445,40 @@ end;
 // Flow control helpers
 // ===========================================================================
 
+procedure TH2Conn._SendRstRefusedStream(AStreamID: Cardinal);
+var
+  LRst:     TBytes;
+  LErrCode: Cardinal;
+begin
+  LErrCode := H2_ERR_REFUSED_STREAM;
+  SetLength(LRst, 4);
+  LRst[0] := (LErrCode shr 24) and $FF;
+  LRst[1] := (LErrCode shr 16) and $FF;
+  LRst[2] := (LErrCode shr  8) and $FF;
+  LRst[3] :=  LErrCode         and $FF;
+  _SendFrame(H2_FRAME_RST_STREAM, 0, AStreamID, @LRst[0], 4);
+end;
+
+function TH2Conn._RegisterRstAndCheckRapidReset: Boolean;
+// Rolling-window RST_STREAM counter (CVE-2023-44487 defense). Returns True when
+// the peer exceeded CRapidResetMax RST_STREAMs inside CRapidResetWindowMs.
+var
+  LNow:     Int64;
+  LElapsed: Int64;
+  LFreq:    Int64;
+begin
+  LNow  := TStopwatch.GetTimeStamp;
+  LFreq := TStopwatch.Frequency;
+  if LFreq <= 0 then LFreq := 1;
+  LElapsed := ((LNow - FRstWindowStart) * 1000) div LFreq;
+  if LElapsed > CRapidResetWindowMs then
+  begin
+    FRstWindowStart := LNow;
+    TInterlocked.Exchange(FRstCount, 0);
+  end;
+  Result := TInterlocked.Increment(FRstCount) > CRapidResetMax;
+end;
+
 procedure TH2Conn._SendWindowUpdate(AStreamID: Cardinal; AIncrement: Integer);
 var
   LPayload: TBytes;
@@ -401,14 +495,55 @@ begin
 end;
 
 procedure TH2Conn._CloseStreamAfterSend(AStream: TH2Stream);
+var
+  LSID: Cardinal;
 begin
   // Called when all pending DATA has been flushed.
   // Mirrors the cleanup in _DispatchStream's finally block.
-  FStreams.Remove(AStream.StreamID);
+  LSID := AStream.StreamID;
+  FStreams.Remove(LSID);
   AStream.Free;
+  if (LSID and 1) = 1 then
+    TInterlocked.Decrement(FClientStreamCount);
   if TInterlocked.Decrement(FActiveStreams) = 0 then
     if FDeferClose and Assigned(FCloseProc) then
       FCloseProc(FConn);
+end;
+
+function TH2Conn._PendingWaitExpired(AStream: TH2Stream): Boolean;
+var
+  LNow:     Int64;
+  LFreq:    Int64;
+  LElapsed: Int64;
+begin
+  Result := False;
+  if AStream.PendingSinceTicks = 0 then Exit;
+  if Length(AStream.PendingBody) = 0 then Exit;
+  LNow  := TStopwatch.GetTimeStamp;
+  LFreq := TStopwatch.Frequency;
+  if LFreq <= 0 then LFreq := 1;
+  LElapsed := ((LNow - AStream.PendingSinceTicks) * 1000) div LFreq;
+  Result := LElapsed > CFlowControlWaitTimeoutMs;
+end;
+
+procedure TH2Conn._CancelStalledStream(AStream: TH2Stream);
+var
+  LRst:     TBytes;
+  LErrCode: Cardinal;
+begin
+  // Peer never opened the window in time; abandon buffered response and drop
+  // the stream so we do not leak memory or a server-side handler slot.
+  LErrCode := H2_ERR_CANCEL;
+  SetLength(LRst, 4);
+  LRst[0] := (LErrCode shr 24) and $FF;
+  LRst[1] := (LErrCode shr 16) and $FF;
+  LRst[2] := (LErrCode shr  8) and $FF;
+  LRst[3] :=  LErrCode         and $FF;
+  _SendFrame(H2_FRAME_RST_STREAM, 0, AStream.StreamID, @LRst[0], 4);
+  AStream.PendingBody    := nil;
+  AStream.PendingBodyOfs := 0;
+  AStream.PendingSinceTicks := 0;
+  _CloseStreamAfterSend(AStream);
 end;
 
 procedure TH2Conn._DrainPendingStream(AStream: TH2Stream);
@@ -423,6 +558,14 @@ begin
   if (AStream.PendingBody = nil) or
      (AStream.PendingBodyOfs >= Length(AStream.PendingBody)) then
     Exit;
+
+  // Flow-control deadlock breaker (peer advertised INITIAL_WINDOW_SIZE = 0
+  // and did not open the window before CFlowControlWaitTimeoutMs).
+  if _PendingWaitExpired(AStream) then
+  begin
+    _CancelStalledStream(AStream);
+    Exit;
+  end;
 
   while AStream.PendingBodyOfs < Length(AStream.PendingBody) do
   begin
@@ -454,6 +597,7 @@ begin
   begin
     AStream.PendingBody    := nil;
     AStream.PendingBodyOfs := 0;
+    AStream.PendingSinceTicks := 0;
     _CloseStreamAfterSend(AStream);
   end;
 end;
@@ -486,7 +630,7 @@ begin
   PutSetting(H2_SETTINGS_ENABLE_PUSH,            1);
   PutSetting(H2_SETTINGS_MAX_CONCURRENT_STREAMS, FMaxConcurrentStreams);
   PutSetting(H2_SETTINGS_INITIAL_WINDOW_SIZE,    FInitialWindowSize);
-  PutSetting(H2_SETTINGS_MAX_FRAME_SIZE,         16384);
+  PutSetting(H2_SETTINGS_MAX_FRAME_SIZE,         Cardinal(FMaxFrameSize));
   _SendFrame(H2_FRAME_SETTINGS, 0, 0, @LPayload[0], 30);
   FSettingsSent := True;
 end;
@@ -539,6 +683,16 @@ begin
     LPayLen := (Integer(LFBuf[0]) shl 16) or
                (Integer(LFBuf[1]) shl  8) or
                 Integer(LFBuf[2]);
+
+    // RFC 7540 §4.2 — validate against OUR advertised SETTINGS_MAX_FRAME_SIZE
+    // BEFORE waiting for the full payload. Rejecting here prevents an attacker
+    // from forcing us to buffer an unbounded payload just to reject it later.
+    if LPayLen > FMaxFrameSize then
+    begin
+      _GoAway(FLastStreamID, H2_ERR_FRAME_SIZE_ERROR);
+      Exit;
+    end;
+
     if FFrameLen < 9 + LPayLen then Break; // incomplete frame
 
     LType  := LFBuf[3];
@@ -578,8 +732,11 @@ end;
 procedure TH2Conn._ProcessFrame(AType, AFlags: Byte; AStreamID: Cardinal;
   APayload: PByte; APayLen: Integer);
 begin
-  // RFC 7540 §4.2 — reject frames whose payload exceeds SETTINGS_MAX_FRAME_SIZE
-  if APayLen > FPeerMaxFrameSize then
+  // RFC 7540 §4.2 — reject frames whose payload exceeds OUR advertised
+  // SETTINGS_MAX_FRAME_SIZE. Also validated at the frame header in ProcessData
+  // (earlier, cheaper); repeated here as defence-in-depth for callers that
+  // bypass ProcessData (e.g. future direct dispatch paths).
+  if APayLen > FMaxFrameSize then
   begin
     _GoAway(AStreamID, H2_ERR_FRAME_SIZE_ERROR);
     Exit;
@@ -722,7 +879,15 @@ begin
   begin
     FStreams.Remove(AStreamID);
     LStream.Free;
+    // Client-initiated streams have odd IDs (RFC 7540 §5.1.1). Only decrement
+    // the client stream counter for those.
+    if (AStreamID and 1) = 1 then
+      TInterlocked.Decrement(FClientStreamCount);
   end;
+  // Rapid-reset defense (CVE-2023-44487): too many RST_STREAM in the window →
+  // GOAWAY with ENHANCE_YOUR_CALM and close the connection.
+  if _RegisterRstAndCheckRapidReset then
+    _GoAway(FLastStreamID, H2_ERR_ENHANCE_YOUR_CALM);
 end;
 
 // ===========================================================================
@@ -824,13 +989,28 @@ begin
     Exit;
   end;
 
+  // RFC 7540 §5.1.1 — client-initiated streams MUST use odd IDs. Even IDs are
+  // reserved for server push. Accepting an even ID from the peer would clash
+  // with FNextPushStreamID and cause double registration in FStreams.
+  // Only enforce on the HEADERS frame itself (not on CONTINUATION which
+  // reuses the same stream ID already validated on the opening HEADERS).
+  if (not AContinuation) and ((AStreamID and 1) = 0) then
+  begin
+    _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR);
+    Exit;
+  end;
+
   if AStreamID > FLastStreamID then
     FLastStreamID := AStreamID;
 
   LHasPad  := (not AContinuation) and ((AFlags and H2_FLAG_PADDED)   <> 0);
   LHasPri  := (not AContinuation) and ((AFlags and H2_FLAG_PRIORITY) <> 0);
   LEndHdrs := (AFlags and H2_FLAG_END_HEADERS) <> 0;
-  LEndStrm := (AFlags and H2_FLAG_END_STREAM)  <> 0;
+  // END_STREAM only applies to the opening HEADERS frame — CONTINUATION frames
+  // do not define this flag (RFC 7540 §6.10). Persist the flag captured on the
+  // HEADERS across any number of following CONTINUATION frames so the request
+  // dispatch fires when the header block finally ends.
+  LEndStrm := (not AContinuation) and ((AFlags and H2_FLAG_END_STREAM) <> 0);
 
   LPadLen := 0;
   if LHasPad then
@@ -868,6 +1048,14 @@ begin
   // Get or create stream
   if not FStreams.TryGetValue(AStreamID, LStream) then
   begin
+    // MAX_CONCURRENT_STREAMS enforcement (RFC 7540 §5.1.2). Reject the new
+    // stream with REFUSED_STREAM — connection stays alive, other streams keep
+    // working. Prevents OOM from unlimited concurrent stream open.
+    if TInterlocked.Read(FClientStreamCount) >= Int64(FMaxConcurrentStreams) then
+    begin
+      _SendRstRefusedStream(AStreamID);
+      Exit;
+    end;
     LStream := TH2Stream.Create;
     LStream.StreamID   := AStreamID;
     LStream.State      := hssOpen;
@@ -875,6 +1063,7 @@ begin
     LStream.SendWindow := FPeerInitWinSize;           // what the peer allows us to send
     LStream.RecvWindow := Integer(FInitialWindowSize); // what we allow the peer to send
     FStreams.Add(AStreamID, LStream);
+    TInterlocked.Increment(FClientStreamCount);
   end;
 
   if LEndHdrs then
@@ -895,8 +1084,13 @@ begin
       _DecodeRequestHeaders(LStream, APayload, APayLen);
 
     LStream.HeadersComplete := True;
-    LStream.EndStream := LEndStrm;
-    if LEndStrm then
+    // Preserve END_STREAM captured on the opening HEADERS: only OR in the
+    // new flag (never clear). CONTINUATION cannot carry END_STREAM so its
+    // LEndStrm is always False; without this OR a HEADERS(END_STREAM=1) +
+    // CONTINUATION(END_HEADERS=1) sequence would lose the end-of-stream bit
+    // and the request would hang.
+    LStream.EndStream := LStream.EndStream or LEndStrm;
+    if LStream.EndStream then
       _DispatchStream(LStream);
   end
   else
@@ -912,7 +1106,8 @@ begin
       SetLength(FContinHeaders, FContinHeadersLen + APayLen + 4096);
     Move(APayload^, FContinHeaders[FContinHeadersLen], APayLen);
     Inc(FContinHeadersLen, APayLen);
-    LStream.EndStream := LEndStrm;
+    // Same rule as above — never clear a previously captured END_STREAM.
+    LStream.EndStream := LStream.EndStream or LEndStrm;
   end;
 end;
 
@@ -978,6 +1173,25 @@ begin
     Exit;
   end;
 
+  // Per-stream body cap: reject BEFORE buffering / replenishing WINDOW_UPDATE.
+  // Without this the flow-control auto-refill lets a single client OOM us.
+  if LDataLen > 0 then
+    if (LStream.BodyLen > CMaxRequestBodySize) or
+       (LDataLen > CMaxRequestBodySize - LStream.BodyLen) then
+    begin
+      SetLength(LRst, 4);
+      LRst[0] := (H2_ERR_FLOW_CONTROL_ERROR shr 24) and $FF;
+      LRst[1] := (H2_ERR_FLOW_CONTROL_ERROR shr 16) and $FF;
+      LRst[2] := (H2_ERR_FLOW_CONTROL_ERROR shr  8) and $FF;
+      LRst[3] :=  H2_ERR_FLOW_CONTROL_ERROR         and $FF;
+      _SendFrame(H2_FRAME_RST_STREAM, 0, AStreamID, @LRst[0], 4);
+      FStreams.Remove(AStreamID);
+      LStream.Free;
+      if (AStreamID and 1) = 1 then
+        TInterlocked.Decrement(FClientStreamCount);
+      Exit;
+    end;
+
   // Append body
   if LDataLen > 0 then
   begin
@@ -1022,12 +1236,72 @@ var
   LScheme:    string;
   LAuthority: string;
   LHeaders:   TArray<TPair<string, string>>;
+  LTooBig:    Boolean;
+  LProtoErr:  Boolean;
+  LRst:       TBytes;
+  LErrCode:   Cardinal;
+
+  procedure _SendStreamProtocolError;
+  begin
+    LErrCode := H2_ERR_PROTOCOL_ERROR;
+    SetLength(LRst, 4);
+    LRst[0] := (LErrCode shr 24) and $FF; LRst[1] := (LErrCode shr 16) and $FF;
+    LRst[2] := (LErrCode shr  8) and $FF; LRst[3] :=  LErrCode         and $FF;
+    _SendFrame(H2_FRAME_RST_STREAM, 0, AStream.StreamID, @LRst[0], 4);
+  end;
+
 begin
   if not FHpack.DecodeHeaders(APayload, APayLen,
-    LMethod, LPath, LScheme, LAuthority, LHeaders,
+    LMethod, LPath, LScheme, LAuthority, LHeaders, LTooBig, LProtoErr,
     procedure begin _GoAway(FLastStreamID, H2_ERR_COMPRESSION_ERROR) end)
   then
+  begin
+    // HPACK-bomb defense: header list too large — REFUSED_STREAM (RFC 7540 §5.1.2),
+    // connection stays alive so well-behaved clients can retry other streams.
+    if LTooBig then
+    begin
+      LErrCode := H2_ERR_REFUSED_STREAM;
+      SetLength(LRst, 4);
+      LRst[0] := (LErrCode shr 24) and $FF; LRst[1] := (LErrCode shr 16) and $FF;
+      LRst[2] := (LErrCode shr  8) and $FF; LRst[3] :=  LErrCode         and $FF;
+      _SendFrame(H2_FRAME_RST_STREAM, 0, AStream.StreamID, @LRst[0], 4);
+    end
+    // §8.1.2 malformed header block (out-of-order/duplicate pseudo, upper-case
+    // name, hop-by-hop). §8.1.2.6 says these MAY be stream-scoped errors;
+    // RST_STREAM PROTOCOL_ERROR keeps the connection alive for well-behaved
+    // concurrent streams.
+    else if LProtoErr then
+      _SendStreamProtocolError;
     Exit;
+  end;
+
+  // Request-level completeness checks (RFC 7540 §8.1.2.3):
+  //   - :method MUST always be present.
+  //   - For CONNECT, :scheme/:path MUST be omitted and :authority MUST be set.
+  //   - For non-CONNECT, :scheme/:path/:authority MUST be present; :path
+  //     must not be empty (OPTIONS asterisk-form uses "*", which is non-empty).
+  // Anything else → PROTOCOL_ERROR (stream-scoped RST_STREAM per §8.1.2.6).
+  if LMethod = '' then
+  begin
+    _SendStreamProtocolError;
+    Exit;
+  end;
+  if LMethod = 'CONNECT' then
+  begin
+    if (LScheme <> '') or (LPath <> '') or (LAuthority = '') then
+    begin
+      _SendStreamProtocolError;
+      Exit;
+    end;
+  end
+  else
+  begin
+    if (LScheme = '') or (LPath = '') or (LAuthority = '') then
+    begin
+      _SendStreamProtocolError;
+      Exit;
+    end;
+  end;
 
   AStream.Method    := LMethod;
   AStream.Path      := LPath;
@@ -1050,6 +1324,7 @@ var
   LPushResources: TArray<TPoseidonPushResource>;
   I: Integer;
   LQ: Integer;
+  LIsClientStream: Boolean;
 begin
   LReq.StreamID  := AStream.StreamID;
   LReq.Method    := AStream.Method;
@@ -1122,8 +1397,11 @@ begin
     // _DrainPendingStream finishes. Cleanup then deferred to _CloseStreamAfterSend.
     if Length(AStream.PendingBody) = 0 then
     begin
+      LIsClientStream := (AStream.StreamID and 1) = 1;
       FStreams.Remove(AStream.StreamID);
       AStream.Free;
+      if LIsClientStream then
+        TInterlocked.Decrement(FClientStreamCount);
       // Signal deferred close when last stream completes
       if TInterlocked.Decrement(FActiveStreams) = 0 then
         if FDeferClose and Assigned(FCloseProc) then
@@ -1208,6 +1486,10 @@ begin
     SetLength(LStream.PendingBody, LRemaining);
     Move(ABody[LDataOfs], LStream.PendingBody[0], LRemaining);
     LStream.PendingBodyOfs := 0;
+    // Timestamp when the stream began waiting for window credit — used by
+    // _PendingWaitExpired to break the deadlock when the peer advertised
+    // SETTINGS_INITIAL_WINDOW_SIZE = 0 and never sends WINDOW_UPDATE.
+    LStream.PendingSinceTicks := TStopwatch.GetTimeStamp;
   end;
 end;
 
@@ -1310,6 +1592,8 @@ begin
   LStream.RecvWindow := Integer(FInitialWindowSize);
   FStreams.Add(1, LStream);
   FLastStreamID := 1;
+  // Client-initiated stream (odd ID) counts toward MAX_CONCURRENT_STREAMS.
+  TInterlocked.Increment(FClientStreamCount);
 
   // Build the request data
   LReq.Method      := AMethod;
@@ -1354,6 +1638,7 @@ begin
     begin
       FStreams.Remove(1);
       LStream.Free;
+      TInterlocked.Decrement(FClientStreamCount);
       if TInterlocked.Decrement(FActiveStreams) = 0 then
         if FDeferClose and Assigned(FCloseProc) then
           FCloseProc(FConn);

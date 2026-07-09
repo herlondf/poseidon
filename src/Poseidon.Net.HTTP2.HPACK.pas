@@ -30,6 +30,11 @@ type
     FDynTable: TArray<TH2DynEntry>;
     FDynTableSize: Integer;
     FDynTableMaxSize: Integer;
+    // Decoder-error latch. Set True by _HpackHuffmanDecode / _HpackDecodeStr
+    // when a malformed sequence is detected (invalid Huffman padding, EOS
+    // symbol reached, etc.). DecodeHeaders checks it after every string decode
+    // and turns it into a COMPRESSION_ERROR GOAWAY.
+    FDecodeError: Boolean;
 
     // -----------------------------------------------------------------------
     // HPACK integer codec
@@ -42,7 +47,8 @@ type
     // -----------------------------------------------------------------------
     // HPACK string codec
     // -----------------------------------------------------------------------
-    procedure _HpackHuffmanDecode(ABuf: PByte; ALen: Integer; out AResult: string);
+    function  _HpackHuffmanDecode(ABuf: PByte; ALen: Integer;
+      out AResult: string): Boolean;
     function  _HpackDecodeStr(ABuf: PByte; ABufLen: Integer;
       var APos: Integer): string;
     procedure _HpackEncodeStr(var ABuf: TBytes; var APos: Integer;
@@ -70,9 +76,20 @@ type
     // Decode a complete HPACK header block from a HEADERS / CONTINUATION payload.
     // Returns False and calls AOnError if a compression error is detected.
     // On success, fills AMethod/APath/AScheme/AAuthority and AHeaders.
+    // AHeaderListTooBig is set True when the accumulated header list size
+    // (sum of name.len + value.len + 32 per header) exceeds CMaxHeaderListSize
+    // — HPACK-bomb defense (RFC 7540 §10.5.1 / SETTINGS_MAX_HEADER_LIST_SIZE).
+    // In that case Result is False and the caller should REFUSE_STREAM.
+    // AProtocolError is set True when the header block violates RFC 7540 §8.1.2
+    // pseudo-header rules (missing / duplicated / out-of-order pseudo-headers,
+    // upper-case regular header names, hop-by-hop headers, empty :path). In that
+    // case Result is False and the caller should send GOAWAY with PROTOCOL_ERROR
+    // (or RST_STREAM PROTOCOL_ERROR for stream-scoped violations).
     function DecodeHeaders(ABuf: PByte; ALen: Integer;
       out AMethod, APath, AScheme, AAuthority: string;
       out AHeaders: TArray<TPair<string, string>>;
+      out AHeaderListTooBig: Boolean;
+      out AProtocolError: Boolean;
       AOnGoAway: TProc): Boolean;
 
     // Encode a response header block into a raw HPACK byte sequence.
@@ -100,6 +117,15 @@ implementation
 const
   CDefaultDynTableMaxSize = 4096;   // RFC 7541 default
   CHuffTreeInitSize = 8192;
+
+  // Hard cap on the decoder-side dynamic table (RFC 7541 §6.3).
+  // The peer's dynamic table size update (or SETTINGS_HEADER_TABLE_SIZE) must
+  // NOT exceed the value we ANNOUNCED to it in our own SETTINGS. Without this
+  // cap, a hostile client could ask us to allocate an arbitrarily large
+  // dynamic table (memory-amplification DoS).
+  // Value matches the SETTINGS_HEADER_TABLE_SIZE emitted in
+  // Poseidon.Net.HTTP2.TH2Conn.SendInitialSettings — keep both in sync.
+  CServerMaxDynTableSize = 4096;
 
 // ===========================================================================
 // Huffman decode tree — built once at unit initialization
@@ -455,6 +481,13 @@ end;
 
 procedure TH2HpackCodec.SetMaxDynTableSize(AValue: Integer);
 begin
+  // Silent cap against the value the server advertised in its own SETTINGS
+  // (CServerMaxDynTableSize). RFC 7541 §6.3: the encoder MUST NOT set a size
+  // greater than the value announced by the decoder. Instead of erroring, cap
+  // silently — the peer is still free to shrink the table below the cap.
+  if AValue < 0 then AValue := 0;
+  if AValue > CServerMaxDynTableSize then
+    AValue := CServerMaxDynTableSize;
   FDynTableMaxSize := AValue;
   _HpackEvict(FDynTableMaxSize);
 end;
@@ -465,21 +498,24 @@ end;
 
 function TH2HpackCodec._HpackDecodeInt(ABuf: PByte; ABufLen: Integer;
   APrefixBits: Byte; var APos: Integer): Cardinal;
+const
+  CMaxShift = 28; // RFC 7541 §5.1 — max 4 continuation bytes for 32-bit value
 var
   LMask:  Cardinal;
-  LValue: Cardinal;
+  LValue: UInt64;
   LShift: Integer;
   LByte:  Byte;
+  LAdd:   UInt64;
 begin
   LMask  := (1 shl APrefixBits) - 1;
   LValue := ABuf[APos] and LMask;
   Inc(APos);
   if LValue < LMask then
   begin
-    Result := LValue;
+    Result := Cardinal(LValue);
     Exit;
   end;
-  // Multi-byte encoding (RFC 7541 §5.1 — max 4 continuation bytes for 32-bit)
+  // Multi-byte encoding — accumulate in UInt64 to detect overflow past 32 bits.
   LShift := 0;
   repeat
     if APos >= ABufLen then
@@ -489,15 +525,21 @@ begin
     end;
     LByte  := ABuf[APos];
     Inc(APos);
-    if LShift > 28 then
+    if LShift > CMaxShift then
     begin
       Result := 0;
       Exit;
     end;
-    LValue := LValue + Cardinal(LByte and $7F) shl LShift;
+    LAdd := UInt64(LByte and $7F) shl LShift;
+    LValue := LValue + LAdd;
+    if LValue > $FFFFFFFF then
+    begin
+      Result := 0;
+      Exit;
+    end;
     Inc(LShift, 7);
   until (LByte and $80) = 0;
-  Result := LValue;
+  Result := Cardinal(LValue);
 end;
 
 procedure TH2HpackCodec._HpackEncodeInt(var ABuf: TBytes; var APos: Integer;
@@ -535,41 +577,77 @@ end;
 // HPACK string codec
 // ===========================================================================
 
-procedure TH2HpackCodec._HpackHuffmanDecode(ABuf: PByte; ALen: Integer;
-  out AResult: string);
+function TH2HpackCodec._HpackHuffmanDecode(ABuf: PByte; ALen: Integer;
+  out AResult: string): Boolean;
+const
+  // RFC 7541 §5.2: any padding strictly longer than 7 bits, or padding that is
+  // not a prefix of the EOS code, is a COMPRESSION_ERROR. EOS bit-count = 30
+  // and its code = $3FFFFFFF, so the "prefix of EOS" is always a run of 1s.
+  CMaxHuffPadBits = 7;
 var
-  LBytes: TBytes;
-  LBLen: Integer;
-  LNode: Integer;
-  I, B: Integer;
-  LBit: Integer;
-  LChild: Integer;
-  LSym: Integer;
+  LBytes:      TBytes;
+  LBLen:       Integer;
+  LNode:       Integer;
+  I, B:        Integer;
+  LBit:        Integer;
+  LChild:      Integer;
+  LSym:        Integer;
+  LPendingLen: Integer;  // consecutive bits walked past root without producing a symbol
+  LPendingAll1: Boolean; // True while every pending bit has been 1 (EOS prefix)
 begin
+  Result := False;
+  AResult := '';
   SetLength(LBytes, ALen * 2); // upper bound
   LBLen := 0;
   LNode := 0;
+  LPendingLen := 0;
+  LPendingAll1 := True;
   for I := 0 to ALen - 1 do
   begin
     for B := 7 downto 0 do
     begin
       LBit := (ABuf[I] shr B) and 1;
       LChild := GHuffTree[LNode].Children[LBit];
-      if LChild = -1 then Break; // padding or invalid — stop
+      if LChild = -1 then
+      begin
+        // Impossible in a canonical Huffman tree — signals encoder bug.
+        FDecodeError := True;
+        Exit;
+      end;
       LNode := LChild;
+      Inc(LPendingLen);
+      if LBit = 0 then LPendingAll1 := False;
       LSym := GHuffTree[LNode].Symbol;
       if LSym >= 0 then
       begin
-        if LSym = 256 then Break; // EOS
+        // EOS (symbol 256) MUST NOT appear as a decoded symbol.
+        if LSym = 256 then
+        begin
+          FDecodeError := True;
+          Exit;
+        end;
         if LBLen >= Length(LBytes) then SetLength(LBytes, LBLen + 64);
         LBytes[LBLen] := Byte(LSym);
         Inc(LBLen);
         LNode := 0; // back to root
+        LPendingLen := 0;
+        LPendingAll1 := True;
       end;
     end;
   end;
+
+  // Trailing bits after the last complete symbol are padding. They MUST:
+  //   (a) be at most CMaxHuffPadBits (7) bits long, and
+  //   (b) consist entirely of 1s (the most-significant bits of the EOS code).
+  if (LPendingLen > CMaxHuffPadBits) or (not LPendingAll1) then
+  begin
+    FDecodeError := True;
+    Exit;
+  end;
+
   SetLength(LBytes, LBLen);
   AResult := TEncoding.UTF8.GetString(LBytes);
+  Result := True;
 end;
 
 function TH2HpackCodec._HpackDecodeStr(ABuf: PByte; ABufLen: Integer;
@@ -587,15 +665,26 @@ begin
   end;
   LHuffman := (ABuf[APos] and $80) <> 0;
   LLen := _HpackDecodeInt(ABuf, ABufLen, 7, APos);
-  if APos + Integer(LLen) > ABufLen then
+  // Unsigned bounds check: guard against LLen with bit 31 set (would go negative
+  // under signed cast and pass a naive check, then SetLength/Move ~2GB → OOB).
+  if (APos < 0) or (APos > ABufLen) or
+     (UInt32(LLen) > UInt32(ABufLen - APos)) then
   begin
     Result := '';
     Exit;
   end;
   LRaw := @ABuf[APos];
-  Inc(APos, LLen);
+  Inc(APos, Integer(LLen));
   if LHuffman then
-    _HpackHuffmanDecode(LRaw, LLen, Result)
+  begin
+    // Failure sets FDecodeError; DecodeHeaders picks it up after this call
+    // returns and turns it into a COMPRESSION_ERROR GOAWAY.
+    if not _HpackHuffmanDecode(LRaw, LLen, Result) then
+    begin
+      Result := '';
+      Exit;
+    end;
+  end
   else
   begin
     SetLength(LSlice, LLen);
@@ -703,7 +792,15 @@ end;
 function TH2HpackCodec.DecodeHeaders(ABuf: PByte; ALen: Integer;
   out AMethod, APath, AScheme, AAuthority: string;
   out AHeaders: TArray<TPair<string, string>>;
+  out AHeaderListTooBig: Boolean;
+  out AProtocolError: Boolean;
   AOnGoAway: TProc): Boolean;
+const
+  // Per-header overhead (RFC 7540 §6.5.2 / RFC 7541 §4.1) + safe cap on the
+  // decoded header-list size. 16 KB matches a reasonable server default and
+  // stops HPACK-bomb where 1-byte indexed refs expand to 4 KB entries N times.
+  CHeaderOverhead    = 32;
+  CMaxHeaderListSize = 16 * 1024;
 var
   LPos: Integer;
   LByte: Byte;
@@ -715,15 +812,44 @@ var
   LPrefixBits: Byte;
   LHdrCount: Integer;
   LPair: TPair<string, string>;
+  LListSize: UInt64;
+  LIsPseudo: Boolean;
+  LSawRegular: Boolean;
+  LHasMethod: Boolean;
+  LHasPath: Boolean;
+  LHasScheme: Boolean;
+  LHasAuthority: Boolean;
+  I: Integer;
+  LChar: Char;
+  LHopByHop: Boolean;
+
+  // RFC 7540 §8.1.2.2: connection-specific header fields are forbidden in
+  // HTTP/2 (they exist only in HTTP/1.x hop-by-hop semantics).
+  function _IsHopByHopName(const AN: string): Boolean;
+  begin
+    Result := (AN = 'connection') or (AN = 'keep-alive') or
+              (AN = 'proxy-connection') or (AN = 'transfer-encoding') or
+              (AN = 'upgrade');
+  end;
+
 begin
   Result := True;
+  AHeaderListTooBig := False;
+  AProtocolError := False;
+  FDecodeError := False;
   LPos := 0;
   LHdrCount := 0;
+  LListSize := 0;
   AMethod := '';
   APath := '';
   AScheme := '';
   AAuthority := '';
   SetLength(AHeaders, 0);
+  LSawRegular := False;
+  LHasMethod := False;
+  LHasPath := False;
+  LHasScheme := False;
+  LHasAuthority := False;
 
   while LPos < ALen do
   begin
@@ -799,15 +925,15 @@ begin
     end
     else if (LByte and $E0) = $20 then
     begin
-      // §6.3 Dynamic Table Size Update
+      // §6.3 Dynamic Table Size Update — cap silently against the server's
+      // announced ceiling (CServerMaxDynTableSize). Value above the cap is
+      // clamped, not treated as an error, so that badly-tuned clients still
+      // interoperate; a value ABOVE UInt31 is malformed HPACK and does error.
       LIdx := _HpackDecodeInt(ABuf, ALen, 5, LPos);
-      if Integer(LIdx) > FDynTableMaxSize then
-      begin
-        if Assigned(AOnGoAway) then AOnGoAway;
-        Result := False;
-        Exit;
-      end;
-      FDynTableMaxSize := LIdx;
+      if LIdx > Cardinal(CServerMaxDynTableSize) then
+        FDynTableMaxSize := CServerMaxDynTableSize
+      else
+        FDynTableMaxSize := Integer(LIdx);
       _HpackEvict(FDynTableMaxSize);
       Continue;
     end
@@ -817,16 +943,114 @@ begin
       Continue;
     end;
 
+    // Malformed Huffman sequence detected during string decode: RFC 7541 §5.2
+    // → COMPRESSION_ERROR, connection error.
+    if FDecodeError then
+    begin
+      if Assigned(AOnGoAway) then AOnGoAway;
+      Result := False;
+      Exit;
+    end;
+
     if LAddDyn then
       _HpackAddDyn(LName, LValue);
 
-    // Map pseudo-headers
-    if LName = ':method'    then AMethod    := LValue
-    else if LName = ':path'      then APath      := LValue
-    else if LName = ':scheme'    then AScheme    := LValue
-    else if LName = ':authority' then AAuthority := LValue
+    // HPACK-bomb defense: sum expanded header-list size and cap it.
+    LListSize := LListSize + UInt64(Length(LName)) + UInt64(Length(LValue))
+                 + CHeaderOverhead;
+    if LListSize > CMaxHeaderListSize then
+    begin
+      AHeaderListTooBig := True;
+      Result := False;
+      Exit;
+    end;
+
+    // RFC 7540 §8.1.2 header validation.
+    LIsPseudo := (LName <> '') and (LName[Low(string)] = ':');
+
+    if LIsPseudo then
+    begin
+      // §8.1.2.1: pseudo-headers MUST appear before regular fields.
+      if LSawRegular then
+      begin
+        AProtocolError := True;
+        Result := False;
+        Exit;
+      end;
+
+      if LName = ':method' then
+      begin
+        if LHasMethod then
+        begin AProtocolError := True; Result := False; Exit; end;
+        LHasMethod := True;
+        AMethod := LValue;
+      end
+      else if LName = ':path' then
+      begin
+        if LHasPath then
+        begin AProtocolError := True; Result := False; Exit; end;
+        LHasPath := True;
+        APath := LValue;
+      end
+      else if LName = ':scheme' then
+      begin
+        if LHasScheme then
+        begin AProtocolError := True; Result := False; Exit; end;
+        LHasScheme := True;
+        AScheme := LValue;
+      end
+      else if LName = ':authority' then
+      begin
+        if LHasAuthority then
+        begin AProtocolError := True; Result := False; Exit; end;
+        LHasAuthority := True;
+        AAuthority := LValue;
+      end
+      else if LName = ':status' then
+      begin
+        // :status é pseudo de RESPONSE. O decoder é bidirecional (usado por
+        // roundtrip de teste e por eventual futuro cliente); aceita aqui e
+        // deixa a rejeição em contexto de request para _DecodeRequestHeaders
+        // (HTTP2.pas) que valida se o bloco é request-válido.
+        SetLength(AHeaders, Length(AHeaders) + 1);
+        AHeaders[High(AHeaders)] := TPair<string, string>.Create(LName, LValue);
+      end
+      else
+      begin
+        // Pseudo-header desconhecido.
+        AProtocolError := True;
+        Result := False;
+        Exit;
+      end;
+    end
     else
     begin
+      // Regular header validation (RFC 7540 §8.1.2 / §8.1.2.2).
+      // Names MUST be lowercase — reject any upper-case letter.
+      for I := Low(LName) to High(LName) do
+      begin
+        LChar := LName[I];
+        if (LChar >= 'A') and (LChar <= 'Z') then
+        begin
+          AProtocolError := True;
+          Result := False;
+          Exit;
+        end;
+      end;
+
+      // Hop-by-hop headers are forbidden in HTTP/2.
+      LHopByHop := _IsHopByHopName(LName);
+      // "TE" is allowed but ONLY with the value "trailers" (§8.1.2.2).
+      if (not LHopByHop) and (LName = 'te') and (LValue <> 'trailers') then
+        LHopByHop := True;
+      if LHopByHop then
+      begin
+        AProtocolError := True;
+        Result := False;
+        Exit;
+      end;
+
+      LSawRegular := True;
       LPair.Key := LName;
       LPair.Value := LValue;
       SetLength(AHeaders, LHdrCount + 1);
@@ -834,6 +1058,12 @@ begin
       Inc(LHdrCount);
     end;
   end;
+
+  // NOTE: request-level completeness checks (":method / :scheme / :path
+  // present, :authority for non-CONNECT, non-empty :path except CONNECT / *")
+  // live in the HTTP/2 layer (_DecodeRequestHeaders) — HPACK is a codec and
+  // is also exercised on partial blocks in unit tests. Order/duplicate/
+  // lowercase/hop-by-hop validation above is codec-level and stays here.
 end;
 
 // ===========================================================================

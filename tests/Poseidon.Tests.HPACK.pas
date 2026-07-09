@@ -159,11 +159,14 @@ function Decode(ACodec: TH2HpackCodec; const ABlock: TBytes;
   out AGoAwayCalled: Boolean): Boolean;
 var
   LGA: Boolean;  // local capture; out params cannot be captured in anonymous procs
+  LHeaderListTooBig: Boolean;
+  LProtocolError: Boolean;
 begin
   LGA := False;
   AGoAwayCalled := False;
   Result := ACodec.DecodeHeaders(@ABlock[0], Length(ABlock),
-    AMethod, APath, AScheme, AAuthority, AHeaders,
+    AMethod, APath, AScheme, AAuthority, AHeaders, LHeaderListTooBig,
+    LProtocolError,
     procedure begin LGA := True; end);
   AGoAwayCalled := LGA;
 end;
@@ -348,12 +351,14 @@ var
 begin
   LCodec := TH2HpackCodec.Create;
   try
-    // Default MaxDynTableSize = 4096.
     // §6.3: $3F = 0b00111111 = size-update with 5-bit prefix saturated (31),
-    // then multi-byte continuation: $E1 $FF $FF $07 encodes 31 + 0x1FFFFE0 = 33554463 >> 4096
+    // then multi-byte continuation: $E1 $FF $FF $07 encodes 31 + 0x1FFFFE0 = 33554463.
+    // Novo comportamento (M2): valor acima do CServerMaxDynTableSize (4096) é
+    // silenciosamente capped (não é erro protocolar) — decode continua True,
+    // GOAWAY não é chamado. Defesa contra decoder-side amplification.
     LBlock := Bytes([$3F, $E1, $FF, $FF, $07]);
-    Assert.IsFalse(Decode(LCodec, LBlock, LMethod, LPath, LScheme, LAuth, LHeaders, LGA));
-    Assert.IsTrue(LGA, 'GOAWAY callback must be called on oversized table update');
+    Assert.IsTrue(Decode(LCodec, LBlock, LMethod, LPath, LScheme, LAuth, LHeaders, LGA));
+    Assert.IsFalse(LGA, 'GOAWAY must NOT be called — oversized size update is silently capped');
   finally
     LCodec.Free;
   end;
@@ -382,6 +387,8 @@ var
   LMethod, LPath, LScheme, LAuth: string;
   LHeaders: TArray<TPair<string, string>>;
   LGA: Boolean;
+  LHeaderListTooBig: Boolean;
+  LProtocolError: Boolean;
   LBlock: TBytes;
 begin
   LCodec := TH2HpackCodec.Create;
@@ -389,9 +396,12 @@ begin
     SetLength(LBlock, 0);
     // DecodeHeaders with ALen=0 should return True with all outputs empty.
     // Pass a non-nil pointer (address of a dummy byte is fine since len=0 is checked).
+    // Request-level completeness (:method/:scheme/:path presence) is enforced
+    // at the HTTP/2 layer in _DecodeRequestHeaders, not in the codec.
     LGA := False;
     Assert.IsTrue(LCodec.DecodeHeaders(nil, 0,
-      LMethod, LPath, LScheme, LAuth, LHeaders,
+      LMethod, LPath, LScheme, LAuth, LHeaders, LHeaderListTooBig,
+      LProtocolError,
       procedure begin LGA := True; end));
     Assert.AreEqual('', LMethod);
     Assert.AreEqual<Integer>(0, Length(LHeaders));

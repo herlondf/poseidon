@@ -981,8 +981,11 @@ begin
   LH := TH2TestHarness.Create;
   try
     LH.Feed(H2ClientPreface);
-    // HPACK: :method=GET (0x82), :path=/ (0x84), :scheme=http (0x86)
-    LHpack := TBytes.Create($82, $84, $86);
+    // HPACK: :method=GET (0x82), :path=/ (0x84), :scheme=http (0x86),
+    // :authority="localhost" (literal-w/o-indexing name idx 1: $01 + $09 + bytes).
+    // :authority é obrigatório em requests não-CONNECT (RFC 7540 §8.1.2.3).
+    LHpack := TBytes.Create($82, $84, $86,
+      $01, $09, $6C, $6F, $63, $61, $6C, $68, $6F, $73, $74);
     // HEADERS stream 1: END_STREAM (0x01) | END_HEADERS (0x04) = 0x05
     LH.Feed(H2BuildFrame(H2T_HEADERS, $05, 1, LHpack));
     Assert.AreEqual(1, LH.Requests.Count,
@@ -1007,8 +1010,10 @@ begin
   LH := TH2TestHarness.Create;
   try
     LH.Feed(H2ClientPreface);
-    // HEADERS stream 1: END_HEADERS (0x04) only — body follows
-    LHpack := TBytes.Create($83, $84, $86);  // :method=POST, :path=/, :scheme=http
+    // HEADERS stream 1: END_HEADERS (0x04) only — body follows.
+    // :method=POST, :path=/, :scheme=http, :authority="localhost" (RFC 7540 §8.1.2.3).
+    LHpack := TBytes.Create($83, $84, $86,
+      $01, $09, $6C, $6F, $63, $61, $6C, $68, $6F, $73, $74);
     LH.Feed(H2BuildFrame(H2T_HEADERS, $04, 1, LHpack));
     // DATA stream 1: END_STREAM (0x01)
     LBody := TEncoding.UTF8.GetBytes('hello');
