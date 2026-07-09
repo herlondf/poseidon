@@ -101,7 +101,7 @@ begin
       LCtx.Body := TEncoding.UTF8.GetBytes(LBody);
     end);
 
-  Assert.AreEqual(LOrigSize, Length(LCtx.Body));
+  Assert.AreEqual(LOrigSize, Integer(Length(LCtx.Body)));
 end;
 
 procedure TCompressionMiddlewareTests.SkipsNonCompressibleType;
@@ -121,7 +121,7 @@ begin
       LCtx.Body := LBody;
     end);
 
-  Assert.AreEqual(2000, Length(LCtx.Body));
+  Assert.AreEqual(2000, Integer(Length(LCtx.Body)));
 end;
 
 procedure TCompressionMiddlewareTests.AddsContentEncodingHeader;

@@ -3,6 +3,7 @@ unit Poseidon.Tests.Middleware.BodyLimit;
 interface
 
 uses
+  System.SysUtils,
   DUnitX.TestFramework,
   Poseidon.Native.Types,
   Poseidon.Mock.Context;

@@ -12,8 +12,8 @@ if not exist dcu\Debug md dcu\Debug
   -B ^
   -CC ^
   "-NSSystem;Xml;Data;Datasnap;Web;Soap;Winapi;System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win" ^
-  "-U%BDS%\lib\Win64\release;..\src;.\mocks" ^
-  "-I..\src;.\mocks" ^
+  "-U%BDS%\lib\Win64\release;..\src;..\middlewares;.\mocks" ^
+  "-I..\src;..\middlewares;.\mocks" ^
   -E. ^
   "-N0.\dcu\Debug" ^
   Poseidon.Tests.dpr > build_tests_out.txt 2>&1

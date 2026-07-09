@@ -34,7 +34,7 @@ var
   LCtx: TNativeRequestContext;
   LMw: TNativeMiddlewareFunc;
 begin
-  LMw := TPoseidonHealthCheck.Create.Build;
+  LMw := TPoseidonHealthCheck.Create.Build();
   LCtx := TContextBuilder.New.Path('/health/live').Build;
   LMw(LCtx, procedure begin end);
   Assert.AreEqual(200, LCtx.Status);
@@ -48,7 +48,7 @@ var
 begin
   LMw := TPoseidonHealthCheck.Create
     .AddCheck('db', function: THealthCheckResult begin Result := THealthCheckResult.OK; end)
-    .Build;
+    .Build();
   LCtx := TContextBuilder.New.Path('/health').Build;
   LMw(LCtx, procedure begin end);
   Assert.AreEqual(200, LCtx.Status);
@@ -62,7 +62,7 @@ var
 begin
   LMw := TPoseidonHealthCheck.Create
     .AddCheck('redis', function: THealthCheckResult begin Result := THealthCheckResult.Failed('timeout'); end)
-    .Build;
+    .Build();
   LCtx := TContextBuilder.New.Path('/health').Build;
   LMw(LCtx, procedure begin end);
   Assert.AreEqual(503, LCtx.Status);
@@ -75,7 +75,7 @@ var
   LMw: TNativeMiddlewareFunc;
   LCalled: Boolean;
 begin
-  LMw := TPoseidonHealthCheck.Create.Build;
+  LMw := TPoseidonHealthCheck.Create.Build();
   LCtx := TContextBuilder.New.Path('/api/data').Build;
   LCalled := False;
   LMw(LCtx, procedure begin LCalled := True; end);
@@ -90,7 +90,7 @@ var
 begin
   LMw := TPoseidonHealthCheck.Create
     .AddCheck('db', function: THealthCheckResult begin Result := THealthCheckResult.OK; end)
-    .Build;
+    .Build();
   LCtx := TContextBuilder.New.Path('/health/ready').Build;
   LMw(LCtx, procedure begin end);
   Assert.AreEqual(200, LCtx.Status);

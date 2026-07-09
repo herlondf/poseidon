@@ -154,7 +154,7 @@ begin
   if Length(ABody) = 0 then
     Result := '"0"'
   else
-    Result := '"' + LowerCase(THashMD5.GetHashString(ABody)) + '"';
+    Result := '"' + LowerCase(THashMD5.GetHashString(TEncoding.UTF8.GetString(ABody))) + '"';
 end;
 
 procedure AddHeader(var ACtx: TNativeRequestContext; const AName, AValue: string);

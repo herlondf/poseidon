@@ -58,7 +58,7 @@ var
 begin
   LCtx := TContextBuilder.New.Method('PATCH').Path('/test').Build;
   LCalled := False;
-  GuardMiddleware(LCtx, procedure begin LCalled := True; end);
+  GuardMiddleware()(LCtx,procedure begin LCalled := True; end);
   Assert.IsTrue(LCalled);
 end;
 
@@ -67,7 +67,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Path('/../etc/passwd').Build;
-  GuardMiddleware(LCtx, procedure begin end);
+  GuardMiddleware()(LCtx,procedure begin end);
   Assert.AreEqual(400, LCtx.Status);
   Assert.IsTrue(LCtx.Handled);
 end;
@@ -79,7 +79,7 @@ var
 begin
   LCtx := TContextBuilder.New.Path('/api/users').Build;
   LCalled := False;
-  GuardMiddleware(LCtx, procedure begin LCalled := True; end);
+  GuardMiddleware()(LCtx,procedure begin LCalled := True; end);
   Assert.IsTrue(LCalled);
 end;
 
@@ -92,7 +92,7 @@ begin
     .Header('Content-Length', '10')
     .Header('Transfer-Encoding', 'chunked')
     .Build;
-  GuardMiddleware(LCtx, procedure begin end);
+  GuardMiddleware()(LCtx,procedure begin end);
   Assert.AreEqual(400, LCtx.Status);
 end;
 

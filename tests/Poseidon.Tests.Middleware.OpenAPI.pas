@@ -38,7 +38,7 @@ begin
     .Version('2.0.0')
     .AddRoute('GET', '/ping', 'Health check')
     .AddRoute('GET', '/users/:id', 'Get user by ID')
-    .Build;
+    .Build();
 end;
 
 procedure TOpenAPIMiddlewareTests.SpecEndpointReturns200;
@@ -46,7 +46,7 @@ var
   LCtx: TNativeRequestContext;
   LMw: TNativeMiddlewareFunc;
 begin
-  LMw := BuildTestMiddleware;
+  LMw := BuildTestMiddleware();
   LCtx := TContextBuilder.New.Path('/api-docs').Build;
   LMw(LCtx, procedure begin end);
   Assert.AreEqual(200, LCtx.Status);
@@ -60,7 +60,7 @@ var
   LMw: TNativeMiddlewareFunc;
   LBody: string;
 begin
-  LMw := BuildTestMiddleware;
+  LMw := BuildTestMiddleware();
   LCtx := TContextBuilder.New.Path('/api-docs').Build;
   LMw(LCtx, procedure begin end);
   LBody := BodyAsString(LCtx);
@@ -75,7 +75,7 @@ var
   LMw: TNativeMiddlewareFunc;
   LBody: string;
 begin
-  LMw := BuildTestMiddleware;
+  LMw := BuildTestMiddleware();
   LCtx := TContextBuilder.New.Path('/api-docs').Build;
   LMw(LCtx, procedure begin end);
   LBody := BodyAsString(LCtx);
@@ -88,7 +88,7 @@ var
   LCtx: TNativeRequestContext;
   LMw: TNativeMiddlewareFunc;
 begin
-  LMw := BuildTestMiddleware;
+  LMw := BuildTestMiddleware();
   LCtx := TContextBuilder.New.Path('/api-docs/ui').Build;
   LMw(LCtx, procedure begin end);
   Assert.AreEqual(200, LCtx.Status);
@@ -102,7 +102,7 @@ var
   LMw: TNativeMiddlewareFunc;
   LCalled: Boolean;
 begin
-  LMw := BuildTestMiddleware;
+  LMw := BuildTestMiddleware();
   LCtx := TContextBuilder.New.Path('/api/data').Build;
   LCalled := False;
   LMw(LCtx, procedure begin LCalled := True; end);
@@ -116,7 +116,7 @@ var
   LMw: TNativeMiddlewareFunc;
   LBody: string;
 begin
-  LMw := BuildTestMiddleware;
+  LMw := BuildTestMiddleware();
   LCtx := TContextBuilder.New.Path('/api-docs').Build;
   LMw(LCtx, procedure begin end);
   LBody := BodyAsString(LCtx);

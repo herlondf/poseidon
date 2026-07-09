@@ -128,7 +128,7 @@ begin
     LPayload.Free;
   end;
   LParts := LToken.Split(['.']);
-  Assert.AreEqual(3, Length(LParts));
+  Assert.AreEqual(3, Integer(Length(LParts)));
 end;
 
 initialization

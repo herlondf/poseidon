@@ -35,7 +35,7 @@ var
 begin
   LCtx := TContextBuilder.New.Build;
   LCalled := False;
-  ValidationMiddleware(LCtx, procedure begin LCalled := True; end);
+  ValidationMiddleware()(LCtx, procedure begin LCalled := True; end);
   Assert.IsTrue(LCalled);
 end;
 
@@ -44,7 +44,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Build;
-  ValidationMiddleware(LCtx,
+  ValidationMiddleware()(LCtx,
     procedure begin raise EPoseidonValidation.Create('Name is required'); end);
   Assert.AreEqual(422, LCtx.Status);
 end;
@@ -54,7 +54,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Build;
-  ValidationMiddleware(LCtx,
+  ValidationMiddleware()(LCtx,
     procedure begin raise EPoseidonValidation.Create('Field missing'); end);
   Assert.AreEqual('application/problem+json', LCtx.ContentType);
   Assert.IsTrue(BodyAsString(LCtx).Contains('Unprocessable Entity'));
@@ -68,7 +68,7 @@ begin
   Assert.WillRaise(
     procedure
     begin
-      ValidationMiddleware(LCtx,
+      ValidationMiddleware()(LCtx,
         procedure begin raise Exception.Create('generic'); end);
     end,
     Exception);

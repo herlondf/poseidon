@@ -31,7 +31,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Build;
-  RequestIDMiddleware(LCtx, procedure begin end);
+  RequestIDMiddleware()(LCtx,procedure begin end);
   Assert.IsTrue(GetExtraHeader(LCtx, 'X-Request-ID') <> '');
 end;
 
@@ -40,7 +40,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Header('X-Request-ID', 'my-custom-id').Build;
-  RequestIDMiddleware(LCtx, procedure begin end);
+  RequestIDMiddleware()(LCtx,procedure begin end);
   Assert.AreEqual('my-custom-id', GetExtraHeader(LCtx, 'X-Request-ID'));
 end;
 
@@ -50,7 +50,7 @@ var
   LID: string;
 begin
   LCtx := TContextBuilder.New.Build;
-  RequestIDMiddleware(LCtx, procedure begin end);
+  RequestIDMiddleware()(LCtx,procedure begin end);
   LID := GetExtraHeader(LCtx, 'X-Request-ID');
   Assert.IsTrue(Length(LID) > 10);
 end;
@@ -62,7 +62,7 @@ var
 begin
   LCtx := TContextBuilder.New.Build;
   LCalled := False;
-  RequestIDMiddleware(LCtx, procedure begin LCalled := True; end);
+  RequestIDMiddleware()(LCtx,procedure begin LCalled := True; end);
   Assert.IsTrue(LCalled);
 end;
 

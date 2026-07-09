@@ -19,7 +19,8 @@ implementation
 uses
   System.SysUtils,
   System.Classes,
-  System.Net.HttpClient;
+  System.Net.HttpClient,
+  System.Net.HttpClientComponent;
 
 procedure ExecuteProxy(const AUpstream, APrefix: string;
   var ACtx: TNativeRequestContext);

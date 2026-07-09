@@ -86,7 +86,7 @@ var
 begin
   LCtx := TContextBuilder.New.Build;
   LCalled := False;
-  LoggerMiddleware(LCtx, procedure begin LCalled := True; end);
+  LoggerMiddleware()(LCtx, procedure begin LCalled := True; end);
   Assert.IsTrue(LCalled);
 end;
 

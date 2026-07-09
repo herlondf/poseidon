@@ -36,7 +36,7 @@ var
   LMw: TNativeMiddlewareFunc;
 begin
   LCtx := TContextBuilder.New.Path('/test').Build;
-  LMw := CORSMiddleware;
+  LMw := CORSMiddleware();
   LMw(LCtx, procedure begin end);
 
   Assert.AreEqual('*', GetExtraHeader(LCtx, 'Access-Control-Allow-Origin'));
@@ -50,7 +50,7 @@ var
   LMw: TNativeMiddlewareFunc;
 begin
   LCtx := TContextBuilder.New.Method('OPTIONS').Path('/test').Build;
-  LMw := CORSMiddleware;
+  LMw := CORSMiddleware();
   LMw(LCtx, procedure begin end);
 
   Assert.AreEqual(204, LCtx.Status);
@@ -62,7 +62,7 @@ var
   LMw: TNativeMiddlewareFunc;
 begin
   LCtx := TContextBuilder.New.Method('OPTIONS').Path('/test').Build;
-  LMw := CORSMiddleware;
+  LMw := CORSMiddleware();
   LMw(LCtx, procedure begin end);
 
   Assert.IsTrue(LCtx.Handled);
@@ -75,7 +75,7 @@ var
   LCalled: Boolean;
 begin
   LCtx := TContextBuilder.New.Method('GET').Path('/test').Build;
-  LMw := CORSMiddleware;
+  LMw := CORSMiddleware();
   LCalled := False;
   LMw(LCtx, procedure begin LCalled := True; end);
 

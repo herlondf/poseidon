@@ -38,7 +38,7 @@ var
 begin
   LCtx := TContextBuilder.New.Build;
   LCalled := False;
-  ProblemDetailsMiddleware(LCtx, procedure begin LCalled := True; end);
+  ProblemDetailsMiddleware()(LCtx, procedure begin LCalled := True; end);
   Assert.IsTrue(LCalled);
   Assert.AreEqual(200, LCtx.Status);
 end;
@@ -48,7 +48,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Path('/items/42').Build;
-  ProblemDetailsMiddleware(LCtx,
+  ProblemDetailsMiddleware()(LCtx,
     procedure begin
       raise EPoseidonException.Create('Not found', THTTPStatus.NotFound);
     end);
@@ -60,7 +60,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Path('/test').Build;
-  ProblemDetailsMiddleware(LCtx,
+  ProblemDetailsMiddleware()(LCtx,
     procedure begin
       raise EPoseidonException.Create('Forbidden', THTTPStatus.Forbidden);
     end);
@@ -73,7 +73,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Build;
-  ProblemDetailsMiddleware(LCtx,
+  ProblemDetailsMiddleware()(LCtx,
     procedure begin raise Exception.Create('oops'); end);
   Assert.AreEqual(500, LCtx.Status);
   Assert.IsTrue(BodyAsString(LCtx).Contains('Internal Server Error'));
@@ -84,7 +84,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Path('/x').Build;
-  ProblemDetailsMiddleware(LCtx,
+  ProblemDetailsMiddleware()(LCtx,
     procedure begin
       raise EPoseidonException.Create('item not found', THTTPStatus.NotFound);
     end);

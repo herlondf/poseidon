@@ -30,6 +30,7 @@ type
 implementation
 
 uses
+  System.SysUtils,
   Poseidon.Middleware.Security;
 
 procedure TSecurityMiddlewareTests.DefaultsAddXContentTypeOptions;
@@ -37,7 +38,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Build;
-  SecurityMiddleware(LCtx, procedure begin end);
+  SecurityMiddleware()(LCtx, procedure begin end);
   Assert.AreEqual('nosniff', GetExtraHeader(LCtx, 'X-Content-Type-Options'));
 end;
 
@@ -46,7 +47,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Build;
-  SecurityMiddleware(LCtx, procedure begin end);
+  SecurityMiddleware()(LCtx, procedure begin end);
   Assert.AreEqual('DENY', GetExtraHeader(LCtx, 'X-Frame-Options'));
 end;
 
@@ -55,7 +56,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Build;
-  SecurityMiddleware(LCtx, procedure begin end);
+  SecurityMiddleware()(LCtx, procedure begin end);
   Assert.AreEqual('strict-origin-when-cross-origin', GetExtraHeader(LCtx, 'Referrer-Policy'));
 end;
 
@@ -64,7 +65,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Build;
-  SecurityMiddleware(LCtx, procedure begin end);
+  SecurityMiddleware()(LCtx, procedure begin end);
   Assert.AreEqual('default-src ''self''', GetExtraHeader(LCtx, 'Content-Security-Policy'));
 end;
 
@@ -73,7 +74,7 @@ var
   LCtx: TNativeRequestContext;
 begin
   LCtx := TContextBuilder.New.Build;
-  SecurityMiddleware(LCtx, procedure begin end);
+  SecurityMiddleware()(LCtx, procedure begin end);
   Assert.IsTrue(GetExtraHeader(LCtx, 'Strict-Transport-Security').Contains('max-age='));
 end;
 
@@ -84,7 +85,7 @@ var
 begin
   LCtx := TContextBuilder.New.Build;
   LCalled := False;
-  SecurityMiddleware(LCtx, procedure begin LCalled := True; end);
+  SecurityMiddleware()(LCtx, procedure begin LCalled := True; end);
   Assert.IsTrue(LCalled);
 end;
 
