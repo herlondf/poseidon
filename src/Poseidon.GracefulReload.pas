@@ -79,7 +79,9 @@ procedure RemovePIDFile(const APath: string);
 begin
   if (APath <> '') and FileExists(APath) then
     try
-      DeleteFile(APath);
+      // Qualify to the RTL string overload: on Windows the bare DeleteFile
+      // resolves to the Winapi.Windows PWideChar version.
+      System.SysUtils.DeleteFile(APath);
     except
       on E: Exception do;
     end;

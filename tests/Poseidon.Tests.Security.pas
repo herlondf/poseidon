@@ -86,9 +86,9 @@ type
     // Fail-open cases (invalid input must not raise and must return True)
     [Test] procedure InvalidCIDR_NoPrefixLen_FailOpen;
     [Test] procedure InvalidCIDR_PrefixOutOfRange_FailOpen;
-    [Test] procedure InvalidCIDR_NotIPv4_FailOpen;
-    [Test] procedure InvalidRemoteAddr_FailOpen;
-    [Test] procedure IPv6RemoteAddr_FailOpen;
+    [Test] procedure InvalidCIDR_NotIPv4_FailClose;
+    [Test] procedure InvalidRemoteAddr_FailClose;
+    [Test] procedure IPv6RemoteAddr_FailClose;
   end;
   {$M-}
 
@@ -385,24 +385,26 @@ begin
   Assert.IsTrue(IsIPInCIDR('10.0.0.1', '10.0.0.0/-1'));
 end;
 
-procedure TSecurityIsIPInCIDRTests.InvalidCIDR_NotIPv4_FailOpen;
+procedure TSecurityIsIPInCIDRTests.InvalidCIDR_NotIPv4_FailClose;
 begin
-  // CIDR host is not dotted-decimal → fail-open
-  Assert.IsTrue(IsIPInCIDR('10.0.0.1', 'notanip/24'));
+  // CIDR host that is not dotted-decimal (≠ 4 octets) fails closed (no match),
+  // so a malformed/non-IPv4 CIDR never silently matches an address.
+  Assert.IsFalse(IsIPInCIDR('10.0.0.1', 'notanip/24'));
 end;
 
-procedure TSecurityIsIPInCIDRTests.InvalidRemoteAddr_FailOpen;
+procedure TSecurityIsIPInCIDRTests.InvalidRemoteAddr_FailClose;
 begin
-  // Remote addr is not dotted-decimal → fail-open
-  Assert.IsTrue(IsIPInCIDR('notanip', '10.0.0.0/8'));
+  // A remote address that is not dotted-decimal (≠ 4 octets) fails closed.
+  Assert.IsFalse(IsIPInCIDR('notanip', '10.0.0.0/8'));
 end;
 
-procedure TSecurityIsIPInCIDRTests.IPv6RemoteAddr_FailOpen;
+procedure TSecurityIsIPInCIDRTests.IPv6RemoteAddr_FailClose;
 begin
-  // IPv6 addresses → fail-open (CIDR check is IPv4-only)
-  Assert.IsTrue(IsIPInCIDR('[::1]:8080',   '127.0.0.1/8'));
-  Assert.IsTrue(IsIPInCIDR('::1',          '127.0.0.1/8'));
-  Assert.IsTrue(IsIPInCIDR('2001:db8::1',  '10.0.0.0/8'));
+  // IPv6 addresses do not produce 4 IPv4 octets, so they fail closed against
+  // an IPv4 CIDR — prevents an IPv6 peer from bypassing an IPv4 allowlist.
+  Assert.IsFalse(IsIPInCIDR('[::1]:8080',   '127.0.0.1/8'));
+  Assert.IsFalse(IsIPInCIDR('::1',          '127.0.0.1/8'));
+  Assert.IsFalse(IsIPInCIDR('2001:db8::1',  '10.0.0.0/8'));
 end;
 
 procedure TSecurityIsIPInCIDRTests.Slash1_FirstHalfOfInternet_ReturnsTrue;
