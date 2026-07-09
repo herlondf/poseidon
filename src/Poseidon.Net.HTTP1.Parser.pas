@@ -103,6 +103,13 @@ const
   // Max digits accepted for Content-Length; 18 decimal digits always fit an
   // Int64 without overflow (Int64 max has 19 digits) — overflow guard (#158).
   CMaxCLDigits = 18;
+  // Max hex digits accepted for a chunk size (16 hex digits = 64-bit space).
+  CMaxChunkHexDigits = 16;
+  // Cap for the entire chunk-size line (hex size + optional chunk extensions).
+  // RFC 7230 §4.1.1 permits `size[;ext-name[=ext-val]]` — the parser accepts
+  // extensions but skips them without semantic validation; the cap bounds the
+  // work per line and prevents a chunk-ext DoS.
+  CMaxChunkLineSize = 8192;
 
 var
   GLUT: array[0..255] of Byte;
@@ -354,15 +361,24 @@ begin
 
     LLen := LCRLFP - LPos;
     if LLen < 1 then begin AMalformed := True; Exit; end;
-    if LLen > 16 then begin AMalformed := True; Exit; end;  // hex size cap
+    // Whole chunk-size line (hex + optional chunk extensions) is capped to
+    // bound per-line work and prevent a chunk-ext DoS (RFC 7230 §4.1.1).
+    if LLen > CMaxChunkLineSize then begin AMalformed := True; Exit; end;
+
+    // Locate first ';' separating hex size from chunk extensions; extensions
+    // are accepted but ignored (skipped up to CRLF) without semantic parsing.
+    LSemi := 0;
+    for I := 0 to LLen - 1 do
+      if LBytes[LPos + I] = Byte(';') then begin LSemi := I + 1; Break; end;
+    if LSemi > 0 then
+      LLen := LSemi - 1;
+
+    if LLen < 1 then begin AMalformed := True; Exit; end;
+    // Hex-only portion cap (16 hex digits fits a 64-bit chunk size).
+    if LLen > CMaxChunkHexDigits then begin AMalformed := True; Exit; end;
 
     SetLength(LSize, LLen);
     Move(LBytes[LPos], LSize[1], LLen);
-
-    LSemi := 0;
-    for I := 1 to LLen do
-      if LSize[I] = ';' then begin LSemi := I; Break; end;
-    if LSemi > 0 then SetLength(LSize, LSemi - 1);
 
     if not TryStrToInt64('$' + string(LSize), LChunk) or (LChunk < 0) then
     begin
@@ -484,8 +500,10 @@ begin
   end;
 
   // --- Parse request line: METHOD SP PATH[?QUERY] [SP HTTP/x.y] CRLF ---
+  // Loop bound is LHdrEnd (inclusive): when there are no headers the CRLF
+  // that terminates the request line IS at LHdrEnd (first \r of \r\n\r\n).
   LLineEnd := -1;
-  for I := 0 to LHdrEnd - 1 do
+  for I := 0 to LHdrEnd do
     if (ABuf[I] = CR) and (ABuf[I+1] = LF) then
     begin
       LLineEnd := I;
@@ -734,9 +752,10 @@ begin
     Exit;
   end;
 
-  // Parse request line
+  // Parse request line — bound is LHdrEnd inclusive: with no headers the
+  // request-line CRLF IS at LHdrEnd (first \r of the \r\n\r\n terminator).
   LLineEnd := -1;
-  for I := 0 to LHdrEnd - 1 do
+  for I := 0 to LHdrEnd do
     if (ABuf[I] = CR) and (ABuf[I+1] = LF) then
     begin LLineEnd := I; Break; end;
   if LLineEnd <= 0 then begin ABadRequest := True; Exit; end;
@@ -851,6 +870,17 @@ begin
         end;
       hiConnection:
         begin
+          // Parity with the Full parser: an explicit "keep-alive" enables
+          // keep-alive on HTTP/1.0 (default = close), and "close" disables it
+          // on HTTP/1.1 (default = keep-alive).
+          if LValLen >= 10 then
+            for I := LValStart to LLineEnd - 10 do
+              if (ABuf[I]   or $20 = Ord('k')) and (ABuf[I+1] or $20 = Ord('e')) and
+                 (ABuf[I+2] or $20 = Ord('e')) and (ABuf[I+3] or $20 = Ord('p')) and
+                 (ABuf[I+4]       = Ord('-'))  and (ABuf[I+5] or $20 = Ord('a')) and
+                 (ABuf[I+6] or $20 = Ord('l')) and (ABuf[I+7] or $20 = Ord('i')) and
+                 (ABuf[I+8] or $20 = Ord('v')) and (ABuf[I+9] or $20 = Ord('e')) then
+              begin AKeepAlive := True; Break; end;
           if LValLen >= 5 then
             for I := LValStart to LLineEnd - 5 do
               if (ABuf[I] or $20 = Ord('c')) and (ABuf[I+1] or $20 = Ord('l')) and

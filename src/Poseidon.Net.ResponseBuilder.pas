@@ -259,7 +259,9 @@ begin
   else if AContentType = 'application/octet-stream' then Result := G_CT_OCTET
   else
   begin
-    Result := TEncoding.ASCII.GetBytes(AContentType);
+    // Sanitize CR/LF/NUL to defeat response splitting via handler-supplied
+    // Content-Type (issue #159 — same policy as extra headers).
+    Result := TEncoding.ASCII.GetBytes(_SanitizeHeaderValue(AContentType));
     AAlloc := True;
   end;
 end;
