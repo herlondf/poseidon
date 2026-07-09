@@ -114,6 +114,10 @@ procedure InstallSignalHandler(AOnShutdown: TProc);
 var
   LSA: sigaction_t;
 begin
+  // Signal registration must happen regardless of IsConsole — a systemd
+  // unit / detached daemon has no controlling TTY but still needs to react
+  // to SIGTERM/SIGHUP for graceful reload. The IsConsole gate belongs only
+  // to the Ctrl-C polling loop on Windows.
   GShutdownProc := AOnShutdown;
   GShutdownFlag := 0;
   FillChar(LSA, SizeOf(LSA), 0);
@@ -121,7 +125,8 @@ begin
   LSA.sa_flags := 0;
   sigemptyset(LSA.sa_mask);
   sigaction(SIGTERM, @LSA, nil);
-  sigaction(SIGINT, @LSA, nil);
+  sigaction(SIGINT,  @LSA, nil);
+  sigaction(SIGHUP,  @LSA, nil);
 end;
 {$ENDIF}
 

@@ -200,7 +200,10 @@ begin
         TNetEncoding.URL.Decode(ASegments[I]));
       Inc(LPIdx);
     end
-    else if not SameText(ARoute.Segments[I], ASegments[I]) then
+    // Literal segments of a param route are compared case-sensitively to
+    // stay consistent with the static route dictionary (path is
+    // case-sensitive per RFC 3986 §6.2.2.1).
+    else if not SameStr(ARoute.Segments[I], ASegments[I]) then
       Exit;
   end;
 

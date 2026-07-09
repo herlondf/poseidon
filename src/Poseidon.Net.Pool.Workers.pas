@@ -289,6 +289,7 @@ var
   LActive: Integer;
   LStart: Int64;
   LWrapper: TWorkWrapper;
+  LWork: TElasticWorkItem;
   I: Integer;
 begin
   if TInterlocked.Add(FShutdown, 0) <> 0 then Exit;
@@ -310,20 +311,43 @@ begin
     Sleep(10);
   end;
 
-  // Drain un-executed work from all deques
+  // Drain un-executed work from all deques.
+  //
+  // Callers pair an AddRef (or equivalent counter Increment) with the closure
+  // BEFORE Post — the closure's own try/finally is what does the paired Release.
+  // Dropping the wrapper without running the closure leaks the refcount and
+  // leaves in-flight counters permanently non-zero. So we execute the closure
+  // synchronously here on the shutdown thread; the closure body is short
+  // (dispatch already refuses new work when FShutdown=1 higher up the stack,
+  // and any exception is swallowed like in the normal worker loop).
   for I := 0 to FDequeCount - 1 do
   begin
-    FDeques[I].Lock.Enter;
-    try
-      while FDeques[I].Queue.Count > 0 do
-      begin
-        LWrapper := FDeques[I].Queue.Dequeue;
-        LWrapper.Work := nil;
-        LWrapper.Free;
+    repeat
+      LWrapper := nil;
+      FDeques[I].Lock.Enter;
+      try
+        if FDeques[I].Queue.Count > 0 then
+          LWrapper := FDeques[I].Queue.Dequeue;
+      finally
+        FDeques[I].Lock.Leave;
       end;
-    finally
-      FDeques[I].Lock.Leave;
-    end;
+      if not Assigned(LWrapper) then Break;
+
+      LWork := LWrapper.Work;
+      LWrapper.Work := nil;
+      LWrapper.Free;
+      if Assigned(LWork) then
+      begin
+        try
+          LWork();
+        except
+          on E: Exception do
+            Writeln(ErrOutput, '[pool.workers] SHUTDOWN_DRAIN_EX [',
+              E.ClassName, ']: ', E.Message);
+        end;
+        LWork := nil;
+      end;
+    until False;
   end;
 end;
 

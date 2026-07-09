@@ -71,6 +71,7 @@ type
     FPerCoreAccept: Boolean;
     FSyncDispatch: Boolean;
     FProxyProtocol: TProxyProtocolMode;
+    FTrustedProxies: TArray<string>;
     FIOBackend: IIOBackend;
     FDispatcher: TProtocolDispatcher;
     FBufferPool: IBufferPool;
@@ -216,6 +217,11 @@ type
     // IP spoofing. Must be set before Listen().
     property ProxyProtocol: TProxyProtocolMode
       read FProxyProtocol write FProxyProtocol;
+    // CIDRs (IPv4) allowed to inject a PROXY header. Empty = fail-close: no
+    // PROXY header is honored (feature effectively off). Must include the
+    // load-balancer's IP for ProxyProtocol to take effect. Set before Listen().
+    property TrustedProxies: TArray<string>
+      read FTrustedProxies write FTrustedProxies;
     procedure RegisterWSHandler(const APath: string; AHandler: TWSMessageCallback);
     property OnH2Push: TOnH2Push read GetOnH2Push write SetOnH2Push;
   end;
@@ -417,13 +423,13 @@ begin
   if LConn.SSLHandle <> nil then
   begin
     // SSL requires contiguous data — concatenate and encrypt
-    LConcat := TBufferPool.Acquire(LHLen + LBLen);
+    LConcat := FServer.FBufferPool.Acquire(LHLen + LBLen);
     if LHLen > 0 then Move(AHeaders[0], LConcat[0], LHLen);
     if LBLen > 0 then Move(ABody[0], LConcat[LHLen], LBLen);
     LTmp := AHeaders;
-    TBufferPool.Release(LTmp);
+    FServer.FBufferPool.Release(LTmp);
     LTmp := ABody;
-    TBufferPool.Release(LTmp);
+    FServer.FBufferPool.Release(LTmp);
     FServer._EncryptAndSend(AConn, LConcat, LHLen + LBLen);
   end
   else
@@ -516,6 +522,7 @@ procedure TServerIOAdapter.OnRecv(AConn: Pointer; const ABuf: PByte;
 begin
   FServer._ProcessRecv(AConn, ABuf, ALen);
 end;
+
 
 procedure TServerIOAdapter.OnSendComplete(AConn: Pointer);
 var
@@ -725,6 +732,7 @@ begin
   end;
 
   LCfg.ProxyProtocol        := FProxyProtocol;
+  LCfg.TrustedProxies       := FTrustedProxies;
   LCfg.MaxRequestSize       := FMaxRequestSize;
   LCfg.MaxHeaderSize        := FMaxHeaderSize;
   LCfg.H2Enabled            := FH2Manager.H2Enabled;
@@ -867,6 +875,12 @@ procedure TPoseidonNativeServer.SetSyncDispatch(AValue: Boolean);
 begin
   if FSyncDispatch = AValue then
     Exit;
+  // Guard: swapping FDispatcher under traffic is a UAF — a worker may still
+  // be dereferencing the old dispatcher. Deny the change once the server is
+  // active; caller must set SyncDispatch before Listen().
+  if FActive then
+    raise Exception.Create(
+      'TPoseidonNativeServer: SyncDispatch cannot be changed while active');
   FSyncDispatch := AValue;
   // Rebuild pipeline — lightweight vs full is baked into the step array
   if FDispatcher <> nil then
@@ -1070,10 +1084,15 @@ begin
 end;
 
 procedure TPoseidonNativeServer.Stop;
+const
+  CDrainPollMs = 50;
 var
-  I:     Integer;
-  LConn: TNativeConn;
-  LSnap: TArray<Pointer>;
+  I:         Integer;
+  LConn:     TNativeConn;
+  LSnap:     TArray<Pointer>;
+  LDeadline: UInt64;
+  LNowTick:  UInt64;
+  LRemain:   Cardinal;
 begin
   if not FActive then Exit;
   FActive := False;
@@ -1082,11 +1101,14 @@ begin
   if Assigned(FIdleSweep) then
     FIdleSweep.Stop;
 
+  // 1) Stop accept + close listen socket.
   FIOBackend.StopAccept;
 
-  // Force every client socket into error state — pending recv/send will
-  // complete with an error; workers call _CloseConn naturally and remove
-  // the conn from FConnList. Drain then waits for that to happen.
+  // 2) Signal every client socket — pending recv/send complete with error,
+  // workers call _CloseConn and remove the conn from FConnList.
+  // ResetEvent BEFORE we shutdown any conn so we don't miss the last
+  // SetEvent from _CloseConn racing with our reset.
+  FDrainEvent.ResetEvent;
   LSnap := FConnManager.Snapshot;
   for I := 0 to High(LSnap) do
   begin
@@ -1094,12 +1116,37 @@ begin
     TNativeConn(LSnap[I]).Release;  // drop snapshot ref
   end;
 
-  // R-1: event-driven drain — no polling; FDrainEvent fires from each _CloseConn
-  FDrainEvent.ResetEvent;
-  if (TInterlocked.Read(FInFlightCount) > 0) or (FConnManager.Count > 0) then
-    FDrainEvent.WaitFor(FDrainTimeoutMs);
+  // 3) Drain worker pool — wait for BOTH FInFlightCount and connection count
+  // to reach 0. Manual-reset event is signaled by every _CloseConn; we
+  // re-check the condition on each wake because a single signal doesn't
+  // mean fully drained (single-fire trap: late worker would find a
+  // half-destroyed server otherwise).
+  LDeadline := TThread.GetTickCount64 + UInt64(FDrainTimeoutMs);
+  while (TInterlocked.Read(FInFlightCount) > 0) or (FConnManager.Count > 0) do
+  begin
+    LNowTick := TThread.GetTickCount64;
+    if LNowTick >= LDeadline then Break;
+    LRemain := Cardinal(LDeadline - LNowTick);
+    if LRemain > CDrainPollMs then LRemain := CDrainPollMs;
+    FDrainEvent.WaitFor(LRemain);
+    FDrainEvent.ResetEvent;
+  end;
 
-  // Final cleanup under lock — any stragglers (worker stuck in syscall).
+  // 4) Drain request pool — pool workers may still be in blocking handlers
+  // (including slow TLS handshake). They MUST finish before we free any
+  // SSL handle, otherwise a worker mid-handshake dereferences a freed SSL*.
+  if Assigned(FRequestPool) then
+  begin
+    FRequestPool.Shutdown(FDrainTimeoutMs);
+    FreeAndNil(FRequestPool);
+  end;
+
+  FIOBackend.SignalWorkers;
+  FIOBackend.JoinWorkers;
+
+  // 5) Only after the pool is fully drained is it safe to release SSL
+  // handles on straggler connections (workers stuck in syscall). Freeing
+  // SSL before drain = UAF on the SSL context from a lingering handshake.
   FConnManager.Lock.Enter;
   try
     while FConnManager.ConnList.Count > 0 do
@@ -1119,19 +1166,6 @@ begin
   finally
     FConnManager.Lock.Leave;
   end;
-
-  // Drain request pool — pool workers may still be in blocking handlers.
-  // They will finish, call SendResponse (which may fail on closed sockets),
-  // and then exit. IO workers process any resulting send completions while
-  // still alive; we join them only after pool workers are done.
-  if Assigned(FRequestPool) then
-  begin
-    FRequestPool.Shutdown(FDrainTimeoutMs);
-    FreeAndNil(FRequestPool);
-  end;
-
-  FIOBackend.SignalWorkers;
-  FIOBackend.JoinWorkers;
 
   FreeAndNil(FIdleSweep);
 end;
@@ -1168,9 +1202,12 @@ begin
     FIOBackend.RegisterConn(LConn);
     FIOBackend.PostRecv(LConn);
   except
-    // RegisterConn/PostRecv failure — undo admission and close
+    // RegisterConn/PostRecv failure — undo admission and close.
+    // Closing the socket is mandatory: skipping it leaks the fd and under
+    // DoS exhausts the process fd table.
     FConnManager.Remove(LConn);
     if LConn.SSLHandle <> nil then FSSLManager.FreeSSL(LConn.SSLHandle);
+    FIOBackend.SocketClose(LConn);
     LConn.Release;
   end;
 end;

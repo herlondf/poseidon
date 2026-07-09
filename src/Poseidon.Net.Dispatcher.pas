@@ -48,6 +48,7 @@ type
 
   TDispatchConfig = record
     ProxyProtocol:        TProxyProtocolMode;
+    TrustedProxies:       TArray<string>;   // CIDRs allowed to inject PROXY header
     MaxRequestSize:       Integer;
     MaxHeaderSize:        Integer;
     H2Enabled:            Boolean;
@@ -245,7 +246,8 @@ begin
   if TryParseProxyProtocolAuto(ACtx.Config^.ProxyProtocol,
        @LConn.AccumBuf[0], LConn.AccumLen,
        LPPAddr, LPPPort, LPPConsumed,
-       LPPIncomplete, LPPInvalid, LPPNoSig) then
+       LPPIncomplete, LPPInvalid, LPPNoSig,
+       LConn.RemoteAddr, ACtx.Config^.TrustedProxies) then
   begin
     if LPPConsumed > 0 then
     begin

@@ -514,16 +514,17 @@ begin
     raise;
   end;
 
+  {$IFDEF MSWINDOWS}
+  // Windows: Ctrl-C só chega via console handler; serviço não recebe.
   if IsConsole then
-  begin
-    {$IFNDEF MSWINDOWS}
-    // Poll for signal flag since signal handler only sets an atomic flag
-    while FShutdownEvent.WaitFor(500) = wrTimeout do
-      CheckShutdownSignal;
-    {$ELSE}
     FShutdownEvent.WaitFor;
-    {$ENDIF}
-  end;
+  {$ELSE}
+  // Linux: SIGTERM/SIGHUP chegam independente de console/TTY (serviço systemd
+  // dispara SIGTERM). Polling é obrigatório porque signal handler só seta
+  // uma flag atômica.
+  while FShutdownEvent.WaitFor(500) = wrTimeout do
+    CheckShutdownSignal;
+  {$ENDIF}
 end;
 
 procedure TPoseidonServer.Stop;
