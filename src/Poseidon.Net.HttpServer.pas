@@ -1093,6 +1093,7 @@ var
   LDeadline: UInt64;
   LNowTick:  UInt64;
   LRemain:   Cardinal;
+  LDrained:  Boolean;
 begin
   if not FActive then Exit;
   FActive := False;
@@ -1135,9 +1136,14 @@ begin
   // 4) Drain request pool — pool workers may still be in blocking handlers
   // (including slow TLS handshake). They MUST finish before we free any
   // SSL handle, otherwise a worker mid-handshake dereferences a freed SSL*.
+  LDrained := True;
   if Assigned(FRequestPool) then
   begin
-    FRequestPool.Shutdown(FDrainTimeoutMs);
+    LDrained := FRequestPool.Shutdown(FDrainTimeoutMs);
+    if not LDrained then
+      _Log(llWarning, '[shutdown] request pool did not drain within ' +
+        IntToStr(FDrainTimeoutMs) + 'ms; a slow handler is still running. ' +
+        'Leaking straggler SSL handles to avoid use-after-free.');
     FreeAndNil(FRequestPool);
   end;
 
@@ -1153,7 +1159,11 @@ begin
     begin
       LConn := TNativeConn(FConnManager.ConnList[0]);
       FConnManager.ConnList.Delete(0);
-      if LConn.SSLHandle <> nil then
+      // #177: only free the SSL handle when the pool fully drained. If a
+      // straggler worker is still running, it may dereference SSLHandle in
+      // _EncryptAndSend after SSL_free — freeing here would be a UAF. On the
+      // timeout path we leak the handle (process is exiting) instead.
+      if LDrained and (LConn.SSLHandle <> nil) then
       begin
         FSSLManager.FreeSSL(LConn.SSLHandle);
         LConn.SSLHandle   := nil;
@@ -1236,6 +1246,10 @@ begin
     if LConn.WSConn <> nil then
       (LConn.WSConn as TPoseidonWSConn).Invalidate;
     LConn.WSConn := nil;
+    // #178: free per-connection fragmentation state so FFragStates does not
+    // leak (and no stale entry lingers to collide with a reused pointer).
+    if FWSManager <> nil then
+      FWSManager.DropConnection(AConn);
   end;
   FreeAndNil(LConn.H2Conn);
   if LConn.SSLHandle <> nil then

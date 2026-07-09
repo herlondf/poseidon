@@ -91,7 +91,10 @@ type
 
     // Signal shutdown, drain in-flight work, wait up to ATimeoutMs.
     // Safe to call multiple times. Subsequent calls are no-ops.
-    procedure Shutdown(ATimeoutMs: Integer = 30000);
+    // Returns True if all workers actually drained within the timeout; False
+    // if it broke on timeout with stragglers still running (caller must NOT
+    // free state those stragglers may still touch — e.g. SSL handles). #177
+    function Shutdown(ATimeoutMs: Integer = 30000): Boolean;
 
     property ActiveWorkers: Integer read FActiveWorkers;
     property IdleWorkers: Integer read FIdleWorkers;
@@ -284,7 +287,7 @@ begin
     _SpawnWorker(LDequeIdx);
 end;
 
-procedure TElasticWorkerPool.Shutdown(ATimeoutMs: Integer);
+function TElasticWorkerPool.Shutdown(ATimeoutMs: Integer): Boolean;
 var
   LActive: Integer;
   LStart: Int64;
@@ -292,7 +295,8 @@ var
   LWork: TElasticWorkItem;
   I: Integer;
 begin
-  if TInterlocked.Add(FShutdown, 0) <> 0 then Exit;
+  if TInterlocked.Add(FShutdown, 0) <> 0 then
+    Exit(TInterlocked.Add(FActiveWorkers, 0) = 0);
   TInterlocked.Exchange(FShutdown, 1);
 
   // Wake all blocked workers so they check FShutdown and exit cleanly.
@@ -349,6 +353,9 @@ begin
       end;
     until False;
   end;
+
+  // True only if no worker is still executing a (possibly stuck) handler.
+  Result := TInterlocked.Add(FActiveWorkers, 0) = 0;
 end;
 
 end.
