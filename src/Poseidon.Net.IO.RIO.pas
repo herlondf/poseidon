@@ -110,6 +110,7 @@ type
     procedure _LoadRIO;
     procedure _Accept;
     procedure _WorkerLoop(ACQIdx: Integer);
+    function _MakeWorkerThread(ACQIdx: Integer): TThread;
     function _RecvPoolAcquire: Integer;
     procedure _RecvPoolRelease(AIdx: Integer);
     function _RecvSlotPtr(AIdx: Integer): PByte;
@@ -150,10 +151,15 @@ const
   CTCP_FASTOPEN = 15;
   CRecvBufSize = 32768;
   CRecvPoolSize = 512;
-  CRecvPoolBytes = CRecvPoolSize * CRecvBufSize;
+  // +1 slot de headroom: RIOReceive rejeita com WSAEINVAL quando Offset+Length
+  // == buffer size (offset+length deve ser ESTRITAMENTE menor). Nunca usamos
+  // este slot extra — apenas garante que o último slot válido (índice N-1)
+  // caiba dentro do buffer registrado com folga.
+  CRecvPoolBytes = (CRecvPoolSize + 1) * CRecvBufSize;
   CSendBufSize = 32768;
   CSendPoolSize = 512;
-  CSendPoolBytes = CSendPoolSize * CSendBufSize;
+  // Mesmo headroom do recv pool — evita WSAEINVAL em RIOSend com o último slot.
+  CSendPoolBytes = (CSendPoolSize + 1) * CSendBufSize;
   CRIOCQSize = 4096;
   CRIORQRecv = 32;
   CRIORQSend = 32;
@@ -394,6 +400,13 @@ begin
   Result := PByte(FSendPool) + NativeUInt(AIdx) * CSendBufSize;
 end;
 
+function TRIOBackend._MakeWorkerThread(ACQIdx: Integer): TThread;
+// ACQIdx é parâmetro (capturado por valor pela closure) — evita o bug clássico
+// de captura por referência quando a variável do loop é usada diretamente.
+begin
+  Result := TThread.CreateAnonymousThread(procedure begin _WorkerLoop(ACQIdx); end);
+end;
+
 // ---------------------------------------------------------------------------
 // IIOBackend — lifecycle
 // ---------------------------------------------------------------------------
@@ -406,7 +419,6 @@ var
   LOne: Integer;
   I: Integer;
   LNotify: TRIO_NOTIFICATION_COMPLETION;
-  LIdx: Integer;
 begin
   FCallbacks := ACallbacks;
   FShutdown := 0;
@@ -465,9 +477,11 @@ begin
   SetLength(FWorkers, AWorkerCount);
   for I := 0 to AWorkerCount - 1 do
   begin
-    LIdx := I;
-    FWorkers[I] := TThread.CreateAnonymousThread(
-      procedure begin _WorkerLoop(LIdx); end);
+    // Fix: captura por VALOR via parâmetro de função. Assignment em variável
+    // local (LIdx := I) seria capturada por REFERÊNCIA pela anonymous method
+    // — todas as N threads leriam o mesmo LIdx (última iteração), colapsando
+    // o polling em uma única CQ e vazando completions das demais.
+    FWorkers[I] := _MakeWorkerThread(I);
     FWorkers[I].FreeOnTerminate := False;
     FWorkers[I].Start;
   end;
@@ -491,8 +505,12 @@ end;
 procedure TRIOBackend.ShutdownConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
+  LSock: TSocket;
 begin
-  shutdown(LConn.Socket, SD_BOTH);
+  // #173: skip if SocketClose already invalidated the handle (recycled fd).
+  LSock := LConn.Socket;
+  if LSock <> INVALID_SOCKET then
+    shutdown(LSock, SD_BOTH);
 end;
 
 procedure TRIOBackend.SignalWorkers;
@@ -802,11 +820,15 @@ end;
 procedure TRIOBackend.SocketClose(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
+  LSock: TSocket;
 begin
   LConn.RioRQ := nil;
-  shutdown(LConn.Socket, SD_SEND);
-  if not TSocketPool.Recycle(LConn.Socket) then
-    closesocket(LConn.Socket);
+  // #173: invalidate the conn's handle copy before recycling the descriptor.
+  LSock := LConn.Socket;
+  LConn.Socket := INVALID_SOCKET;
+  shutdown(LSock, SD_SEND);
+  if not TSocketPool.Recycle(LSock) then
+    closesocket(LSock);
 end;
 
 // ---------------------------------------------------------------------------

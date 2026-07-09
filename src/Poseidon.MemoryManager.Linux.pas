@@ -53,16 +53,30 @@ begin
   Result := _calloc(1, NativeUInt(Size));
 end;
 
+// Stub hooks para leak tracking. Retornam False (nao rastreado). NAO alocam
+// via o proprio MM — o RTL invoca esses ponteiros durante shutdown/relatorio
+// de leaks; nil aqui causa AV.
+function LibcRegisterExpectedMemoryLeak(P: Pointer): Boolean;
+begin
+  Result := False;
+end;
+
+function LibcUnregisterExpectedMemoryLeak(P: Pointer): Boolean;
+begin
+  Result := False;
+end;
+
 procedure _InstallLibcMM;
 var
   LMM: TMemoryManagerEx;
 begin
+  FillChar(LMM, SizeOf(LMM), 0);
   LMM.GetMem := LibcGetMem;
   LMM.FreeMem := LibcFreeMem;
   LMM.ReallocMem := LibcReallocMem;
   LMM.AllocMem := LibcAllocMem;
-  LMM.RegisterExpectedMemoryLeak := nil;
-  LMM.UnregisterExpectedMemoryLeak := nil;
+  LMM.RegisterExpectedMemoryLeak := LibcRegisterExpectedMemoryLeak;
+  LMM.UnregisterExpectedMemoryLeak := LibcUnregisterExpectedMemoryLeak;
   SetMemoryManager(LMM);
 end;
 

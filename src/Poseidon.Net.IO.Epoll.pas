@@ -34,7 +34,7 @@ type
     FEpollFds: TArray<Integer>;
     FShutdownPipes: TArray<array[0..1] of Integer>;
     FCallbacks: IIOCallbacks;
-    FShutdown: Integer;  // 0=running, 1=shutdown; atomic via TInterlocked
+    FShutdown: Int64;  // 0=running, 1=shutdown; atomic via TInterlocked (Read requires Int64)
     procedure _CoreWorkerLoop(ACoreIdx: Integer);
     procedure _DoRecv(AConn: Pointer);
     procedure _FlushSend(AConn: Pointer);
@@ -167,7 +167,12 @@ end;
 
 procedure TCoreWorkerThread.Execute;
 begin
-  FBackend._CoreWorkerLoop(FCoreIdx);
+  // L4: drenar TLC do worker no fim — evita vazamento em graceful reload
+  try
+    FBackend._CoreWorkerLoop(FCoreIdx);
+  finally
+    TBufferPool.FlushThreadCache;
+  end;
 end;
 
 // ---------------------------------------------------------------------------
@@ -271,8 +276,13 @@ end;
 procedure TEpollBackend.ShutdownConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
+  LSock: Integer;
 begin
-  shutdown(LConn.Socket, SHUT_RDWR);
+  // #173: skip if SocketClose already invalidated the fd (kernel may have
+  // reused it for another accept4() connection).
+  LSock := LConn.Socket;
+  if LSock <> -1 then
+    shutdown(LSock, SHUT_RDWR);
 end;
 
 procedure TEpollBackend.SignalWorkers;
@@ -450,10 +460,14 @@ end;
 procedure TEpollBackend.SocketClose(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
+  LSock: Integer;
 begin
-  epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_DEL, LConn.Socket, nil);
-  shutdown(LConn.Socket, SHUT_WR);
-  _LinuxClose(LConn.Socket);
+  // #173: invalidate the conn's fd copy before closing (kernel reuses fds).
+  LSock := LConn.Socket;
+  LConn.Socket := -1;
+  epoll_ctl(LConn.OwnerEpollFd, EPOLL_CTL_DEL, LSock, nil);
+  shutdown(LSock, SHUT_WR);
+  _LinuxClose(LSock);
 end;
 
 // ---------------------------------------------------------------------------

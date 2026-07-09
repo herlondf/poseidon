@@ -66,7 +66,7 @@ type
     FCallbacks: IIOCallbacks;
     FListenSockets: TArray<Integer>;
     FSQLock: TCriticalSection;
-    FShutdown: Integer;  // 0=running, 1=shutdown; atomic via TInterlocked
+    FShutdown: Int64;  // 0=running, 1=shutdown; atomic via TInterlocked (Read requires Int64)
     FSQPoll: Boolean;
     FPSQFlags: PUInt32;
     FRecvCtxPool: Pointer;
@@ -88,6 +88,7 @@ type
     procedure _UnregisterFd(AFd: Integer);
     // helpers
     procedure _AcceptOn(AListenFd: Integer);
+    function _MakeAcceptThread(AListenFd: Integer): TThread;
     procedure _CompletionLoop;
     function  _SubmitSQE(AOpcode: Byte; AFd: Integer; ABuf: Pointer;
       ALen: UInt32; AUserData: UInt64): Boolean;
@@ -523,7 +524,6 @@ var
   LSQSize: NativeUInt;
   LCQSize: NativeUInt;
   LAcceptN: Integer;
-  LFd: Integer;
   LInitFds: array of Int32;
 begin
   FCallbacks := ACallbacks;
@@ -624,7 +624,16 @@ begin
     end;
   end;
 
-  FCompThread := TThread.CreateAnonymousThread(procedure begin _CompletionLoop; end);
+  // L4: drenar TLC do worker no fim — evita vazamento em graceful reload
+  FCompThread := TThread.CreateAnonymousThread(
+    procedure
+    begin
+      try
+        _CompletionLoop;
+      finally
+        TBufferPool.FlushThreadCache;
+      end;
+    end);
   FCompThread.FreeOnTerminate := False;
   FCompThread.Start;
 
@@ -650,9 +659,11 @@ begin
     SetLength(FAcceptThreads, LAcceptN);
     for I := 0 to LAcceptN - 1 do
     begin
-      LFd := FListenSockets[I];
-      FAcceptThreads[I] := TThread.CreateAnonymousThread(
-        procedure begin _AcceptOn(LFd); end);
+      // Fix: captura por VALOR via parâmetro de função. Assignment em variável
+      // local (LFd := FListenSockets[I]) seria capturada por REFERÊNCIA pela
+      // anonymous method — todas as threads leriam o mesmo LFd (última
+      // iteração), colapsando accepts em um único listen socket.
+      FAcceptThreads[I] := _MakeAcceptThread(FListenSockets[I]);
       FAcceptThreads[I].FreeOnTerminate := False;
       FAcceptThreads[I].Start;
     end;
@@ -683,8 +694,12 @@ end;
 procedure TIOUringBackend.ShutdownConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
+  LSock: Integer;
 begin
-  shutdown(LConn.Socket, SHUT_RDWR);
+  // #173: skip if SocketClose already invalidated the fd (kernel reuse).
+  LSock := LConn.Socket;
+  if LSock <> -1 then
+    shutdown(LSock, SHUT_RDWR);
 end;
 
 procedure TIOUringBackend.SignalWorkers;
@@ -856,11 +871,15 @@ end;
 procedure TIOUringBackend.SocketClose(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
+  LSock: Integer;
 begin
-  _UnregisterFd(LConn.Socket);
+  // #173: invalidate the conn's fd copy before closing (kernel reuses fds).
+  LSock := LConn.Socket;
+  LConn.Socket := -1;
+  _UnregisterFd(LSock);
   // TCP half-close — FIN before full teardown so the client reads pending bytes
-  shutdown(LConn.Socket, SHUT_WR);
-  _LinuxClose(LConn.Socket);
+  shutdown(LSock, SHUT_WR);
+  _LinuxClose(LSock);
 end;
 
 // ---------------------------------------------------------------------------
@@ -1321,6 +1340,14 @@ end;
 // ---------------------------------------------------------------------------
 // Accept thread — plain accept4() loop, identical to TEpollBackend._Accept
 // ---------------------------------------------------------------------------
+
+function TIOUringBackend._MakeAcceptThread(AListenFd: Integer): TThread;
+// AListenFd é parâmetro (capturado por valor pela closure) — evita o bug
+// clássico de captura por referência quando a variável do loop é usada
+// diretamente no anonymous method.
+begin
+  Result := TThread.CreateAnonymousThread(procedure begin _AcceptOn(AListenFd); end);
+end;
 
 procedure TIOUringBackend._AcceptOn(AListenFd: Integer);
 var

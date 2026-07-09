@@ -394,8 +394,13 @@ end;
 procedure TIOCPBackend.ShutdownConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
+  LSock: TSocket;
 begin
-  shutdown(LConn.Socket, SD_BOTH);
+  // #173: read the handle once; skip if SocketClose already invalidated it,
+  // so we never shutdown() a descriptor recycled by another connection.
+  LSock := LConn.Socket;
+  if LSock <> INVALID_SOCKET then
+    shutdown(LSock, SD_BOTH);
 end;
 
 procedure TIOCPBackend.SignalWorkers;
@@ -628,18 +633,25 @@ procedure TIOCPBackend.SocketClose(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
   LCtx: PDisconnectCtx;
+  LSock: TSocket;
 begin
+  // #173: capture the handle and invalidate the connection's copy up-front, so
+  // a concurrent IdleSweep.ShutdownConn cannot shutdown() a descriptor we are
+  // about to recycle (CTF_REUSE_SOCKET) into another connection.
+  LSock := LConn.Socket;
+  LConn.Socket := INVALID_SOCKET;
+
   // TCP half-close — FIN before RST so the client receives the last bytes
-  shutdown(LConn.Socket, SD_SEND);
+  shutdown(LSock, SD_SEND);
 
   if FDisconnectEx <> nil then
   begin
     New(LCtx);
     FillChar(LCtx^, SizeOf(TDisconnectCtx), 0);
     LCtx^.Action := iaDisconnect;
-    LCtx^.Socket := LConn.Socket;
+    LCtx^.Socket := LSock;
 
-    if not TDisconnectExFunc(FDisconnectEx)(LConn.Socket,
+    if not TDisconnectExFunc(FDisconnectEx)(LSock,
       POverlapped(@LCtx^.Ovl), CTF_REUSE_SOCKET, 0) then
     begin
       if WSAGetLastError = WSA_IO_PENDING then
@@ -658,7 +670,7 @@ begin
     end;
   end;
 
-  closesocket(LConn.Socket);
+  closesocket(LSock);
 end;
 
 // ---------------------------------------------------------------------------
@@ -687,6 +699,7 @@ var
   LKA: TKeepAliveVals;
   LBytesRet: DWORD;
 begin
+  try
   while True do
   begin
     if not _IocpGetEx(FIocp, @LEntries[0], CIocpBatchSize, @LCount,
@@ -872,6 +885,10 @@ begin
           Writeln(ErrOutput, '[iocp] WORKER_EX [', E.ClassName, ']: ', E.Message);
       end;
     end;
+  end;
+  finally
+    // L4: drenar TLC do worker no fim do loop — evita vazamento em graceful reload
+    TBufferPool.FlushThreadCache;
   end;
 end;
 
