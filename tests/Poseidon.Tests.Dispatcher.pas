@@ -75,6 +75,18 @@ type
     [Test] procedure MaxQueueDepthZero_NoBackpressure;
   end;
 
+  // Regression for #172 — StepProxyProtocol must forward the socket peer and
+  // the TrustedProxies allowlist to TryParseProxyProtocolAuto.  Before the fix
+  // the caller passed neither, so the parser fail-closed and a PROXY header
+  // from a trusted LB was never honored (RemoteAddr stayed the LB address).
+  [TestFixture]
+  TDispatcherProxyProtocolTests = class
+  public
+    [Test] procedure TrustedPeer_ParsesHeader_RewritesRemoteAddr;
+    [Test] procedure EmptyAllowlist_FailClose_KeepsSocketPeer;
+    [Test] procedure UntrustedPeer_IgnoresHeader_KeepsSocketPeer;
+  end;
+
   {$M-}
 
 implementation
@@ -285,6 +297,28 @@ begin
   finally
     LDispatcher.Free;
   end;
+end;
+
+// Builds a connection whose accumulation buffer starts with a PROXY v1 header
+// (declaring client 203.0.113.7:56324) followed by a plain GET.  PPParsed is
+// False so StepProxyProtocol runs.  RemoteAddr carries the socket-level peer.
+function MakeConnPP(const APeer: string): TNativeConn;
+var
+  LRaw:   string;
+  LBytes: TBytes;
+  LConn:  TNativeConn;
+begin
+  LRaw := 'PROXY TCP4 203.0.113.7 10.0.0.1 56324 443'#13#10 +
+          'GET / HTTP/1.1'#13#10 +
+          'Host: 127.0.0.1'#13#10 +
+          'Connection: close'#13#10#13#10;
+  LBytes := TEncoding.ASCII.GetBytes(LRaw);
+
+  LConn := TNativeConn.Create(0, APeer);
+  LConn.PPParsed := False;
+  LConn.AccumLen := Length(LBytes);
+  Move(LBytes[0], LConn.AccumBuf[0], LConn.AccumLen);
+  Result := LConn;
 end;
 
 // =============================================================================
@@ -726,6 +760,73 @@ begin
   end;
 end;
 
+// =============================================================================
+// Fixture 7 — Proxy Protocol allowlist (#172 regression)
+// =============================================================================
+
+procedure TDispatcherProxyProtocolTests.TrustedPeer_ParsesHeader_RewritesRemoteAddr;
+var
+  LConn:   TNativeConn;
+  LMock:   TMockCallbacks;
+  LConfig: TDispatchConfig;
+begin
+  LConn   := MakeConnPP('127.0.0.1:12345');
+  LMock   := TMockCallbacks.Create;
+  LConfig := DefaultConfig;
+  LConfig.ProxyProtocol  := ppV1;
+  LConfig.TrustedProxies := ['127.0.0.0/8'];
+  try
+    DoDispatch(LConn, LConfig, LMock);
+    Assert.AreEqual('203.0.113.7:56324', LConn.RemoteAddr,
+      'PROXY header from a trusted peer must rewrite RemoteAddr to the client');
+  finally
+    LConn.Free;
+    LMock := nil;
+  end;
+end;
+
+procedure TDispatcherProxyProtocolTests.EmptyAllowlist_FailClose_KeepsSocketPeer;
+var
+  LConn:   TNativeConn;
+  LMock:   TMockCallbacks;
+  LConfig: TDispatchConfig;
+begin
+  LConn   := MakeConnPP('127.0.0.1:12345');
+  LMock   := TMockCallbacks.Create;
+  LConfig := DefaultConfig;
+  LConfig.ProxyProtocol  := ppV1;
+  LConfig.TrustedProxies := nil;
+  try
+    DoDispatch(LConn, LConfig, LMock);
+    Assert.AreEqual('127.0.0.1:12345', LConn.RemoteAddr,
+      'Empty allowlist = fail-close: PROXY header ignored, socket peer kept');
+  finally
+    LConn.Free;
+    LMock := nil;
+  end;
+end;
+
+procedure TDispatcherProxyProtocolTests.UntrustedPeer_IgnoresHeader_KeepsSocketPeer;
+var
+  LConn:   TNativeConn;
+  LMock:   TMockCallbacks;
+  LConfig: TDispatchConfig;
+begin
+  LConn   := MakeConnPP('8.8.8.8:1111');
+  LMock   := TMockCallbacks.Create;
+  LConfig := DefaultConfig;
+  LConfig.ProxyProtocol  := ppV1;
+  LConfig.TrustedProxies := ['127.0.0.0/8'];
+  try
+    DoDispatch(LConn, LConfig, LMock);
+    Assert.AreEqual('8.8.8.8:1111', LConn.RemoteAddr,
+      'Peer outside the allowlist must not have its PROXY header honored');
+  finally
+    LConn.Free;
+    LMock := nil;
+  end;
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TDispatcherBasicTests);
   TDUnitX.RegisterTestFixture(TDispatcherSizeCheckTests);
@@ -733,5 +834,6 @@ initialization
   TDUnitX.RegisterTestFixture(TDispatcherUpgradeTests);
   TDUnitX.RegisterTestFixture(TDispatcherLightweightTests);
   TDUnitX.RegisterTestFixture(TDispatcherBackpressureTests);
+  TDUnitX.RegisterTestFixture(TDispatcherProxyProtocolTests);
 
 end.
