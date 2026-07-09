@@ -823,7 +823,17 @@ begin
           LDelta := Integer(LVal) - Integer(FPeerInitWinSize);
           FPeerInitWinSize := LVal;
           for LStreamPair in FStreams do
+          begin
+            // RFC 7540 §6.9.2 — a SETTINGS change that pushes a stream's send
+            // window above 2^31-1 is a FLOW_CONTROL_ERROR connection error.
+            if (LDelta > 0) and
+               (LStreamPair.Value.SendWindow > MaxInt - LDelta) then
+            begin
+              _GoAway(FLastStreamID, H2_ERR_FLOW_CONTROL_ERROR);
+              Exit;
+            end;
             Inc(LStreamPair.Value.SendWindow, LDelta);
+          end;
         end;
       // Other settings: silently accept
     end;
@@ -898,11 +908,12 @@ procedure TH2Conn._HandleWindowUpdate(AStreamID: Cardinal; APayload: PByte; APay
 // RFC 7540 §6.9 — increment the appropriate flow-control window and drain
 // any buffered DATA that was waiting for credit.
 var
-  LInc:     Integer;
-  LStream:  TH2Stream;
-  LPair:    TPair<Cardinal, TH2Stream>;
-  LRst:     TBytes;
-  LErrCode: Cardinal;
+  LInc:         Integer;
+  LStream:      TH2Stream;
+  LPair:        TPair<Cardinal, TH2Stream>;
+  LRst:         TBytes;
+  LErrCode:     Cardinal;
+  LPendingList: TList<TH2Stream>;
 begin
   if APayLen <> 4 then
   begin
@@ -937,16 +948,27 @@ begin
       Exit;
     end;
     Inc(FConnSendWindow, LInc);
-    // Drain pending streams — iterate once; _DrainPendingStream may free the
-    // stream which modifies FStreams, so we break after each drain call and
-    // rely on the next WINDOW_UPDATE (or re-entry) to continue.
-    for LPair in FStreams do
-      if (LPair.Value.PendingBody <> nil) and
-         (LPair.Value.PendingBodyOfs < Length(LPair.Value.PendingBody)) then
+    // Drain ALL pending streams until the replenished connection window is
+    // exhausted — not just the first one, otherwise streams B, C, ... stall
+    // indefinitely (the peer already granted the credit and won't send another
+    // WINDOW_UPDATE). Snapshot first: _DrainPendingStream may remove and free
+    // a stream (via _CloseStreamAfterSend), invalidating a live enumerator over
+    // FStreams. Each stream is attempted at most once, so one still blocked by
+    // its own stream-level window simply remains pending.
+    LPendingList := TList<TH2Stream>.Create;
+    try
+      for LPair in FStreams do
+        if (LPair.Value.PendingBody <> nil) and
+           (LPair.Value.PendingBodyOfs < Length(LPair.Value.PendingBody)) then
+          LPendingList.Add(LPair.Value);
+      for LStream in LPendingList do
       begin
-        _DrainPendingStream(LPair.Value);
-        Break;
+        if FConnSendWindow <= 0 then Break;
+        _DrainPendingStream(LStream);
       end;
+    finally
+      LPendingList.Free;
+    end;
   end
   else
   begin
