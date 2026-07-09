@@ -90,7 +90,20 @@ questões puramente cosméticas a menos que o usuário peça.
 
 ## Skills irmãs (aprofunde por subsistema)
 
+Revisão (herdam a Regra de Ouro e o formato de saída acima):
 `poseidon-http1-review`, `poseidon-http2-review`, `poseidon-websocket-review`,
 `poseidon-concurrency-review`, `poseidon-portability-review`,
-`poseidon-security-review`, `poseidon-performance-review`.
-Todas herdam a Regra de Ouro e o formato de saída acima.
+`poseidon-security-review`, `poseidon-performance-review`,
+`poseidon-server-review` (HttpServer/Native.Server/Group/GracefulReload/Net.IO),
+`poseidon-compression-review` (Brotli + Content-Encoding + permessage-deflate),
+`poseidon-api-review` (fachada, tipos, contexto, Status/Problem/Validation),
+`poseidon-middlewares-review` (middlewares/*).
+
+Cobertura conjunta: as skills acima cobrem as 39 units de `src/` e os middlewares.
+Ao revisar o projeto inteiro, delegue um revisor por skill (fan-out) e consolide.
+
+Construção (não é revisão):
+- `poseidon-src` — implementar/corrigir código em `src/*.pas` (core do servidor).
+- `poseidon-middlewares-src` — implementar/corrigir middlewares em `middlewares/*.pas`.
+- `poseidon-tests` — implementar/rodar testes DUnitX, fechar as "Lacunas de
+  teste" apontadas pelas reviews.
