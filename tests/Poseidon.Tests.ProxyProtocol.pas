@@ -420,8 +420,10 @@ begin
   Move(SIG[0], LBuf[0], 12);
   LBuf[12] := $20; LBuf[13] := $00; LBuf[14] := $00; LBuf[15] := $00;
 
+  // M3: peer + trusted allowlist obrigatórios (fail-close por default).
   Assert.IsTrue(TryParseProxyProtocolAuto(ppAuto, @LBuf[0], 16,
-    LAddr, LPort, LConsumed, LIncomp, LInvalid, LNoSig));
+    LAddr, LPort, LConsumed, LIncomp, LInvalid, LNoSig,
+    '127.0.0.1', ['127.0.0.0/8']));
   Assert.IsFalse(LNoSig);
 end;
 
@@ -433,7 +435,8 @@ var
 begin
   LBuf := TEncoding.ASCII.GetBytes('PROXY TCP4 1.2.3.4 5.6.7.8 100 80'#13#10);
   Assert.IsTrue(TryParseProxyProtocolAuto(ppAuto, @LBuf[0], Length(LBuf),
-    LAddr, LPort, LConsumed, LIncomp, LInvalid, LNoSig));
+    LAddr, LPort, LConsumed, LIncomp, LInvalid, LNoSig,
+    '127.0.0.1', ['127.0.0.0/8']));
   Assert.AreEqual('1.2.3.4', LAddr);
   Assert.IsFalse(LNoSig);
 end;
@@ -456,10 +459,12 @@ var
   LAddr:     string; LPort: Word; LConsumed: Integer;
   LIncomp, LInvalid, LNoSig: Boolean;
 begin
-  // Only 3 bytes — could be the start of either PROXY or a v2 signature
+  // Only 3 bytes — could be the start of either PROXY or a v2 signature.
+  // M3: peer + trusted allowlist obrigatórios.
   LBuf := TEncoding.ASCII.GetBytes('PRO');
   TryParseProxyProtocolAuto(ppAuto, @LBuf[0], Length(LBuf),
-    LAddr, LPort, LConsumed, LIncomp, LInvalid, LNoSig);
+    LAddr, LPort, LConsumed, LIncomp, LInvalid, LNoSig,
+    '127.0.0.1', ['127.0.0.0/8']);
   Assert.IsTrue(LIncomp);
   Assert.IsFalse(LNoSig);
 end;

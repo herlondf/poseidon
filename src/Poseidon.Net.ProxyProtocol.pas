@@ -18,7 +18,8 @@ interface
 
 uses
   System.SysUtils,
-  System.Math;
+  System.Math,
+  Poseidon.Net.Security;
 
 type
   TProxyProtocolMode = (ppDisabled, ppV1, ppV2, ppAuto);
@@ -48,11 +49,23 @@ function TryParseProxyProtocolV1(ABuf: PByte; ABufLen: Integer;
 // Auto-detect version by signature and delegate.
 // When no known signature is found in the first 6+ bytes and AMode=ppAuto,
 // sets ANoSignature=True — caller treats the connection as non-PP.
+//
+// APeerAddr:       real socket-level peer address (bare "IP" or "IP:port").
+//                  Used to enforce the trusted-proxy allowlist below.
+// ATrustedProxies: list of IPv4 CIDR blocks whose peers are allowed to send
+//                  a Proxy Protocol header. If APeerAddr does NOT match any
+//                  CIDR in this list, the header is NOT parsed and the caller
+//                  MUST fall back to the real socket peer — ANoSignature is
+//                  set True so the caller treats it as non-PP.
+//                  Empty (or nil) list = fail-close: Proxy Protocol is never
+//                  accepted (safe default against IP-spoofing).
 function TryParseProxyProtocolAuto(AMode: TProxyProtocolMode;
   ABuf: PByte; ABufLen: Integer;
   out ARemoteAddr: string; out ARemotePort: Word;
   out AConsumed: Integer;
-  out AIncomplete, AInvalid, ANoSignature: Boolean): Boolean;
+  out AIncomplete, AInvalid, ANoSignature: Boolean;
+  const APeerAddr: string = '';
+  const ATrustedProxies: TArray<string> = nil): Boolean;
 
 implementation
 
@@ -237,9 +250,43 @@ function TryParseProxyProtocolAuto(AMode: TProxyProtocolMode;
   ABuf: PByte; ABufLen: Integer;
   out ARemoteAddr: string; out ARemotePort: Word;
   out AConsumed: Integer;
-  out AIncomplete, AInvalid, ANoSignature: Boolean): Boolean;
+  out AIncomplete, AInvalid, ANoSignature: Boolean;
+  const APeerAddr: string;
+  const ATrustedProxies: TArray<string>): Boolean;
+var
+  I: Integer;
+  LTrusted: Boolean;
 begin
+  Result := False;
+  ARemoteAddr := '';
+  ARemotePort := 0;
+  AConsumed := 0;
+  AIncomplete := False;
+  AInvalid := False;
   ANoSignature := False;
+
+  // Allowlist enforcement: only peers inside a trusted CIDR may inject a
+  // Proxy Protocol header. Empty allowlist = fail-close (never accept PP).
+  // Without this check any client could forge a source IP by sending PROXY.
+  if AMode <> ppDisabled then
+  begin
+    LTrusted := False;
+    if Length(ATrustedProxies) > 0 then
+      for I := 0 to High(ATrustedProxies) do
+        if IsIPInCIDR(APeerAddr, ATrustedProxies[I]) then
+        begin
+          LTrusted := True;
+          Break;
+        end;
+    if not LTrusted then
+    begin
+      // Peer is not an allowed proxy — do NOT parse the header. Signal the
+      // caller to use the real socket peer address instead.
+      ANoSignature := True;
+      Exit;
+    end;
+  end;
+
   case AMode of
     ppV2:
       Result := TryParseProxyProtocolV2(ABuf, ABufLen, ARemoteAddr, ARemotePort,

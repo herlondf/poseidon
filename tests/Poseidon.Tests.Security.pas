@@ -84,8 +84,8 @@ type
     [Test] procedure RemoteAddrWithPort_Stripped_ReturnsTrue;
     [Test] procedure RemoteAddrWithPort_Stripped_ReturnsFalse;
     // Fail-open cases (invalid input must not raise and must return True)
-    [Test] procedure InvalidCIDR_NoPrefixLen_FailOpen;
-    [Test] procedure InvalidCIDR_PrefixOutOfRange_FailOpen;
+    [Test] procedure InvalidCIDR_NoPrefixLen_FailClose;
+    [Test] procedure InvalidCIDR_PrefixOutOfRange_FailClose;
     [Test] procedure InvalidCIDR_NotIPv4_FailClose;
     [Test] procedure InvalidRemoteAddr_FailClose;
     [Test] procedure IPv6RemoteAddr_FailClose;
@@ -373,16 +373,16 @@ begin
   Assert.IsFalse(IsIPInCIDR('192.168.2.5:12345', '192.168.1.0/24'));
 end;
 
-procedure TSecurityIsIPInCIDRTests.InvalidCIDR_NoPrefixLen_FailOpen;
+procedure TSecurityIsIPInCIDRTests.InvalidCIDR_NoPrefixLen_FailClose;
 begin
-  // No '/' → fail-open → True
-  Assert.IsTrue(IsIPInCIDR('10.0.0.1', '10.0.0.0'));
+  // No '/' → CIDR malformado → fail-close (nunca aceitar sem prefix len)
+  Assert.IsFalse(IsIPInCIDR('10.0.0.1', '10.0.0.0'));
 end;
 
-procedure TSecurityIsIPInCIDRTests.InvalidCIDR_PrefixOutOfRange_FailOpen;
+procedure TSecurityIsIPInCIDRTests.InvalidCIDR_PrefixOutOfRange_FailClose;
 begin
-  Assert.IsTrue(IsIPInCIDR('10.0.0.1', '10.0.0.0/33'));
-  Assert.IsTrue(IsIPInCIDR('10.0.0.1', '10.0.0.0/-1'));
+  Assert.IsFalse(IsIPInCIDR('10.0.0.1', '10.0.0.0/33'));
+  Assert.IsFalse(IsIPInCIDR('10.0.0.1', '10.0.0.0/-1'));
 end;
 
 procedure TSecurityIsIPInCIDRTests.InvalidCIDR_NotIPv4_FailClose;

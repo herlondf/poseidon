@@ -40,7 +40,8 @@ function HasRequestSmuggling(ACLPresent: Boolean; AIsChunked: Boolean): Boolean;
 
 // Returns True when ARemoteAddr (format "IP:port" or bare "IP") falls inside
 // the IPv4 CIDR block ACIDR (e.g. "10.0.0.0/8", "192.168.1.0/24").
-// Returns True on any parse error so as not to block scraping silently.
+// Fails CLOSED (returns False) on any parse error, malformed CIDR, out-of-range
+// octet (>255) or IPv6 input — an invalid input must never be treated as a match.
 function IsIPInCIDR(const ARemoteAddr, ACIDR: string): Boolean;
 
 implementation
@@ -112,7 +113,7 @@ var
   LByte: LongWord;
   I: Integer;
 begin
-  Result := True;  // fail-open: parse errors do not block scraping
+  Result := False;  // fail-close: invalid input must never count as a match
   try
     LColonPos := ARemoteAddr.LastDelimiter(':');
     if LColonPos >= 0 then
@@ -123,7 +124,7 @@ begin
     LIPStr := StringReplace(LIPStr, ']', '', []);
 
     LSlash := Pos('/', ACIDR);
-    if LSlash <= 0 then Exit;  // not a valid CIDR — fail-open
+    if LSlash <= 0 then Exit;  // not a valid CIDR — fail-close
     LCIDRHost := Copy(ACIDR, 1, LSlash - 1);
     LPrefix   := StrToIntDef(Copy(ACIDR, LSlash + 1, MaxInt), -1);
     if (LPrefix < 0) or (LPrefix > 32) then Exit;
@@ -131,17 +132,16 @@ begin
     LIPParts := LIPStr.Split(['.']);
     LNParts  := LCIDRHost.Split(['.']);
     // IPv6 addresses won't produce 4 octets — fail-close (no match)
-    // instead of the default fail-open, to prevent IPv6 CIDR bypass.
+    // to prevent IPv6 CIDR bypass.
     if (Length(LIPParts) <> 4) or (Length(LNParts) <> 4) then
-    begin
-      Result := False;
       Exit;
-    end;
 
     LIPNum  := 0;
     LNetNum := 0;
     for I := 0 to 3 do
     begin
+      // Octet must be 0..255. StrToIntDef returns 256 on parse error, so any
+      // value > 255 (invalid parse OR out-of-range like "999") fails CLOSED.
       LByte   := StrToIntDef(LIPParts[I], 256);
       if LByte > 255 then Exit;
       LIPNum  := (LIPNum  shl 8) or LByte;
@@ -158,7 +158,7 @@ begin
     Result := (LIPNum and LMask) = (LNetNum and LMask);
   except
     on E: Exception do
-      Result := True;  // never raise — fail-open
+      Result := False;  // never raise — fail-close
   end;
 end;
 
