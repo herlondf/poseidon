@@ -97,6 +97,12 @@ const
   BF_COLON = $10;  // $3A
   BF_QMARK = $20;  // $3F
   BF_OWS   = $0C;  // SP or HT (BF_SP or BF_HT)
+  // Maximum number of request headers accepted. Exceeding this is rejected
+  // (400) rather than silently truncated — see issue #164.
+  CMaxHeaderCount = 100;
+  // Max digits accepted for Content-Length; 18 decimal digits always fit an
+  // Int64 without overflow (Int64 max has 19 digits) — overflow guard (#158).
+  CMaxCLDigits = 18;
 
 var
   GLUT: array[0..255] of Byte;
@@ -153,25 +159,35 @@ begin
   Result := True;
 end;
 
+// Open-addressed lookup: the byte hash is lossy, so several distinct header
+// names collide on the same slot (e.g. content-length vs x-forwarded-for,
+// connection vs referer). Linear probing walks the collision cluster until a
+// name match or an empty slot is found. With <20 entries in a 256-slot table
+// there is always an empty slot, so the loop always terminates (issue #156).
 function LookupHeaderId(AName: PByte; ALen: Integer): THeaderId;
 var
-  LSlot: Byte;
+  LSlot: Integer;
 begin
   if ALen <= 0 then Exit(hiUnknown);
   LSlot := _QuickHeaderHash(AName, ALen);
-  if (GHeaderHash[LSlot].Id <> hiUnknown) and
-     _HeaderBytesMatch(AName, ALen, GHeaderHash[LSlot].Name) then
-    Result := GHeaderHash[LSlot].Id
-  else
-    Result := hiUnknown;
+  while GHeaderHash[LSlot].Id <> hiUnknown do
+  begin
+    if _HeaderBytesMatch(AName, ALen, GHeaderHash[LSlot].Name) then
+      Exit(GHeaderHash[LSlot].Id);
+    LSlot := (LSlot + 1) and (CHeaderHashSize - 1);
+  end;
+  Result := hiUnknown;
 end;
 
 procedure _RegisterHeader(const AName: AnsiString; AId: THeaderId);
 var
-  LSlot: Byte;
+  LSlot: Integer;
 begin
   LSlot := Byte(Length(AName)) xor (Byte(AName[1]) or $20) xor
            (Byte(AName[Length(AName)]) or $20);
+  // Probe to the next free slot on collision so no header overwrites another.
+  while GHeaderHash[LSlot].Id <> hiUnknown do
+    LSlot := (LSlot + 1) and (CHeaderHashSize - 1);
   GHeaderHash[LSlot].Name := AName;
   GHeaderHash[LSlot].Id := AId;
 end;
@@ -210,34 +226,6 @@ end;
 // Word-scan CRLF — process 4 bytes at a time
 // ---------------------------------------------------------------------------
 
-function _FindCRLF(ABuf: PByte; ALen: Integer): Integer;
-var
-  LI: Integer;
-  LWord: UInt32;
-begin
-  LI := 0;
-  while LI + 4 <= ALen - 1 do
-  begin
-    LWord := PUInt32(@ABuf[LI])^;
-    // Check if any byte is $0D (CR)
-    if ((LWord xor $0D0D0D0D) - $01010101) and
-       (not (LWord xor $0D0D0D0D)) and $80808080 <> 0 then
-    begin
-      if (ABuf[LI] = $0D) and (ABuf[LI + 1] = $0A) then begin Result := LI; Exit; end;
-      if (ABuf[LI + 1] = $0D) and (ABuf[LI + 2] = $0A) then begin Result := LI + 1; Exit; end;
-      if (ABuf[LI + 2] = $0D) and (ABuf[LI + 3] = $0A) then begin Result := LI + 2; Exit; end;
-      if (LI + 4 < ALen) and (ABuf[LI + 3] = $0D) and (ABuf[LI + 4] = $0A) then begin Result := LI + 3; Exit; end;
-    end;
-    Inc(LI, 4);
-  end;
-  while LI < ALen - 1 do
-  begin
-    if (ABuf[LI] = $0D) and (ABuf[LI + 1] = $0A) then begin Result := LI; Exit; end;
-    Inc(LI);
-  end;
-  Result := -1;
-end;
-
 function _FindCRLFCRLF(ABuf: PByte; ALen: Integer): Integer;
 var
   LI: Integer;
@@ -262,6 +250,70 @@ begin
   SetLength(Result, ALen);
   for LI := 0 to ALen - 1 do
     PWord(@PChar(Pointer(Result))[LI])^ := ABuf[AStart + LI];
+end;
+
+// Validates a Content-Length string value: trims OWS, then requires a
+// non-empty run of decimal digits no longer than CMaxCLDigits (overflow guard).
+// Returns False for empty, non-numeric, or over-long values (issue #158).
+function _ParseContentLength(const AValue: string; out AVal: Int64): Boolean;
+var
+  LI, LStart, LEnd: Integer;
+begin
+  Result := False;
+  AVal   := 0;
+  LStart := 1;
+  LEnd   := Length(AValue);
+  while (LStart <= LEnd) and
+        ((AValue[LStart] = ' ') or (AValue[LStart] = #9)) do Inc(LStart);
+  while (LEnd >= LStart) and
+        ((AValue[LEnd] = ' ') or (AValue[LEnd] = #9)) do Dec(LEnd);
+  if LStart > LEnd then Exit;
+  if (LEnd - LStart + 1) > CMaxCLDigits then Exit;
+  for LI := LStart to LEnd do
+  begin
+    if (AValue[LI] < '0') or (AValue[LI] > '9') then Exit;
+    AVal := AVal * 10 + (Ord(AValue[LI]) - Ord('0'));
+  end;
+  Result := True;
+end;
+
+// Byte-range variant of _ParseContentLength for the lightweight parser.
+// ABuf[AStart..AEnd-1] is the value (leading OWS already skipped by caller);
+// trailing OWS is trimmed here.
+function _ParseContentLengthBytes(const ABuf: TBytes;
+  AStart, AEnd: Integer; out AVal: Int64): Boolean;
+var
+  LI: Integer;
+begin
+  Result := False;
+  AVal   := 0;
+  while (AEnd > AStart) and
+        ((ABuf[AEnd - 1] = $20) or (ABuf[AEnd - 1] = $09)) do Dec(AEnd);
+  if AEnd <= AStart then Exit;
+  if (AEnd - AStart) > CMaxCLDigits then Exit;
+  for LI := AStart to AEnd - 1 do
+  begin
+    if (ABuf[LI] < Ord('0')) or (ABuf[LI] > Ord('9')) then Exit;
+    AVal := AVal * 10 + (ABuf[LI] - Ord('0'));
+  end;
+  Result := True;
+end;
+
+// Case-insensitive equality of ABuf[AStart..AEnd-1] (trailing OWS trimmed)
+// against a lowercase ASCII target. Used to require Transfer-Encoding to be
+// exactly "chunked" in the lightweight parser (issue #160).
+function _BytesEqualCI(const ABuf: TBytes; AStart, AEnd: Integer;
+  const ATarget: AnsiString): Boolean;
+var
+  LI: Integer;
+begin
+  Result := False;
+  while (AEnd > AStart) and
+        ((ABuf[AEnd - 1] = $20) or (ABuf[AEnd - 1] = $09)) do Dec(AEnd);
+  if (AEnd - AStart) <> Length(ATarget) then Exit;
+  for LI := 0 to (AEnd - AStart) - 1 do
+    if (ABuf[AStart + LI] or $20) <> Byte(ATarget[LI + 1]) then Exit;
+  Result := True;
 end;
 
 function DecodeHTTP1Chunked(ABuf: PByte; ABufLen, AMaxBodySize: Integer;
@@ -320,28 +372,43 @@ begin
 
     if LChunk = 0 then
     begin
-      // Last chunk — consume optional trailing CRLF
+      // Last chunk. Consume the (possibly empty) trailer section, which ends
+      // with a blank line (a bare CRLF). The terminator MUST be present;
+      // otherwise report "need more data" rather than falsely completing and
+      // leaving residual bytes that desync the next request (issue #157).
       LPos := LCRLFP + 2;
-      I := LPos;
-      while I < ABufLen - 1 do
+      while True do
       begin
-        if (LBytes[I] = $0D) and (LBytes[I + 1] = $0A) then
+        if LPos + 1 >= ABufLen then Exit;  // terminator not yet arrived → wait
+        if (LBytes[LPos] = $0D) and (LBytes[LPos + 1] = $0A) then
         begin
-          Inc(I, 2);
-          LPos := I;
-          Break;
+          AConsumed := LPos + 2;
+          Result    := True;
+          Exit;
         end;
-        Inc(I);
+        // Skip one trailer-field line.
+        I      := LPos;
+        LCRLFP := -1;
+        while I < ABufLen - 1 do
+        begin
+          if (LBytes[I] = $0D) and (LBytes[I + 1] = $0A) then
+          begin LCRLFP := I; Break; end;
+          Inc(I);
+        end;
+        if LCRLFP < 0 then Exit;  // incomplete trailer line → wait
+        LPos := LCRLFP + 2;
       end;
-      AConsumed := LPos;
-      Result    := True;
-      Exit;
     end;
 
     if LChunk > AMaxBodySize then begin AMalformed := True; Exit; end;
 
     LDataStart := LCRLFP + 2;
     if Int64(LDataStart) + LChunk + 2 > Int64(ABufLen) then Exit;
+
+    // The two bytes following the chunk data MUST be CRLF.
+    if (LBytes[LDataStart + Integer(LChunk)] <> $0D) or
+       (LBytes[LDataStart + Integer(LChunk) + 1] <> $0A) then
+    begin AMalformed := True; Exit; end;
 
     LOldLen := Length(ABody);
     if Int64(LOldLen) + LChunk > AMaxBodySize then begin AMalformed := True; Exit; end;
@@ -362,7 +429,6 @@ function ParseHTTP1Request(
 // strings only for the final Method/Path/Headers values. Eliminates the big
 // GetString + 2 Split TArray allocations per request.
 const
-  MAX_HEADER_COUNT = 100;
   SP               = $20;
   HT               = $09;
   CR               = $0D;
@@ -391,6 +457,9 @@ var
   LValStart: Integer;
   LName, LValue: string;
   LCL: Int64;
+  LThisCL: Int64;
+  LCLSeen: Boolean;
+  LTEPresent: Boolean;
   LBodyStart: Integer;
   LConsumed: Integer;
   LHdrCount: Integer;
@@ -469,14 +538,18 @@ begin
 
   // --- Parse headers ---
   LCL        := 0;
+  LThisCL    := 0;
+  LCLSeen    := False;
+  LTEPresent := False;
   LIsChunked := False;
   LHdrCount  := 0;
-  SetLength(AHeaders, MAX_HEADER_COUNT);
+  SetLength(AHeaders, CMaxHeaderCount);
 
   LLineStart := LLineEnd + 2;
   while LLineStart < LHdrEnd do
   begin
-    if LHdrCount >= MAX_HEADER_COUNT then Break;
+    // Reject rather than silently truncate when the header count is exceeded.
+    if LHdrCount >= CMaxHeaderCount then begin ABadRequest := True; Exit; end;
 
     // Single-pass scan: find CRLF and colon in one loop using the LUT
     LLineEnd  := -1;
@@ -501,11 +574,22 @@ begin
       Continue;
     end;
 
+    // Reject obsolete line folding (obs-fold): a header line starting with
+    // SP/HT is a continuation — RFC 7230 §3.2.4 requires rejection (issue #162).
+    if (GLUT[ABuf[LLineStart]] and BF_OWS) <> 0 then
+    begin ABadRequest := True; Exit; end;
+
     if LColonPos < 0 then
     begin
       LLineStart := LLineEnd + 2;
       Continue;
     end;
+
+    // Reject whitespace before the colon ("Name : value") — an HTTP request
+    // smuggling vector (RFC 7230 §3.2.4) (issue #160).
+    if (LColonPos > LLineStart) and
+       ((GLUT[ABuf[LColonPos - 1]] and BF_OWS) <> 0) then
+    begin ABadRequest := True; Exit; end;
 
     // Skip OWS after colon using LUT
     LValStart := LColonPos + 1;
@@ -526,17 +610,35 @@ begin
           if Pos('close',      LowerCase(LValue)) > 0 then AKeepAlive := False;
         end;
       hiContentLength:
-        LCL := StrToInt64Def(LValue, 0);
+        begin
+          // Validate value; reject conflicting duplicate Content-Length
+          // headers (RFC 7230 §3.3.3, CL.CL smuggling) (issue #158).
+          if not _ParseContentLength(LValue, LThisCL) then
+          begin ABadRequest := True; Exit; end;
+          if LCLSeen and (LThisCL <> LCL) then
+          begin ABadRequest := True; Exit; end;
+          LCL     := LThisCL;
+          LCLSeen := True;
+        end;
       hiTransferEncoding:
-        LIsChunked := Pos('chunked', LowerCase(LValue)) > 0;
+        begin
+          LTEPresent := True;
+          LIsChunked := SameText(Trim(LValue), 'chunked');
+        end;
     end;
 
     LLineStart := LLineEnd + 2;
   end;
   SetLength(AHeaders, LHdrCount);
 
-  // Request smuggling guard — Content-Length + Transfer-Encoding: chunked (RFC 7230 §3.3.3)
-  if HasRequestSmuggling(LCL > 0, LIsChunked) then
+  // A Transfer-Encoding whose final coding is not "chunked" leaves the message
+  // length undeterminable — reject (RFC 7230 §3.3.3) (issue #160).
+  if LTEPresent and not LIsChunked then
+  begin ABadRequest := True; Exit; end;
+
+  // Request smuggling guard — Content-Length + Transfer-Encoding: chunked
+  // (RFC 7230 §3.3.3). Presence of CL (even "0") conflicts with chunked.
+  if HasRequestSmuggling(LCLSeen, LIsChunked) then
   begin
     ABadRequest := True;
     Exit;
@@ -558,6 +660,10 @@ begin
   end
   else
   begin
+    // Reject a declared body larger than the configured cap instead of waiting
+    // for bytes that would only ever trip the accumulation limit (issue #158).
+    if LCLSeen and (LCL > AMaxBodySize) then
+    begin ABadRequest := True; Exit; end;
     if LCL > 0 then
     begin
       if ABufLen - LBodyStart < LCL then Exit;
@@ -601,6 +707,10 @@ var
   I, LHdrEnd, LScanEnd, LLineEnd, LSpace1, LSpace2, LQPos: Integer;
   LLineStart, LColonPos, LValStart: Integer;
   LCL: Int64;
+  LThisCL: Int64;
+  LCLSeen: Boolean;
+  LTEPresent: Boolean;
+  LHdrCount: Integer;
   LIsHttp11, LIsChunked: Boolean;
   LBodyStart, LConsumed: Integer;
   LChunkBody: TBytes;
@@ -675,10 +785,17 @@ begin
   // Scan headers by BYTES only — detect Content-Length, Connection,
   // Transfer-Encoding without any string allocation
   LCL        := 0;
+  LThisCL    := 0;
+  LCLSeen    := False;
+  LTEPresent := False;
   LIsChunked := False;
+  LHdrCount  := 0;
   LLineStart := LLineEnd + 2;
   while LLineStart < LHdrEnd do
   begin
+    // Reject rather than silently ignore when the header count is exceeded.
+    if LHdrCount >= CMaxHeaderCount then begin ABadRequest := True; Exit; end;
+
     // Find end of line
     LLineEnd := -1;
     LColonPos := -1;
@@ -691,11 +808,28 @@ begin
       end;
     end;
     if LLineEnd < 0 then Break;
-    if (LLineEnd = LLineStart) or (LColonPos < 0) then
+    if LLineEnd = LLineStart then
     begin
       LLineStart := LLineEnd + 2;
       Continue;
     end;
+
+    // Reject obsolete line folding (obs-fold) — RFC 7230 §3.2.4 (issue #162).
+    if (GLUT[ABuf[LLineStart]] and BF_OWS) <> 0 then
+    begin ABadRequest := True; Exit; end;
+
+    if LColonPos < 0 then
+    begin
+      LLineStart := LLineEnd + 2;
+      Continue;
+    end;
+
+    // Reject whitespace before the colon ("Name : value") (issue #160).
+    if (LColonPos > LLineStart) and
+       ((GLUT[ABuf[LColonPos - 1]] and BF_OWS) <> 0) then
+    begin ABadRequest := True; Exit; end;
+
+    Inc(LHdrCount);
 
     // Skip OWS
     LValStart := LColonPos + 1;
@@ -707,14 +841,13 @@ begin
     case LookupHeaderId(@ABuf[LLineStart], LColonPos - LLineStart) of
       hiContentLength:
         begin
-          LCL := 0;
-          for I := LValStart to LLineEnd - 1 do
-          begin
-            if (ABuf[I] >= Ord('0')) and (ABuf[I] <= Ord('9')) then
-              LCL := LCL * 10 + (ABuf[I] - Ord('0'))
-            else
-              Break;
-          end;
+          // Validate; reject conflicting duplicate Content-Length (#158).
+          if not _ParseContentLengthBytes(ABuf, LValStart, LLineEnd, LThisCL) then
+          begin ABadRequest := True; Exit; end;
+          if LCLSeen and (LThisCL <> LCL) then
+          begin ABadRequest := True; Exit; end;
+          LCL     := LThisCL;
+          LCLSeen := True;
         end;
       hiConnection:
         begin
@@ -727,19 +860,22 @@ begin
         end;
       hiTransferEncoding:
         begin
-          if LValLen >= 7 then
-            for I := LValStart to LLineEnd - 7 do
-              if (ABuf[I] or $20 = Ord('c')) and (ABuf[I+1] or $20 = Ord('h')) and
-                 (ABuf[I+2] or $20 = Ord('u')) then
-              begin LIsChunked := True; Break; end;
+          // Require the coding to be exactly "chunked"; anything else leaves
+          // the message length undeterminable (issue #160).
+          LTEPresent := True;
+          LIsChunked := _BytesEqualCI(ABuf, LValStart, LLineEnd, 'chunked');
         end;
     end;
 
     LLineStart := LLineEnd + 2;
   end;
 
-  // Request smuggling check
-  if HasRequestSmuggling(LCL > 0, LIsChunked) then
+  // TE present but not chunked → reject (RFC 7230 §3.3.3) (issue #160).
+  if LTEPresent and not LIsChunked then
+  begin ABadRequest := True; Exit; end;
+
+  // Request smuggling check — CL presence (even "0") conflicts with chunked.
+  if HasRequestSmuggling(LCLSeen, LIsChunked) then
   begin ABadRequest := True; Exit; end;
 
   LBodyStart := LHdrEnd + 4;
@@ -758,6 +894,8 @@ begin
   end
   else
   begin
+    if LCLSeen and (LCL > AMaxBodySize) then
+    begin ABadRequest := True; Exit; end;
     if LCL > 0 then
     begin
       if ABufLen - LBodyStart < LCL then Exit;
@@ -779,15 +917,13 @@ end;
 
 function MaterializeHeaders(const ABuf: TBytes;
   AHdrStart, AHdrEnd: Integer): TArray<TPair<string,string>>;
-const
-  MAX_HEADER_COUNT = 100;
 var
   I, LLineStart, LLineEnd, LColonPos, LValStart, LCount: Integer;
 begin
-  SetLength(Result, MAX_HEADER_COUNT);
+  SetLength(Result, CMaxHeaderCount);
   LCount := 0;
   LLineStart := AHdrStart;
-  while (LLineStart < AHdrEnd) and (LCount < MAX_HEADER_COUNT) do
+  while (LLineStart < AHdrEnd) and (LCount < CMaxHeaderCount) do
   begin
     LLineEnd := -1;
     LColonPos := -1;

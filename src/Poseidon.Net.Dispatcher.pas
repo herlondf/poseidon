@@ -10,6 +10,10 @@ unit Poseidon.Net.Dispatcher;
 //                 ParseFull, UpgradeDetect, InvokeAndRespond]
 //   Lightweight: [SizeCheck, ParseLightweight, InvokeAndRespond]
 //
+// NOTE: the Lightweight pipeline (SyncDispatch) has no UpgradeDetection step and
+// materializes no headers, so WebSocket / h2c upgrades are unavailable in that
+// mode. Use the Full pipeline when upgrades must be supported (issue #165).
+//
 // Each step receives a stack-allocated TDispatchContext record and sets
 // Ctx.Handled := True to short-circuit the pipeline.
 //
@@ -424,7 +428,9 @@ var
 begin
   LConn := TNativeConn(ACtx.Conn);
 
-  if not SameText(ACtx.Req.Method, 'GET') then
+  // HTTP methods are case-sensitive (RFC 7230 §3.1.1); the WebSocket/h2c
+  // handshake mandates an uppercase "GET" (issue #166).
+  if ACtx.Req.Method <> 'GET' then
     Exit;
 
   LUpgrade := '';

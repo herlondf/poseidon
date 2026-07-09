@@ -26,6 +26,7 @@ implementation
 uses
   System.NetEncoding,
   System.Hash,
+  System.Generics.Collections,
   System.DateUtils;
 
 function DigestParam(const AHeader, AKey: string): string;

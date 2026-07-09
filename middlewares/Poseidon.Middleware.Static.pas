@@ -19,9 +19,11 @@ implementation
 uses
   System.SysUtils,
   System.Classes,
+  System.Generics.Collections,
   System.IOUtils,
   System.DateUtils,
-  System.ZLib;
+  System.ZLib,
+  Poseidon.Net.Security;
 
 const
   CMimeMap: array[0..23] of array[0..1] of string = (
@@ -146,7 +148,10 @@ begin
       end;
 
       LRelative := ACtx.Path.Substring(Length(LPrefix));
-      if LRelative.Contains('..') then
+      // Reject path-traversal in all forms (literal "..", encoded %2e%2e,
+      // backslash, NUL) via the shared validator (issue #163). The canonical
+      // StartsWith(LRoot) check below is a second, defence-in-depth layer.
+      if not IsPathSafe(LRelative) then
       begin
         ACtx.Status := 403;
         ACtx.Body := nil;

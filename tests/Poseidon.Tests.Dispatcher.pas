@@ -487,7 +487,7 @@ var
   LConfig: TDispatchConfig;
 begin
   LConn   := MakeConn('GET', '/ws');
-  LConn.WSMode := CM_WEBSOCKET;
+  LConn.WSMode := CCMWebSocket;
   LMock   := TMockCallbacks.Create;
   LConfig := DefaultConfig;
   try
@@ -507,7 +507,7 @@ var
   LConfig: TDispatchConfig;
 begin
   LConn   := MakeConn('GET', '/ws');
-  LConn.WSMode := CM_WEBSOCKET;
+  LConn.WSMode := CCMWebSocket;
   LMock   := TMockCallbacks.Create;
   LConfig := DefaultConfig;
   try

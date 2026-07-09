@@ -92,7 +92,7 @@ type
     FCQs: TArray<TRIO_CQ>;
     FCQLocks: TArray<TCriticalSection>;
     FCallbacks: IIOCallbacks;
-    FShutdown: Integer;  // 0=running, 1=shutdown; atomic via TInterlocked
+    FShutdown: Int64;  // 0=running, 1=shutdown; atomic via TInterlocked (Read requires Int64)
     FNextCQ: Integer;
     // Pre-allocated recv pool
     FRecvPool: Pointer;
@@ -313,7 +313,7 @@ begin
 
   if WSAIoctl(LSocket, SIO_GET_MULTIPLE_EXTENSION_FUNCTION_POINTER,
     @WSAID_MULTIPLE_RIO, SizeOf(WSAID_MULTIPLE_RIO),
-    @FRio, SizeOf(FRio), @LBytes, nil, nil) <> 0 then
+    @FRio, SizeOf(FRio), LBytes, nil, nil) <> 0 then
   begin
     closesocket(LSocket);
     raise ENotSupportedException.Create(
@@ -611,6 +611,7 @@ var
   LBuf: TRIO_BUF;
   LReqCtx: UInt64;
   LSlotIdx: Integer;
+  LRelTmp: TBytes;
 begin
   LSendLen := AActualLen;
   if LSendLen = 0 then LSendLen := Length(AData);
@@ -652,7 +653,8 @@ begin
     if LSendCtx^.BufId = CRIOInvalidBufId then
     begin
       Dispose(LSendCtx);
-      TBufferPool.Release(AData);
+      LRelTmp := AData;                 // AData is const; Release needs a var
+      TBufferPool.Release(LRelTmp);
       FCallbacks.OnConnError(AConn);
       Exit;
     end;

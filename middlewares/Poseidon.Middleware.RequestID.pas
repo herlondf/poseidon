@@ -10,7 +10,8 @@ function RequestIDMiddleware: TNativeMiddlewareFunc;
 implementation
 
 uses
-  System.SysUtils;
+  System.SysUtils,
+  System.Generics.Collections;
 
 procedure AddHeader(var ACtx: TNativeRequestContext; const AName, AValue: string); forward;
 

@@ -70,6 +70,7 @@ function DefaultErrorBody: TBytes;
 implementation
 
 uses
+  System.DateUtils,
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.Pool.Arena;
 
@@ -110,6 +111,100 @@ begin
       Exit;
     end;
   Result := AValue;
+end;
+
+// Reason phrase for status codes not covered by the pre-encoded status lines.
+function _ReasonPhrase(AStatus: Integer): string;
+begin
+  case AStatus of
+    100: Result := 'Continue';
+    101: Result := 'Switching Protocols';
+    202: Result := 'Accepted';
+    206: Result := 'Partial Content';
+    307: Result := 'Temporary Redirect';
+    308: Result := 'Permanent Redirect';
+    402: Result := 'Payment Required';
+    406: Result := 'Not Acceptable';
+    408: Result := 'Request Timeout';
+    410: Result := 'Gone';
+    411: Result := 'Length Required';
+    415: Result := 'Unsupported Media Type';
+    428: Result := 'Precondition Required';
+    431: Result := 'Request Header Fields Too Large';
+    451: Result := 'Unavailable For Legal Reasons';
+    500: Result := 'Internal Server Error';
+    501: Result := 'Not Implemented';
+    502: Result := 'Bad Gateway';
+    504: Result := 'Gateway Timeout';
+    505: Result := 'HTTP Version Not Supported';
+  else
+    Result := 'Unknown';
+  end;
+end;
+
+// RFC 7230 §3.3.2: 1xx, 204 and 304 responses carry no message body and must
+// not emit a Content-Length header.
+function _StatusHasBody(AStatus: Integer): Boolean;
+begin
+  Result := not ((AStatus = 204) or (AStatus = 304) or
+                 ((AStatus >= 100) and (AStatus <= 199)));
+end;
+
+// Per-thread cache of the formatted Date string, refreshed at most once per
+// second — avoids a DecodeDate/Format on every response while staying
+// lock-free (each IO thread owns its own copy).
+threadvar
+  GDateCacheSec: Int64;
+  GDateCacheStr: string;
+
+// Current time as an RFC 1123 HTTP-date in GMT, using fixed English names
+// (independent of the process locale). Emitted as the Date response header.
+function _HTTPDateNow: string;
+const
+  CDays: array[1..7] of string =
+    ('Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat');
+  CMonths: array[1..12] of string =
+    ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
+var
+  LUtc: TDateTime;
+  LSec: Int64;
+  LY, LMo, LD: Word;
+  LH, LMi, LS, LMs: Word;
+begin
+  LUtc := TTimeZone.Local.ToUniversalTime(Now);
+  LSec := Round(LUtc * SecsPerDay);
+  if (LSec <> GDateCacheSec) or (GDateCacheStr = '') then
+  begin
+    DecodeDate(LUtc, LY, LMo, LD);
+    DecodeTime(LUtc, LH, LMi, LS, LMs);
+    GDateCacheStr := Format('%s, %.2d %s %.4d %.2d:%.2d:%.2d GMT',
+      [CDays[DayOfWeek(LUtc)], LD, CMonths[LMo], LY, LH, LMi, LS]);
+    GDateCacheSec := LSec;
+  end;
+  Result := GDateCacheStr;
+end;
+
+// Builds the trailing header block (application-supplied Extra headers, opt-in
+// security headers, Server banner, Date) exactly once. Both the header name
+// and value are sanitized to prevent response splitting (issue #159).
+function _BuildExtraStr(const AExtra: TArray<TPair<string,string>>;
+  ASecureHeaders: Boolean; const AServerBanner: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to High(AExtra) do
+    Result := Result + _SanitizeHeaderValue(AExtra[I].Key) + ': ' +
+      _SanitizeHeaderValue(AExtra[I].Value) + #13#10;
+  if ASecureHeaders then
+    Result := Result
+      + 'X-Content-Type-Options: nosniff'#13#10
+      + 'X-Frame-Options: DENY'#13#10
+      + 'Referrer-Policy: strict-origin-when-cross-origin'#13#10;
+  if AServerBanner <> '' then
+    Result := Result + 'Server: ' + AServerBanner + #13#10;
+  Result := Result + 'Date: ' + _HTTPDateNow + #13#10;
 end;
 
 function DigitCount(AValue: Integer): Integer; inline;
@@ -191,9 +286,9 @@ begin
     500: Result := G_STATUS_500;
     503: Result := G_STATUS_503;
   else
-    // Slow path for uncommon codes — build inline.
+    // Slow path for uncommon codes — build inline with a proper reason phrase.
     Result := TEncoding.ASCII.GetBytes(
-      'HTTP/1.1 ' + IntToStr(AStatus) + ' Unknown'#13#10);
+      'HTTP/1.1 ' + IntToStr(AStatus) + ' ' + _ReasonPhrase(AStatus) + #13#10);
   end;
 end;
 
@@ -205,40 +300,26 @@ end;
 
 function _BuildCore(ABuf: TBytes; AStatus: Integer;
   const AContentType: string; const ABody: TBytes; AKeepAlive: Boolean;
-  const AExtra: TArray<TPair<string,string>>;
-  ASecureHeaders: Boolean; const AServerBanner: string): Integer;
+  const AExtraStr: string): Integer;
 var
   LStatusBytes: TBytes;
   LConnBytes: TBytes;
   LCTValue: TBytes;
   LCTAlloced: Boolean;
-  LExtraStr: string;
   LBodyLen, LCLLen, LExtraLen: Integer;
   LPos: Integer;
-  I: Integer;
+  LEmitCL: Boolean;
 begin
   LStatusBytes := GetStatusLineBytes(AStatus);
   if AKeepAlive then LConnBytes := G_CONN_KA
   else LConnBytes := G_CONN_CLOSE;
 
   LCTValue := GetContentTypeValueBytes(AContentType, LCTAlloced);
-  LBodyLen := Length(ABody);
+  LEmitCL  := _StatusHasBody(AStatus);
+  if LEmitCL then LBodyLen := Length(ABody) else LBodyLen := 0;
   LCLLen := DigitCount(LBodyLen);
 
-  LExtraStr := '';
-  for I := 0 to High(AExtra) do
-    LExtraStr := LExtraStr + AExtra[I].Key + ': ' +
-      _SanitizeHeaderValue(AExtra[I].Value) + #13#10;
-  // Opt-in security headers
-  if ASecureHeaders then
-    LExtraStr := LExtraStr
-      + 'X-Content-Type-Options: nosniff'#13#10
-      + 'X-Frame-Options: DENY'#13#10
-      + 'Referrer-Policy: strict-origin-when-cross-origin'#13#10;
-  // Configurable Server: banner
-  if AServerBanner <> '' then
-    LExtraStr := LExtraStr + 'Server: ' + AServerBanner + #13#10;
-  LExtraLen := Length(LExtraStr);
+  LExtraLen := Length(AExtraStr);
 
   LPos := 0;
 
@@ -257,18 +338,21 @@ begin
     ABuf[LPos] := $0D; ABuf[LPos + 1] := $0A; Inc(LPos, 2);
   end;
 
-  Move(G_CL_PREFIX[0], ABuf[LPos], Length(G_CL_PREFIX));
-  Inc(LPos, Length(G_CL_PREFIX));
-  WriteIntToBuffer(ABuf, LPos, LBodyLen);
-  Inc(LPos, LCLLen);
-  ABuf[LPos] := $0D; ABuf[LPos + 1] := $0A; Inc(LPos, 2);
+  if LEmitCL then
+  begin
+    Move(G_CL_PREFIX[0], ABuf[LPos], Length(G_CL_PREFIX));
+    Inc(LPos, Length(G_CL_PREFIX));
+    WriteIntToBuffer(ABuf, LPos, LBodyLen);
+    Inc(LPos, LCLLen);
+    ABuf[LPos] := $0D; ABuf[LPos + 1] := $0A; Inc(LPos, 2);
+  end;
 
   Move(LConnBytes[0], ABuf[LPos], Length(LConnBytes));
   Inc(LPos, Length(LConnBytes));
 
   if LExtraLen > 0 then
   begin
-    TEncoding.ASCII.GetBytes(LExtraStr, 1, LExtraLen, ABuf, LPos);
+    TEncoding.ASCII.GetBytes(AExtraStr, 1, LExtraLen, ABuf, LPos);
     Inc(LPos, LExtraLen);
   end;
 
@@ -282,47 +366,35 @@ begin
 end;
 
 function _CalcTotal(AStatus: Integer; const AContentType: string;
-  const ABody: TBytes; AKeepAlive: Boolean;
-  const AExtra: TArray<TPair<string,string>>;
-  ASecureHeaders: Boolean; const AServerBanner: string): Integer;
+  ABodyLen: Integer; AKeepAlive: Boolean; const AExtraStr: string): Integer;
 var
   LStatusBytes: TBytes;
   LConnBytes: TBytes;
   LCTValue: TBytes;
   LCTAlloced: Boolean;
-  LExtraStr: string;
-  LBodyLen, LCLLen, LExtraLen, LCTLen: Integer;
-  I: Integer;
+  LCLLen, LCTLen, LCLBlock: Integer;
 begin
   LStatusBytes := GetStatusLineBytes(AStatus);
   if AKeepAlive then LConnBytes := G_CONN_KA
   else LConnBytes := G_CONN_CLOSE;
   LCTValue := GetContentTypeValueBytes(AContentType, LCTAlloced);
-  LBodyLen := Length(ABody);
-  LCLLen := DigitCount(LBodyLen);
-  LExtraStr := '';
-  for I := 0 to High(AExtra) do
-    LExtraStr := LExtraStr + AExtra[I].Key + ': ' +
-      _SanitizeHeaderValue(AExtra[I].Value) + #13#10;
-  if ASecureHeaders then
-    LExtraStr := LExtraStr
-      + 'X-Content-Type-Options: nosniff'#13#10
-      + 'X-Frame-Options: DENY'#13#10
-      + 'Referrer-Policy: strict-origin-when-cross-origin'#13#10;
-  if AServerBanner <> '' then
-    LExtraStr := LExtraStr + 'Server: ' + AServerBanner + #13#10;
-  LExtraLen := Length(LExtraStr);
+  if not _StatusHasBody(AStatus) then ABodyLen := 0;
+  LCLLen := DigitCount(ABodyLen);
   if AContentType <> '' then
     LCTLen := Length(G_CT_PREFIX) + Length(LCTValue) + 2
   else
     LCTLen := 0;
+  if _StatusHasBody(AStatus) then
+    LCLBlock := Length(G_CL_PREFIX) + LCLLen + 2
+  else
+    LCLBlock := 0;
   Result := Length(LStatusBytes)
           + LCTLen
-          + Length(G_CL_PREFIX) + LCLLen + 2
+          + LCLBlock
           + Length(LConnBytes)
-          + LExtraLen
+          + Length(AExtraStr)
           + Length(G_CRLF)
-          + LBodyLen;
+          + ABodyLen;
 end;
 
 // ---------------------------------------------------------------------------
@@ -336,12 +408,13 @@ function BuildHTTPResponse(AStatus: Integer;
 // Hot path: pre-cached fragments are Move()'d into Result.
 var
   LTotal: Integer;
+  LExtraStr: string;
 begin
-  LTotal := _CalcTotal(AStatus, AContentType, ABody, AKeepAlive,
-    AExtra, ASecureHeaders, AServerBanner);
+  LExtraStr := _BuildExtraStr(AExtra, ASecureHeaders, AServerBanner);
+  LTotal := _CalcTotal(AStatus, AContentType, Length(ABody), AKeepAlive,
+    LExtraStr);
   SetLength(Result, LTotal);
-  _BuildCore(Result, AStatus, AContentType, ABody, AKeepAlive,
-    AExtra, ASecureHeaders, AServerBanner);
+  _BuildCore(Result, AStatus, AContentType, ABody, AKeepAlive, LExtraStr);
 end;
 
 function BuildHTTPResponsePooled(AStatus: Integer;
@@ -354,12 +427,14 @@ function BuildHTTPResponsePooled(AStatus: Integer;
 // AActualLen to the send layer and release the buffer after send.
 var
   LTotal: Integer;
+  LExtraStr: string;
 begin
-  LTotal := _CalcTotal(AStatus, AContentType, ABody, AKeepAlive,
-    AExtra, ASecureHeaders, AServerBanner);
+  LExtraStr := _BuildExtraStr(AExtra, ASecureHeaders, AServerBanner);
+  LTotal := _CalcTotal(AStatus, AContentType, Length(ABody), AKeepAlive,
+    LExtraStr);
   Result := TBufferPool.Acquire(LTotal);
   AActualLen := _BuildCore(Result, AStatus, AContentType, ABody, AKeepAlive,
-    AExtra, ASecureHeaders, AServerBanner);
+    LExtraStr);
 end;
 
 // Build headers only — body sent separately via vectored I/O.
@@ -375,35 +450,31 @@ var
   LCTValue: TBytes;
   LCTAlloced: Boolean;
   LExtraStr: string;
-  LCLLen, LExtraLen, LCTLen: Integer;
+  LCLLen, LExtraLen, LCTLen, LCLBlock: Integer;
   LTotal, LPos: Integer;
-  I: Integer;
+  LEmitCL: Boolean;
 begin
   LStatusBytes := GetStatusLineBytes(AStatus);
   if AKeepAlive then LConnBytes := G_CONN_KA
   else LConnBytes := G_CONN_CLOSE;
   LCTValue := GetContentTypeValueBytes(AContentType, LCTAlloced);
+  LEmitCL  := _StatusHasBody(AStatus);
+  if not LEmitCL then ABodyLen := 0;
   LCLLen := DigitCount(ABodyLen);
 
-  LExtraStr := '';
-  for I := 0 to High(AExtra) do
-    LExtraStr := LExtraStr + AExtra[I].Key + ': ' +
-      _SanitizeHeaderValue(AExtra[I].Value) + #13#10;
-  if ASecureHeaders then
-    LExtraStr := LExtraStr
-      + 'X-Content-Type-Options: nosniff'#13#10
-      + 'X-Frame-Options: DENY'#13#10
-      + 'Referrer-Policy: strict-origin-when-cross-origin'#13#10;
-  if AServerBanner <> '' then
-    LExtraStr := LExtraStr + 'Server: ' + AServerBanner + #13#10;
+  LExtraStr := _BuildExtraStr(AExtra, ASecureHeaders, AServerBanner);
   LExtraLen := Length(LExtraStr);
 
   if AContentType <> '' then
     LCTLen := Length(G_CT_PREFIX) + Length(LCTValue) + 2
   else
     LCTLen := 0;
+  if LEmitCL then
+    LCLBlock := Length(G_CL_PREFIX) + LCLLen + 2
+  else
+    LCLBlock := 0;
   LTotal := Length(LStatusBytes) + LCTLen
-          + Length(G_CL_PREFIX) + LCLLen + 2
+          + LCLBlock
           + Length(LConnBytes) + LExtraLen + Length(G_CRLF);
 
   // Thread-local arena avoids pool round-trip in SyncDispatch
@@ -426,11 +497,14 @@ begin
     end;
     Result[LPos] := $0D; Result[LPos + 1] := $0A; Inc(LPos, 2);
   end;
-  Move(G_CL_PREFIX[0], Result[LPos], Length(G_CL_PREFIX));
-  Inc(LPos, Length(G_CL_PREFIX));
-  WriteIntToBuffer(Result, LPos, ABodyLen);
-  Inc(LPos, LCLLen);
-  Result[LPos] := $0D; Result[LPos + 1] := $0A; Inc(LPos, 2);
+  if LEmitCL then
+  begin
+    Move(G_CL_PREFIX[0], Result[LPos], Length(G_CL_PREFIX));
+    Inc(LPos, Length(G_CL_PREFIX));
+    WriteIntToBuffer(Result, LPos, ABodyLen);
+    Inc(LPos, LCLLen);
+    Result[LPos] := $0D; Result[LPos + 1] := $0A; Inc(LPos, 2);
+  end;
   Move(LConnBytes[0], Result[LPos], Length(LConnBytes));
   Inc(LPos, Length(LConnBytes));
   if LExtraLen > 0 then

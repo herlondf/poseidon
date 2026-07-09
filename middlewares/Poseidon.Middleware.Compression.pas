@@ -19,6 +19,7 @@ implementation
 uses
   System.SysUtils,
   System.Classes,
+  System.Generics.Collections,
   System.ZLib;
 
 function IsCompressibleType(const AContentType: string): Boolean;

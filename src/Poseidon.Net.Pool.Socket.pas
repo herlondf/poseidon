@@ -98,7 +98,7 @@ begin
   LBytes := 0;
   if WSAIoctl(ASocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FDisconnectEx, SizeOf(FDisconnectEx),
-    @LBytes, nil, nil) = 0 then
+    LBytes, nil, nil) = 0 then
     FLoaded := True;
 end;
 

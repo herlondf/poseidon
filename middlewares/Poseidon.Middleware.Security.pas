@@ -30,7 +30,8 @@ function DefaultSecurityOptions: TSecurityOptions;
 implementation
 
 uses
-  System.SysUtils;
+  System.SysUtils,
+  System.Generics.Collections;
 
 function DefaultSecurityOptions: TSecurityOptions;
 begin

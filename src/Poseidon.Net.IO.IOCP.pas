@@ -27,7 +27,7 @@ type
     FListenSocket: TSocket;
     FWorkers: TArray<TThread>;
     FCallbacks: IIOCallbacks;
-    FShutdown: Integer;  // 0=running, 1=shutdown; atomic via TInterlocked
+    FShutdown: Int64;  // 0=running, 1=shutdown; atomic via TInterlocked (Read requires Int64)
     FAcceptEx: Pointer;
     FGetAcceptExSockaddrs: Pointer;
     FAcceptCtxs: array of Pointer;  // PAcceptCtx, allocated in StartListening
@@ -259,21 +259,21 @@ begin
   LBytes := 0;
   LGuid := WSAID_ACCEPTEX;
   LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
-    @LGuid, SizeOf(LGuid), @FAcceptEx, SizeOf(FAcceptEx), @LBytes, nil, nil);
+    @LGuid, SizeOf(LGuid), @FAcceptEx, SizeOf(FAcceptEx), LBytes, nil, nil);
   if LRes <> 0 then
     raise Exception.Create('WSAIoctl failed to load AcceptEx');
 
   LGuid := WSAID_GETACCEPTEXSOCKADDRS;
   LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FGetAcceptExSockaddrs, SizeOf(FGetAcceptExSockaddrs),
-    @LBytes, nil, nil);
+    LBytes, nil, nil);
   if LRes <> 0 then
     raise Exception.Create('WSAIoctl failed to load GetAcceptExSockaddrs');
 
   LGuid := StringToGUID('{7FDA2E11-8630-436F-A031-F536A6EEC157}');
   LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FDisconnectEx, SizeOf(FDisconnectEx),
-    @LBytes, nil, nil);
+    LBytes, nil, nil);
   if LRes <> 0 then
     FDisconnectEx := nil;  // DisconnectEx is optional; fallback to closesocket
 end;
@@ -732,7 +732,7 @@ begin
           LKA.KeepAliveInterval := CKeepAliveInterval;
           LBytesRet := 0;
           WSAIoctl(LAcceptCtx^.AcceptSocket, CSIO_KEEPALIVE_VALS,
-            @LKA, SizeOf(LKA), nil, 0, @LBytesRet, nil, nil);
+            @LKA, SizeOf(LKA), nil, 0, LBytesRet, nil, nil);
 
           LLocalAddr := nil;
           LRemoteAddr := nil;

@@ -296,7 +296,7 @@ begin
   LClient := THTTPClient.Create;
   try
     LResponse := LClient.Get(BASE_URL + '/echo/Poseidon',
-      [TNameValuePair.Create('Connection', 'close')]);
+      nil, [TNameValuePair.Create('Connection', 'close')]);
     Assert.AreEqual(200, LResponse.StatusCode);
     Assert.IsTrue(LResponse.ContentAsString.Contains('"param":"Poseidon"'));
   finally
@@ -331,7 +331,7 @@ begin
   try
     LClient.HandleRedirects := False;
     LResponse := LClient.Get(BASE_URL + '/nao-existe',
-      [TNameValuePair.Create('Connection', 'close')]);
+      nil, [TNameValuePair.Create('Connection', 'close')]);
     Assert.AreEqual(404, LResponse.StatusCode);
   finally
     LClient.Free;

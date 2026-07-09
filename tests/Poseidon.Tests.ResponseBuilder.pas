@@ -29,6 +29,7 @@ type
     function ResponseToString(const ABytes: TBytes): string;
     function HasHeader(const AResponse, AName, AValue: string): Boolean;
     function HasStatusLine(const AResponse: string; AExpected: string): Boolean;
+    function StripDateLine(const AResponse: string): string;
   public
     [Test] procedure Status200_ContainsOKStatusLine;
     [Test] procedure Status404_ContainsNotFoundStatusLine;
@@ -98,6 +99,18 @@ function TResponseBuilderTests.HasStatusLine(const AResponse: string;
   AExpected: string): Boolean;
 begin
   Result := Pos(AExpected, AResponse) = 1;
+end;
+
+function TResponseBuilderTests.StripDateLine(const AResponse: string): string;
+var
+  LStart, LEnd: Integer;
+begin
+  Result := AResponse;
+  LStart := Pos('Date: ', Result);
+  if LStart <= 0 then Exit;
+  LEnd := Pos(#13#10, Result, LStart);
+  if LEnd <= 0 then Exit;
+  Delete(Result, LStart, LEnd - LStart + 2);
 end;
 
 procedure TResponseBuilderTests.Status200_ContainsOKStatusLine;
@@ -343,8 +356,9 @@ begin
   LResp := ResponseToString(
     BuildHTTPResponse(204, '', [], False, [], False, ''));
   Assert.IsTrue(HasStatusLine(LResp, 'HTTP/1.1 204 No Content'));
-  Assert.IsTrue(HasHeader(LResp, 'Content-Length', '0'),
-    '204 with empty body must have Content-Length: 0');
+  // RFC 7230 §3.3.2: a 204 response MUST NOT include Content-Length.
+  Assert.IsFalse(Pos('Content-Length:', LResp) > 0,
+    '204 must not emit a Content-Length header');
 end;
 
 procedure TResponseBuilderTests.Status_301_WithLocationHeader;
@@ -431,12 +445,12 @@ begin
   LPooled    := BuildHTTPResponsePooled(200, 'text/plain', LBody, True, [],
     False, 'Test/1.0', LActualLen);
   try
-    SetLength(LPooledStr, LActualLen);
-    Move(LPooled[0], LPooledStr[1], LActualLen);
-    LNonPoolStr := TEncoding.ASCII.GetString(LNonPooled);
-    // Compare as raw strings to catch byte-level differences
-    Assert.AreEqual(LNonPoolStr,
-      TEncoding.ASCII.GetString(Copy(LPooled, 0, LActualLen)),
+    // The Date header value can differ by a second between the two calls;
+    // it is fixed-length, so strip it before comparing the rest byte-for-byte.
+    LNonPoolStr := StripDateLine(TEncoding.ASCII.GetString(LNonPooled));
+    LPooledStr  := StripDateLine(
+      TEncoding.ASCII.GetString(Copy(LPooled, 0, LActualLen)));
+    Assert.AreEqual(LNonPoolStr, LPooledStr,
       'Pooled response content must be identical to non-pooled response');
   finally
     TBufferPool.Release(LPooled);

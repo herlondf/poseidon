@@ -26,7 +26,8 @@ function DefaultCORSOptions: TCORSOptions;
 implementation
 
 uses
-  System.SysUtils;
+  System.SysUtils,
+  System.Generics.Collections;
 
 function DefaultCORSOptions: TCORSOptions;
 begin

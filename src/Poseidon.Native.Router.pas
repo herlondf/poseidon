@@ -47,10 +47,19 @@ type
     constructor Create;
     destructor Destroy; override;
 
+    // Routes must be registered before the server starts serving. Lookup
+    // returns interior pointers into the backing TList arrays; adding routes
+    // after serving has begun may reallocate those arrays and invalidate
+    // pointers held by in-flight requests (issue #167).
     procedure AddRoute(const AMethod, APath: string;
       const AEntry: TNativeRouteEntry);
     procedure AddGlobalMiddleware(const AEntry: TNativeMiddlewareEntry);
 
+    // Method matching is case-sensitive for both static and parameterised
+    // routes (HTTP methods are case-sensitive, RFC 7230 §3.1.1). Literal path
+    // segments and static paths are matched against the raw (still
+    // percent-encoded) request path; only captured parameter values are
+    // percent-decoded (issue #168).
     function Lookup(const AMethod, APath: string;
       var ACtx: TNativeRequestContext): PNativeRouteEntry;
 
@@ -157,7 +166,9 @@ begin
     LSegCount := Length(LSegments);
     for I := 0 to FParamRoutes.Count - 1 do
     begin
-      if not SameText(FParamRoutes[I].Method, AMethod) then Continue;
+      // Case-sensitive method match — consistent with the static route
+      // dictionary key (issue #166).
+      if FParamRoutes[I].Method <> AMethod then Continue;
       if FParamRoutes[I].SegmentCount <> LSegCount then Continue;
       if MatchParam(FParamRoutes[I], LSegments, ACtx) then
       begin
