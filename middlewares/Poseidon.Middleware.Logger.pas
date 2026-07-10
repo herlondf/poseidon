@@ -26,7 +26,39 @@ implementation
 
 uses
   System.Classes,
+  System.SyncObjs,
   System.Diagnostics;
+
+// Escapes a string for embedding inside a JSON string literal. Escapes the
+// characters JSON requires (quote, backslash, control chars) but NOT '/', so
+// paths stay readable ("/test", not "\/test"). Prevents log-line injection via
+// client-controlled values (path, X-Request-ID).
+function JSONEscape(const S: string): string;
+var
+  I: Integer;
+  LSB: TStringBuilder;
+begin
+  LSB := TStringBuilder.Create;
+  try
+    for I := 1 to Length(S) do
+      case S[I] of
+        '"': LSB.Append('\"');
+        '\': LSB.Append('\\');
+        #8:  LSB.Append('\b');
+        #9:  LSB.Append('\t');
+        #10: LSB.Append('\n');
+        #12: LSB.Append('\f');
+        #13: LSB.Append('\r');
+        #0..#7, #11, #14..#31:
+          LSB.Append('\u').Append(IntToHex(Ord(S[I]), 4));
+      else
+        LSB.Append(S[I]);
+      end;
+    Result := LSB.ToString;
+  finally
+    LSB.Free;
+  end;
+end;
 
 procedure DefaultOutput(const ALine: string);
 begin
@@ -82,26 +114,41 @@ begin
       ANext();
       LSW.Stop;
       LReqID := FindExtraHeader(ACtx, 'X-Request-ID');
+      // Escape client-controlled values (path, id from X-Request-ID) so they
+      // cannot break the line and inject a forged log entry.
       AOutput(Format(
         '{"ts":"%s","method":"%s","path":"%s","status":%d,"ms":%d,"ip":"%s","id":"%s"}',
         [FormatDateTime('yyyy-mm-dd"T"hh:nn:ss.zzz', Now),
-         ACtx.Method, ACtx.Path, ACtx.Status,
-         LSW.ElapsedMilliseconds, ACtx.RemoteAddr, LReqID]));
+         JSONEscape(ACtx.Method), JSONEscape(ACtx.Path), ACtx.Status,
+         LSW.ElapsedMilliseconds, JSONEscape(ACtx.RemoteAddr), JSONEscape(LReqID)]));
     end;
 end;
 
 function LogToFile(const AFileName: string): TLogOutput;
+var
+  LLock: TCriticalSection;
+  LStream: TFileStream;
 begin
+  // #182: open the file ONCE and serialize writes with a lock. Creating a new
+  // TStreamWriter per line raced across worker threads (Windows sharing
+  // violation; Linux interleaved partial lines / corrupted file).
+  if FileExists(AFileName) then
+    LStream := TFileStream.Create(AFileName, fmOpenReadWrite or fmShareDenyWrite)
+  else
+    LStream := TFileStream.Create(AFileName, fmCreate or fmShareDenyWrite);
+  LStream.Seek(0, soEnd);
+  LLock := TCriticalSection.Create;
   Result :=
     procedure(const ALine: string)
     var
-      LFile: TStreamWriter;
+      LBytes: TBytes;
     begin
-      LFile := TStreamWriter.Create(AFileName, True, TEncoding.UTF8);
+      LBytes := TEncoding.UTF8.GetBytes(ALine + sLineBreak);
+      LLock.Enter;
       try
-        LFile.WriteLine(ALine);
+        LStream.WriteBuffer(LBytes[0], Length(LBytes));
       finally
-        LFile.Free;
+        LLock.Leave;
       end;
     end;
 end;

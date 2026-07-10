@@ -16,12 +16,15 @@ implementation
 
 uses
   System.SysUtils,
+  System.JSON,
   Poseidon.Exception;
 
 function ValidationMiddleware: TNativeMiddlewareFunc;
 begin
   Result :=
     procedure(var ACtx: TNativeRequestContext; ANext: TProc)
+    var
+      LObj: TJSONObject;
     begin
       try
         ANext();
@@ -30,11 +33,17 @@ begin
         begin
           ACtx.Status := 422;
           ACtx.ContentType := 'application/problem+json';
-          ACtx.Body := TEncoding.UTF8.GetBytes(
-            '{"type":"about:blank",' +
-            '"title":"Unprocessable Entity",' +
-            '"status":422,' +
-            '"detail":"' + E.Message + '"}');
+          // Build via TJSONObject so E.Message is escaped (no JSON injection).
+          LObj := TJSONObject.Create;
+          try
+            LObj.AddPair('type', 'about:blank');
+            LObj.AddPair('title', 'Unprocessable Entity');
+            LObj.AddPair('status', TJSONNumber.Create(422));
+            LObj.AddPair('detail', E.Message);
+            ACtx.Body := TEncoding.UTF8.GetBytes(LObj.ToJSON);
+          finally
+            LObj.Free;
+          end;
         end;
       end;
     end;
