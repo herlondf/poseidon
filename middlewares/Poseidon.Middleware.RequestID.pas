@@ -24,6 +24,22 @@ begin
   ACtx.ExtraHeaders[LLen] := TPair<string,string>.Create(AName, AValue);
 end;
 
+// #M21: a client-supplied X-Request-ID is echoed into the response header and
+// into logs. Accept it only if it is short and made of safe visible ASCII —
+// otherwise a CR/LF would enable header injection / log forging.
+function IsSafeRequestID(const AID: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  if (AID = '') or (Length(AID) > 128) then
+    Exit;
+  for I := 1 to Length(AID) do
+    if (AID[I] < #$21) or (AID[I] > #$7E) then
+      Exit;
+  Result := True;
+end;
+
 function RequestIDMiddleware: TNativeMiddlewareFunc;
 begin
   Result :=
@@ -32,7 +48,7 @@ begin
       LID: string;
     begin
       LID := ACtx.Header('X-Request-ID');
-      if LID = '' then
+      if not IsSafeRequestID(LID) then
         LID := TGUID.NewGuid.ToString.Replace('{', '').Replace('}', '').ToLower;
 
       AddHeader(ACtx, 'X-Request-ID', LID);

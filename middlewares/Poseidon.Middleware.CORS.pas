@@ -50,6 +50,14 @@ end;
 
 function CORSMiddleware(const AOptions: TCORSOptions): TNativeMiddlewareFunc;
 begin
+  // #M22: the CORS spec forbids credentialed requests with a wildcard origin
+  // (browsers reject it and it defeats the SOP). Fail fast at setup rather than
+  // emit an invalid combination on every response.
+  if AOptions.AllowCredentials and (AOptions.AllowOrigin.Trim = '*') then
+    raise Exception.Create(
+      'CORS misconfiguration: AllowCredentials=true cannot be combined with ' +
+      'AllowOrigin="*". Specify an explicit origin.');
+
   Result :=
     procedure(var ACtx: TNativeRequestContext; ANext: TProc)
     begin

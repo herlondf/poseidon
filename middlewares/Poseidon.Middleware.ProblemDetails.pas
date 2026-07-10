@@ -45,10 +45,13 @@ begin
         end;
         on E: Exception do
         begin
+          // #M20: do NOT leak the raw message of an unexpected exception to the
+          // client (may carry stack/SQL/path internals). EPoseidonException
+          // above is app-controlled and intentional; a generic Exception is not.
           LProblem.TypeURI := 'about:blank';
           LProblem.Title := 'Internal Server Error';
           LProblem.Status := 500;
-          LProblem.Detail := E.Message;
+          LProblem.Detail := 'An unexpected error occurred.';
           LProblem.Instance := ACtx.Path;
           LJson := LProblem.ToJSON;
           try

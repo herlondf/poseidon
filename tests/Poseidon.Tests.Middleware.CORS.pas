@@ -105,6 +105,9 @@ var
   LOpts: TCORSOptions;
 begin
   LOpts := DefaultCORSOptions;
+  // Credentials require an explicit origin — '*' + credentials is rejected by
+  // the spec (and now by the middleware), so the valid config uses a real origin.
+  LOpts.AllowOrigin := 'https://example.com';
   LOpts.AllowCredentials := True;
   LCtx := TContextBuilder.New.Path('/test').Build;
   LMw := CORSMiddleware(LOpts);
