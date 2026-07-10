@@ -68,22 +68,26 @@ end;
 // and HS/RS confusion if an asymmetric verifier is added later.
 function HeaderAlgIsHS256(const AHeaderB64: string): Boolean;
 var
-  LJSON: TJSONObject;
+  LValue: TJSONValue;
   LAlg: string;
 begin
   Result := False;
+  // Parse into a TJSONValue (not `as TJSONObject`): a valid but non-object
+  // header (e.g. base64url of "[]") would make the cast raise EInvalidCast and
+  // leak the parsed TJSONArray on every unauthenticated request.
   try
-    LJSON := TJSONObject.ParseJSONValue(Base64URLDecode(AHeaderB64)) as TJSONObject;
+    LValue := TJSONObject.ParseJSONValue(Base64URLDecode(AHeaderB64));
   except
-    Exit;  // malformed base64url / JSON header → reject
+    LValue := nil;
   end;
-  if LJSON = nil then
+  if LValue = nil then
     Exit;
   try
-    if LJSON.TryGetValue<string>('alg', LAlg) then
+    if (LValue is TJSONObject) and
+       TJSONObject(LValue).TryGetValue<string>('alg', LAlg) then
       Result := LAlg = 'HS256';
   finally
-    LJSON.Free;
+    LValue.Free;
   end;
 end;
 
@@ -110,6 +114,7 @@ begin
       LAuthHeader, LToken: string;
       LParts: TArray<string>;
       LPayloadJSON: string;
+      LValue: TJSONValue;
       LJSON: TJSONObject;
       LExp: Int64;
       LNbf: Int64;
@@ -132,9 +137,16 @@ begin
         raise EPoseidonException.Create(AUnauthorizedMsg, THTTPStatus.Unauthorized);
 
       LPayloadJSON := Base64URLDecode(LParts[1]);
-      LJSON := TJSONObject.ParseJSONValue(LPayloadJSON) as TJSONObject;
-      if LJSON = nil then
+      // Parse into a TJSONValue: a non-object payload (e.g. a JSON array) would
+      // make `as TJSONObject` raise EInvalidCast -> a 500 (not 401) and leak the
+      // parsed value. `nil.Free` is safe; a non-object value is freed too.
+      LValue := TJSONObject.ParseJSONValue(LPayloadJSON);
+      if not (LValue is TJSONObject) then
+      begin
+        LValue.Free;
         raise EPoseidonException.Create(AUnauthorizedMsg, THTTPStatus.Unauthorized);
+      end;
+      LJSON := TJSONObject(LValue);
       try
         LNowUnix := DateTimeToUnix(TTimeZone.Local.ToUniversalTime(Now));
         if LJSON.TryGetValue<Int64>('exp', LExp) then
