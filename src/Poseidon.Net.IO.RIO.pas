@@ -284,7 +284,39 @@ begin
 end;
 
 destructor TRIOBackend.Destroy;
+var
+  I: Integer;
 begin
+  // #P1: if StartListening threw mid-setup, StopAccept/JoinWorkers were never
+  // called and the listen socket / CQs / worker IOCPs / overlappeds / CQ locks
+  // leak. Clean them idempotently here — after a normal Stop the arrays are
+  // already empty and FListenSocket is INVALID_SOCKET, so this is a no-op.
+  if FListenSocket <> INVALID_SOCKET then
+  begin
+    closesocket(FListenSocket);   // also unblocks a stuck accept thread below
+    FListenSocket := INVALID_SOCKET;
+  end;
+  if FAcceptThread <> nil then
+  begin
+    FAcceptThread.WaitFor;
+    FreeAndNil(FAcceptThread);
+  end;
+  for I := 0 to High(FCQs) do
+    if FCQs[I] <> nil then
+      TFnCloseCQ(FRio.RIOCloseCompletionQueue)(FCQs[I]);
+  SetLength(FCQs, 0);
+  for I := 0 to High(FCQLocks) do
+    FreeAndNil(FCQLocks[I]);
+  SetLength(FCQLocks, 0);
+  for I := 0 to High(FWorkerIOCPs) do
+    if FWorkerIOCPs[I] <> 0 then
+      CloseHandle(FWorkerIOCPs[I]);
+  SetLength(FWorkerIOCPs, 0);
+  for I := 0 to High(FWorkerOvls) do
+    if FWorkerOvls[I] <> nil then
+      Dispose(FWorkerOvls[I]);
+  SetLength(FWorkerOvls, 0);
+
   if (FRecvPoolBufId <> nil) and (FRecvPoolBufId <> CRIOInvalidBufId) then
     TFnDeregBuf(FRio.RIODeregisterBuffer)(FRecvPoolBufId);
   if FRecvPool <> nil then

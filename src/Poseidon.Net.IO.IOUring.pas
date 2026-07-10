@@ -1159,6 +1159,7 @@ var
   LAddrLen: Cardinal;
   LIP: AnsiString;
   LZCRef: PSendZCRef;
+  LHasNotif: Boolean;
 begin
   if AUserData = CUdShutdown then
   begin
@@ -1182,31 +1183,47 @@ begin
       Exit;
     end;
 
-    // Send result CQE
+    // Send result CQE. A notification CQE (F_NOTIF) only follows when the
+    // result CQE carried IORING_CQE_F_MORE — i.e. the kernel took a reference to
+    // the buffer. On an early failure (res<=0) F_MORE is clear and NO
+    // notification comes, so this path must do the cleanup the notification
+    // would have done. #194
+    LHasNotif := (AFlags and IORING_CQE_F_MORE) <> 0;
+
     if ARes <= 0 then
     begin
-      // Error — notification CQE will free buffer and release ref
       FCallbacks.OnConnError(LConn);
-      LConn.Release;
-      Exit;
-    end;
-
-    Inc(LZCRef^.SentBytes, ARes);
-    if LZCRef^.SentBytes < LZCRef^.TotalLen then
-    begin
-      // Partial send — fall back to regular IORING_OP_SEND for remainder
-      LConn.PendingSend := LZCRef^.SendBuf;
-      LConn.PendingSendActual := LZCRef^.TotalLen;
-      LConn.SentBytes := LZCRef^.SentBytes;
-      LZCRef^.SendBuf := nil;  // transfer ownership; notification will see nil
-      _ResubmitSend(LConn);
-      LConn.Release;
+      LConn.Release;                       // result ref
     end
     else
     begin
-      // All bytes sent — buffer stays alive for notification CQE
-      FCallbacks.OnSendComplete(LConn);
-      LConn.Release;
+      Inc(LZCRef^.SentBytes, ARes);
+      if LZCRef^.SentBytes < LZCRef^.TotalLen then
+      begin
+        // Partial send — fall back to regular IORING_OP_SEND for remainder
+        LConn.PendingSend := LZCRef^.SendBuf;
+        LConn.PendingSendActual := LZCRef^.TotalLen;
+        LConn.SentBytes := LZCRef^.SentBytes;
+        LZCRef^.SendBuf := nil;  // transfer ownership; notification will see nil
+        _ResubmitSend(LConn);
+        LConn.Release;                     // result ref
+      end
+      else
+      begin
+        // All bytes sent — buffer stays alive for notification CQE (if any)
+        FCallbacks.OnSendComplete(LConn);
+        LConn.Release;                     // result ref
+      end;
+    end;
+
+    // #194: no notification CQE will follow — release buffer + ctx + the second
+    // (notification) ref here instead of leaking them on every failed ZC send.
+    if not LHasNotif then
+    begin
+      if LZCRef^.SendBuf <> nil then
+        TBufferPool.Release(LZCRef^.SendBuf);
+      Dispose(LZCRef);
+      LConn.Release;                       // notification ref
     end;
     Exit;
   end;
