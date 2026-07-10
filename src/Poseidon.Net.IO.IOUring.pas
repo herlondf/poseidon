@@ -1172,6 +1172,8 @@ var
   LIP: AnsiString;
   LZCRef: PSendZCRef;
   LHasNotif: Boolean;
+  LRemainLen: Integer;
+  LRemainBuf: TBytes;
 begin
   if AUserData = CUdShutdown then
   begin
@@ -1212,11 +1214,29 @@ begin
       Inc(LZCRef^.SentBytes, ARes);
       if LZCRef^.SentBytes < LZCRef^.TotalLen then
       begin
-        // Partial send — fall back to regular IORING_OP_SEND for remainder
-        LConn.PendingSend := LZCRef^.SendBuf;
-        LConn.PendingSendActual := LZCRef^.TotalLen;
-        LConn.SentBytes := LZCRef^.SentBytes;
-        LZCRef^.SendBuf := nil;  // transfer ownership; notification will see nil
+        // Partial send — send the remainder via a regular IORING_OP_SEND.
+        if LHasNotif then
+        begin
+          // The kernel still references SendBuf[0..SentBytes) until the pending
+          // F_NOTIF CQE. Copy the remainder into a FRESH buffer for the resubmit
+          // so its completion cannot return the still-in-flight original to the
+          // pool (which would corrupt another request's data). The original is
+          // freed by the F_NOTIF path; do NOT nil it here.
+          LRemainLen := LZCRef^.TotalLen - LZCRef^.SentBytes;
+          LRemainBuf := TBufferPool.Acquire;
+          Move(LZCRef^.SendBuf[LZCRef^.SentBytes], LRemainBuf[0], LRemainLen);
+          LConn.PendingSend       := LRemainBuf;
+          LConn.PendingSendActual := LRemainLen;
+          LConn.SentBytes         := 0;
+        end
+        else
+        begin
+          // No notification pending (kernel copied) — hand the original over.
+          LConn.PendingSend       := LZCRef^.SendBuf;
+          LConn.PendingSendActual := LZCRef^.TotalLen;
+          LConn.SentBytes         := LZCRef^.SentBytes;
+          LZCRef^.SendBuf := nil;
+        end;
         _ResubmitSend(LConn);
         LConn.Release;                     // result ref
       end
