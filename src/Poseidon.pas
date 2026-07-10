@@ -34,6 +34,7 @@ uses
   Poseidon.Net.WebSocket,
   Poseidon.Net.Types,
   Poseidon.Exception,
+  Poseidon.Validation,
   Poseidon.Problem;
 
 type
@@ -61,6 +62,17 @@ type
   // HTTP status and MIME types
   THTTPStatus = Poseidon.Status.THTTPStatus;
   TMimeType = Poseidon.Status.TMimeType;
+
+  // Validation (RTTI attributes) — so `uses Poseidon` can annotate/validate DTOs
+  TPoseidonValidator = Poseidon.Validation.TPoseidonValidator;
+  TPoseidonValidationError = Poseidon.Validation.TPoseidonValidationError;
+  PoseidonValidationAttribute = Poseidon.Validation.PoseidonValidationAttribute;
+  RequiredAttribute = Poseidon.Validation.RequiredAttribute;
+  MinLengthAttribute = Poseidon.Validation.MinLengthAttribute;
+  MaxLengthAttribute = Poseidon.Validation.MaxLengthAttribute;
+  EmailAttribute = Poseidon.Validation.EmailAttribute;
+  RangeAttribute = Poseidon.Validation.RangeAttribute;
+  PatternAttribute = Poseidon.Validation.PatternAttribute;
 
   // Server types
   TLogLevel = Poseidon.Net.Types.TLogLevel;

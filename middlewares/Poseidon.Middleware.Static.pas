@@ -141,7 +141,14 @@ begin
       LFileBytes, LCompressed: TBytes;
       LUseGzip: Boolean;
     begin
-      if not ACtx.Path.StartsWith(LPrefix) then
+      // The prefix must end on a path boundary — '/static' must NOT match
+      // '/staticsecret' (which would serve the static root under an unintended
+      // URL). Accept an exact match, a '/'-terminated prefix, or a '/' right
+      // after the prefix.
+      if not (ACtx.Path.StartsWith(LPrefix) and
+              (LPrefix.EndsWith('/') or
+               (Length(ACtx.Path) = Length(LPrefix)) or
+               (ACtx.Path[Length(LPrefix) + 1] = '/'))) then
       begin
         ANext();
         Exit;

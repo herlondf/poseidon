@@ -96,6 +96,8 @@ begin
       Result := not AValue.IsEmpty and (AValue.AsObject <> nil);
     tkInteger, tkInt64, tkFloat:
       Result := True; // numeric 0 is valid
+    tkDynArray:
+      Result := AValue.GetArrayLength > 0; // a required array must be non-empty
   end;
   if not Result then
     AError := Format('"%s" is required', [AFieldName]);

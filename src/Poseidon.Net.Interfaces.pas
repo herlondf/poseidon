@@ -27,6 +27,8 @@ type
   IBufferPool = interface
     ['{A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D}']
     function  Acquire(ASize: Integer = 0): TBytes;
+    // Returns ABuf to the pool and sets it to nil, so the caller cannot keep
+    // using the buffer after releasing it (logical use-after-release).
     procedure Release(var ABuf: TBytes);
   end;
 
