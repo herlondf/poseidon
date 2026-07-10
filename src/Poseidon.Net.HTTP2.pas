@@ -867,14 +867,21 @@ end;
 
 procedure TH2Conn._HandleGoAway(APayload: PByte; APayLen: Integer);
 begin
-  // The PEER is going away — do NOT set FGoAwaySent (that suppresses OUR sends
-  // and would stop in-flight streams from ever completing, so FDeferClose would
-  // never fire). Track it separately and let active streams drain.
   FGoAwayReceived := True;
   if FActiveStreams > 0 then
+    // In-flight streams must still be able to send their responses — do NOT set
+    // FGoAwaySent here (it suppresses OUR sends); FDeferClose closes later.
     FDeferClose := True
   else if Assigned(FCloseProc) then
+  begin
+    // Idle: close now. FCloseProc may free THIS TH2Conn (production _CloseConn
+    // does FreeAndNil(H2Conn)); set FGoAwaySent FIRST so ProcessData's
+    // post-frame `if FGoAwaySent then Exit` stops the loop instead of iterating
+    // over freed memory — same contract as _GoAway. (See issue: the deferred
+    // close refactor removes the remaining reliance on FGoAwaySent here.)
+    FGoAwaySent := True;
     FCloseProc(FConn);
+  end;
 end;
 
 // ===========================================================================

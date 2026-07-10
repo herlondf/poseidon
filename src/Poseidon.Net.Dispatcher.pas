@@ -317,7 +317,9 @@ begin
     LConn.H2Conn.ProcessData(@LConn.AccumBuf[0], LConn.AccumLen);
     LConn.AccumLen := 0;
   end;
-  if not LConn.H2Conn.GoAwaySent then
+  // ProcessData may have closed the connection (GOAWAY / connection error on an
+  // idle conn), which frees H2Conn (FreeAndNil). Guard against the nil-deref.
+  if (LConn.H2Conn <> nil) and (not LConn.H2Conn.GoAwaySent) then
     FCallbacks.PostRecv(ACtx.Conn);
   ACtx.Handled := True;
 end;
