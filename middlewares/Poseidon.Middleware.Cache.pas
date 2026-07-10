@@ -166,6 +166,17 @@ begin
   ACtx.ExtraHeaders[LLen] := TPair<string,string>.Create(AName, AValue);
 end;
 
+// #193: the cached body carries whatever Content-Encoding the first client
+// negotiated, so the cache must vary by Accept-Encoding. Collapse to a coarse
+// gzip/identity bucket (matches what the Compression middleware produces).
+function NormalizeAcceptEncoding(const AAcceptEncoding: string): string;
+begin
+  if AAcceptEncoding.ToLower.Contains('gzip') then
+    Result := 'gzip'
+  else
+    Result := 'identity';
+end;
+
 // #188: a shared cache must not store per-user or explicitly non-cacheable
 // responses — doing so leaks the first caller's body/session cookie to others.
 function ResponseIsCacheable(const ACtx: TNativeRequestContext): Boolean;
@@ -229,6 +240,8 @@ begin
       LKey := ACtx.Path;
       if ACtx.QueryString <> '' then
         LKey := LKey + '?' + ACtx.QueryString;
+      // #193: bucket by negotiated encoding.
+      LKey := LKey + '|ae=' + NormalizeAcceptEncoding(ACtx.Header('Accept-Encoding'));
 
       if LStore.TryGet(LKey, LEntry) then
       begin
@@ -247,6 +260,7 @@ begin
         ACtx.Body := LEntry.Body;
         ACtx.ExtraHeaders := LEntry.ExtraHeaders;
         AddHeader(ACtx, 'ETag', LEntry.ETag);
+        AddHeader(ACtx, 'Vary', 'Accept-Encoding');
         AddHeader(ACtx, 'X-Cache', 'HIT');
         ACtx.Handled := True;
         Exit;
@@ -266,6 +280,7 @@ begin
         LEntry.ExpiresAt := Now + (LTTL / 86400);
         LStore.Put(LKey, LEntry);
         AddHeader(ACtx, 'ETag', LETag);
+        AddHeader(ACtx, 'Vary', 'Accept-Encoding');
         AddHeader(ACtx, 'X-Cache', 'MISS');
       end;
     end;
