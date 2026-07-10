@@ -41,8 +41,10 @@ type
     FErrorThresholdPct: Integer;
     FWindowSec: Integer;
     FOpenDurationSec: Integer;
+    FHalfOpenProbes: Integer;
     procedure EvictStale(ANow: TDateTime);
     procedure RecordResult(AError: Boolean);
+    procedure ResetBuckets;
     function ErrorRate: Double;
   public
     constructor Create(AErrorThresholdPct, AWindowSec, AOpenDurationSec: Integer);
@@ -76,6 +78,14 @@ begin
   for I := 0 to High(FBuckets) do
     if (FBuckets[I].Requests > 0) and (FBuckets[I].Timestamp < LCutoff) then
       FBuckets[I] := Default(TBucket);
+end;
+
+procedure TCircuitBreaker.ResetBuckets;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FBuckets) do
+    FBuckets[I] := Default(TBucket);
 end;
 
 function TCircuitBreaker.ErrorRate: Double;
@@ -125,14 +135,25 @@ begin
       begin
         if SecondsBetween(LNow, FOpenedAt) >= FOpenDurationSec then
         begin
+          // Transition to half-open and let THIS caller be the single probe.
           FState := csHalfOpen;
+          FHalfOpenProbes := 1;
           Result := True;
         end
         else
           Result := False;
       end;
       csHalfOpen:
-        Result := True;
+        // #184: admit only one probe at a time; the rest get 503 until the
+        // probe resolves (success -> closed, failure -> open). Prevents the
+        // thundering herd that hammered a degraded backend.
+        if FHalfOpenProbes >= 1 then
+          Result := False
+        else
+        begin
+          FHalfOpenProbes := 1;
+          Result := True;
+        end;
     else
       Result := False;
     end;
@@ -147,7 +168,13 @@ begin
   try
     RecordResult(False);
     if FState = csHalfOpen then
+    begin
+      // #184: a successful probe closes the breaker. Clear the error window so
+      // stale failures don't immediately reopen it on the next request.
       FState := csClosed;
+      FHalfOpenProbes := 0;
+      ResetBuckets;
+    end;
   finally
     FLock.Leave;
   end;
@@ -162,6 +189,7 @@ begin
     begin
       FState := csOpen;
       FOpenedAt := Now;
+      FHalfOpenProbes := 0;
     end
     else if (FState = csClosed) and (ErrorRate >= FErrorThresholdPct) then
     begin
