@@ -41,6 +41,8 @@ type
   TWebSocketFrame = record
     FinFlag: Boolean;
     RSV1: Boolean;   // permessage-deflate: True when payload is compressed
+    RSV2: Boolean;   // RFC 6455 §5.2 — must be 0 (no negotiated extension uses it)
+    RSV3: Boolean;   // RFC 6455 §5.2 — must be 0
     Masked: Boolean; // RFC 6455 §5.3 — client→server frames MUST have MASK=1
     Opcode: Byte;
     Payload: TBytes;
@@ -505,6 +507,8 @@ begin
 
   AFrame.FinFlag := (ABuf[0] and $80) <> 0;
   AFrame.RSV1 := (ABuf[0] and $40) <> 0;  // permessage-deflate compressed
+  AFrame.RSV2 := (ABuf[0] and $20) <> 0;
+  AFrame.RSV3 := (ABuf[0] and $10) <> 0;
   AFrame.Opcode := ABuf[0] and $0F;
   LMasked := (ABuf[1] and $80) <> 0;
   AFrame.Masked := LMasked;

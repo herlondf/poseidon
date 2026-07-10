@@ -307,6 +307,19 @@ begin
   FRecv(AConn);
 end;
 
+// RFC 6455 §7.4.1 — close codes that a peer is allowed to send in a CLOSE body.
+function IsValidCloseCode(ACode: Word): Boolean;
+begin
+  case ACode of
+    1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011:
+      Result := True;
+    3000..4999:
+      Result := True;
+  else
+    Result := False;
+  end;
+end;
+
 function TWebSocketManager.DispatchFrames(AConn: Pointer): Boolean;
 var
   LConn: TNativeConn;
@@ -323,6 +336,8 @@ var
   LIsControl: Boolean;
   LIsDataOpcode: Boolean;
   LIsReserved: Boolean;
+  LCloseCode: Word;
+  LPeerCode: Word;
 begin
   Result := True;
   LConn := TNativeConn(AConn);
@@ -356,11 +371,21 @@ begin
       Exit;
     end;
 
-    // RFC 6455 §5.5 — control frames MUST be FIN=1 with payload <= 125.
+    // RFC 6455 §5.2 — RSV2/RSV3 must be 0 (no negotiated extension defines them).
+    if LFrame.RSV2 or LFrame.RSV3 then
+    begin
+      FailProtocol(AConn, CCloseProtocolError);
+      Result := False;
+      Exit;
+    end;
+
+    // RFC 6455 §5.5 — control frames MUST be FIN=1 with payload <= 125, and per
+    // RFC 7692 §6 compression (RSV1) applies to data frames only.
     if LIsControl then
     begin
       if (not LFrame.FinFlag)
-         or (Length(LFrame.Payload) > CMaxControlPayload) then
+         or (Length(LFrame.Payload) > CMaxControlPayload)
+         or LFrame.RSV1 then
       begin
         FailProtocol(AConn, CCloseProtocolError);
         Result := False;
@@ -393,7 +418,22 @@ begin
           ; // Unsolicited pong — allowed; ignore.
         OPCODE_CLOSE:
         begin
-          LOut := TWebSocketUtils.CloseFrame(CCloseNormal);
+          // RFC 6455 §5.5.1: the CLOSE body is empty, or a 2-byte close code
+          // followed by a valid-UTF-8 reason. A 1-byte body or an invalid code
+          // is a protocol error; a bad-UTF-8 reason is invalid payload data.
+          LCloseCode := CCloseNormal;
+          if Length(LFrame.Payload) = 1 then
+            LCloseCode := CCloseProtocolError
+          else if Length(LFrame.Payload) >= 2 then
+          begin
+            LPeerCode := (Word(LFrame.Payload[0]) shl 8) or LFrame.Payload[1];
+            if not IsValidCloseCode(LPeerCode) then
+              LCloseCode := CCloseProtocolError
+            else if (Length(LFrame.Payload) > 2) and
+                    not IsValidUTF8(Copy(LFrame.Payload, 2, Length(LFrame.Payload) - 2)) then
+              LCloseCode := CCloseInvalidData;
+          end;
+          LOut := TWebSocketUtils.CloseFrame(LCloseCode);
           FSend(AConn, LOut);
           if LTotal < LConn.AccumLen then
             Move(LConn.AccumBuf[LTotal], LConn.AccumBuf[0],
@@ -450,6 +490,15 @@ begin
             Result := False;
             Exit;
           end;
+        end;
+        // The configured MaxWSFrameSize must also bound the DECOMPRESSED size —
+        // the guards above only checked the on-wire (compressed) length.
+        if (FMaxWSFrameSize > 0)
+           and (Int64(Length(LFrame.Payload)) > FMaxWSFrameSize) then
+        begin
+          FailProtocol(AConn, CCloseMessageTooBig);
+          Result := False;
+          Exit;
         end;
         if (LFrame.Opcode = OPCODE_TEXT)
            and (not IsValidUTF8(LFrame.Payload)) then
@@ -528,6 +577,14 @@ begin
             Exit;
           end;
           LState.Buffer := LInflated;
+        end;
+        // Bound the DECOMPRESSED assembled message against MaxWSFrameSize too.
+        if (FMaxWSFrameSize > 0)
+           and (Int64(Length(LState.Buffer)) > FMaxWSFrameSize) then
+        begin
+          FailProtocol(AConn, CCloseMessageTooBig);
+          Result := False;
+          Exit;
         end;
         if (LState.Opcode = OPCODE_TEXT)
            and (not IsValidUTF8(LState.Buffer)) then

@@ -435,10 +435,12 @@ end;
 
 procedure TProtocolDispatcher.StepUpgradeDetection(var ACtx: TDispatchContext);
 var
-  LConn:    TNativeConn;
-  LUpgrade: string;
-  LWsKey:   string;
-  I:        Integer;
+  LConn:       TNativeConn;
+  LUpgrade:    string;
+  LWsKey:      string;
+  LConnection: string;
+  LHasUpgrade: Boolean;
+  I:           Integer;
 begin
   LConn := TNativeConn(ACtx.Conn);
 
@@ -447,8 +449,9 @@ begin
   if ACtx.Req.Method <> 'GET' then
     Exit;
 
-  LUpgrade := '';
-  LWsKey   := '';
+  LUpgrade    := '';
+  LWsKey      := '';
+  LConnection := '';
   for I := 0 to High(ACtx.Req.Headers) do
   begin
     if (Length(ACtx.Req.Headers[I].Key) = 7) and
@@ -456,17 +459,24 @@ begin
       LUpgrade := ACtx.Req.Headers[I].Value
     else if (Length(ACtx.Req.Headers[I].Key) = 17) and
        SameText(ACtx.Req.Headers[I].Key, 'Sec-WebSocket-Key') then
-      LWsKey := ACtx.Req.Headers[I].Value;
+      LWsKey := ACtx.Req.Headers[I].Value
+    else if (Length(ACtx.Req.Headers[I].Key) = 10) and
+       SameText(ACtx.Req.Headers[I].Key, 'Connection') then
+      LConnection := ACtx.Req.Headers[I].Value;
   end;
 
-  if SameText(LUpgrade, 'websocket') and (LWsKey <> '') then
+  // RFC 6455 §4.2.1 / RFC 7230 §6.7 — the Connection header's token list MUST
+  // include "Upgrade"; without it the request is not a valid upgrade.
+  LHasUpgrade := Pos('upgrade', LowerCase(LConnection)) > 0;
+
+  if SameText(LUpgrade, 'websocket') and (LWsKey <> '') and LHasUpgrade then
   begin
     FCallbacks.UpgradeToWS(ACtx.Conn, ACtx.Req);
     ACtx.Handled := True;
     Exit;
   end;
 
-  if SameText(LUpgrade, 'h2c') and ACtx.Config^.H2Enabled and
+  if SameText(LUpgrade, 'h2c') and LHasUpgrade and ACtx.Config^.H2Enabled and
      (LConn.SSLHandle = nil) then
   begin
     FCallbacks.UpgradeToH2C(ACtx.Conn, ACtx.Req);
