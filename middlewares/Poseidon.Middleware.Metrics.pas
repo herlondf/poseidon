@@ -26,6 +26,9 @@ uses
 const
   CHistBounds: array[0..7] of Int64 = (5, 10, 25, 50, 100, 250, 500, 1000);
   CHistBoundsStr: array[0..7] of string = ('5', '10', '25', '50', '100', '250', '500', '1000');
+  // Bound label cardinality: a hostile client hitting unique paths (/x1, /x2,
+  // ...) would otherwise grow FBuckets until OOM. Overflow collapses to 'other'.
+  CMaxUniquePaths = 10000;
 
 type
   TMetricBucket = record
@@ -61,12 +64,16 @@ end;
 
 procedure TMetricsStore.Record_(const AKey: string; ADurationMs: Int64; AIsError: Boolean);
 var
+  LKey: string;
   LBucket: TMetricBucket;
   I: Integer;
 begin
   FLock.Enter;
   try
-    if not FBuckets.TryGetValue(AKey, LBucket) then
+    LKey := AKey;
+    if not FBuckets.ContainsKey(LKey) and (FBuckets.Count >= CMaxUniquePaths) then
+      LKey := 'other';
+    if not FBuckets.TryGetValue(LKey, LBucket) then
       LBucket := Default(TMetricBucket);
     Inc(LBucket.Requests);
     Inc(LBucket.DurationSum, ADurationMs);
@@ -76,7 +83,7 @@ begin
       if ADurationMs <= CHistBounds[I] then
         Inc(LBucket.HistBuckets[I]);
     Inc(LBucket.HistBuckets[8]);
-    FBuckets.AddOrSetValue(AKey, LBucket);
+    FBuckets.AddOrSetValue(LKey, LBucket);
   finally
     FLock.Leave;
   end;
@@ -101,6 +108,15 @@ begin
   end;
 end;
 
+// Escapes a Prometheus label value (backslash, double-quote, newline) so a path
+// containing '"' cannot break the exposition line and fail the scrape.
+function EscapePromLabel(const S: string): string;
+begin
+  Result := StringReplace(S, '\', '\\', [rfReplaceAll]);
+  Result := StringReplace(Result, '"', '\"', [rfReplaceAll]);
+  Result := StringReplace(Result, #10, '\n', [rfReplaceAll]);
+end;
+
 function BuildPrometheusText(const AStore: TMetricsStore): string;
 var
   LPairs: TArray<TPair<string, TMetricBucket>>;
@@ -115,14 +131,14 @@ begin
     LSB.AppendLine('# TYPE poseidon_requests_total counter');
     for LPair in LPairs do
       LSB.AppendLine(Format('poseidon_requests_total{path="%s"} %d',
-        [LPair.Key, LPair.Value.Requests]));
+        [EscapePromLabel(LPair.Key),LPair.Value.Requests]));
 
     LSB.AppendLine('# HELP poseidon_errors_total HTTP requests with status >= 400');
     LSB.AppendLine('# TYPE poseidon_errors_total counter');
     for LPair in LPairs do
       if LPair.Value.Errors > 0 then
         LSB.AppendLine(Format('poseidon_errors_total{path="%s"} %d',
-          [LPair.Key, LPair.Value.Errors]));
+          [EscapePromLabel(LPair.Key),LPair.Value.Errors]));
 
     LSB.AppendLine('# HELP poseidon_request_duration_ms Histogram of request durations in ms');
     LSB.AppendLine('# TYPE poseidon_request_duration_ms histogram');
@@ -130,13 +146,13 @@ begin
     begin
       for I := 0 to 7 do
         LSB.AppendLine(Format('poseidon_request_duration_ms_bucket{path="%s",le="%s"} %d',
-          [LPair.Key, CHistBoundsStr[I], LPair.Value.HistBuckets[I]]));
+          [EscapePromLabel(LPair.Key),CHistBoundsStr[I], LPair.Value.HistBuckets[I]]));
       LSB.AppendLine(Format('poseidon_request_duration_ms_bucket{path="%s",le="+Inf"} %d',
-        [LPair.Key, LPair.Value.HistBuckets[8]]));
+        [EscapePromLabel(LPair.Key),LPair.Value.HistBuckets[8]]));
       LSB.AppendLine(Format('poseidon_request_duration_ms_sum{path="%s"} %d',
-        [LPair.Key, LPair.Value.DurationSum]));
+        [EscapePromLabel(LPair.Key),LPair.Value.DurationSum]));
       LSB.AppendLine(Format('poseidon_request_duration_ms_count{path="%s"} %d',
-        [LPair.Key, LPair.Value.Requests]));
+        [EscapePromLabel(LPair.Key),LPair.Value.Requests]));
     end;
 
     Result := LSB.ToString;
