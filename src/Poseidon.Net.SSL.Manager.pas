@@ -25,6 +25,9 @@ type
     FCertCtxByHost: TDictionary<string, Pointer>;
     FSSLEnabled: Boolean;
     FMinTLSVersion: Integer;
+    FH2Enabled: Boolean;   // replicated onto per-host SNI contexts (#M8 ALPN)
+    FServerRef: Pointer;   // ALPN callback arg for per-host contexts
+    FCAFile: string;       // mTLS CA; '' = no mTLS. Replicated per-host (#M7)
   public
     constructor Create(ASSLProvider: ISSLProvider);
     destructor Destroy; override;
@@ -78,6 +81,9 @@ begin
   FCertCtxByHost := nil;
   FSSLEnabled := False;
   FMinTLSVersion := $0303;  // TLS 1.2
+  FH2Enabled := False;
+  FServerRef := nil;
+  FCAFile := '';
 end;
 
 destructor TSSLManager.Destroy;
@@ -117,14 +123,28 @@ begin
   FSSLProvider.SetSNICallback(FSSLCtx, @SSLManagerSNICallback, Self);
   if AH2Enabled then
     FSSLProvider.SetALPN(FSSLCtx, AServerRef);
+  // Remember for per-host SNI contexts (AddSSLCert replicates this setup).
+  FH2Enabled := AH2Enabled;
+  FServerRef := AServerRef;
   FSSLEnabled := True;
 end;
 
 procedure TSSLManager.ConfigureMTLS(const ACAFile: string);
+var
+  LPair: TPair<string, Pointer>;
 begin
   if FSSLCtx = nil then
     raise Exception.Create('Call ConfigureSSL before ConfigureMTLS');
+  FCAFile := ACAFile;
   FSSLProvider.ConfigureMTLS(FSSLCtx, ACAFile);
+  // #M7: apply the same client-cert verification to every per-host SNI context
+  // already registered (handles ConfigureMTLS being called after AddSSLCert).
+  // Without this the switched per-host ctx has an empty store and SNI + mTLS
+  // handshakes are rejected.
+  if FCertCtxByHost <> nil then
+    for LPair in FCertCtxByHost do
+      if LPair.Value <> nil then
+        FSSLProvider.ConfigureMTLS(LPair.Value, ACAFile);
 end;
 
 procedure TSSLManager.AddSSLCert(const AHostName, ACertFile, AKeyFile: string);
@@ -142,6 +162,14 @@ begin
     FSSLProvider.LoadCert(LCtx, ACertFile);
     FSSLProvider.LoadKey(LCtx, AKeyFile);
     FSSLProvider.VerifyKey(LCtx);
+    // #M8/#M7: replicate the default context's protocol setup — otherwise an
+    // SNI-matched host silently loses ALPN (h2 -> HTTP/1.1 downgrade), the TLS
+    // floor, and mTLS client-cert verification.
+    FSSLProvider.SetMinVersion(LCtx, FMinTLSVersion);
+    if FH2Enabled then
+      FSSLProvider.SetALPN(LCtx, FServerRef);
+    if FCAFile <> '' then
+      FSSLProvider.ConfigureMTLS(LCtx, FCAFile);
   except
     FSSLProvider.FreeContext(LCtx);
     raise;

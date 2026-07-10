@@ -1158,7 +1158,11 @@ begin
     while FConnManager.ConnList.Count > 0 do
     begin
       LConn := TNativeConn(FConnManager.ConnList[0]);
-      FConnManager.ConnList.Delete(0);
+      // #M9: go through Remove (not ConnList.Delete) so the per-IP counter is
+      // decremented — otherwise a Stop() with stragglers orphans those IP counts
+      // and, after a Stop->Listen, MaxConnectionsPerIP eventually rejects real
+      // clients. Lock is recursive so re-entering it here is safe.
+      FConnManager.Remove(LConn);
       // #177: only free the SSL handle when the pool fully drained. If a
       // straggler worker is still running, it may dereference SSLHandle in
       // _EncryptAndSend after SSL_free — freeing here would be a UAF. On the
