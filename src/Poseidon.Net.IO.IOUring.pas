@@ -444,7 +444,19 @@ begin
 end;
 
 destructor TIOUringBackend.Destroy;
+var
+  I: Integer;
 begin
+  // #P2: close listen sockets if StopAccept was never reached (exception during
+  // StartListening after the sockets were created). Idempotent — after a normal
+  // StopAccept they are already -1.
+  for I := 0 to High(FListenSockets) do
+    if FListenSockets[I] >= 0 then
+    begin
+      _LinuxClose(FListenSockets[I]);
+      FListenSockets[I] := -1;
+    end;
+
   // Safety net: clean up mmaps and ring fd if JoinWorkers was never called
   // (e.g. exception during StartListening after mmap succeeded).
   if (FSQEs <> nil) and (FSQEs <> MAP_FAILED) then
