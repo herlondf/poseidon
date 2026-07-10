@@ -468,9 +468,11 @@ begin
     begin
       AStatus      := 500;
       AContentType := 'application/problem+json';
+      // Do not leak the raw exception message (info disclosure + it could break
+      // the JSON). Unexpected errors get a generic detail.
       ABody        := TEncoding.UTF8.GetBytes(
         '{"type":"about:blank","title":"Internal Server Error",' +
-        '"status":500,"detail":"' + E.Message + '"}');
+        '"status":500,"detail":"An unexpected error occurred."}');
       SetLength(AExtra, 0);
     end;
   end;

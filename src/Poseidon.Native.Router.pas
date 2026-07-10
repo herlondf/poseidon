@@ -197,7 +197,9 @@ begin
     begin
       LParams[LPIdx] := TPair<string,string>.Create(
         ARoute.Entry.ParamNames[LPIdx],
-        TNetEncoding.URL.Decode(ASegments[I]));
+        // RFC 3986 §3.3: '+' is a literal in the PATH (not a space as in a
+        // form-encoded query). Protect it from URL.Decode's '+'->space rule.
+        TNetEncoding.URL.Decode(StringReplace(ASegments[I], '+', '%2B', [rfReplaceAll])));
       Inc(LPIdx);
     end
     // Literal segments of a param route are compared case-sensitively to

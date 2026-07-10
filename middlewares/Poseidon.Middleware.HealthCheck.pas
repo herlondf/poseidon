@@ -129,7 +129,10 @@ begin
               LResult := LP.Value();
             except
               on E: Exception do
-                LResult := THealthCheckResult.Failed(E.ClassName + ': ' + E.Message);
+                // Do not expose the raw exception (class/message) on an
+                // unauthenticated /health endpoint — it can leak internal
+                // details (connection strings, paths).
+                LResult := THealthCheckResult.Failed('check raised an exception');
             end;
             LEntry := TJSONObject.Create;
             LEntry.AddPair('ok', TJSONBool.Create(LResult.Healthy));

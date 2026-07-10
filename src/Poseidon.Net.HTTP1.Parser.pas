@@ -624,8 +624,10 @@ begin
     case LookupHeaderId(@ABuf[LLineStart], LColonPos - LLineStart) of
       hiConnection:
         begin
-          if Pos('keep-alive', LowerCase(LValue)) > 0 then AKeepAlive := True;
-          if Pos('close',      LowerCase(LValue)) > 0 then AKeepAlive := False;
+          // M24: lower-case once (LValue already copied into AHeaders above).
+          LValue := LowerCase(LValue);
+          if Pos('keep-alive', LValue) > 0 then AKeepAlive := True;
+          if Pos('close',      LValue) > 0 then AKeepAlive := False;
         end;
       hiContentLength:
         begin

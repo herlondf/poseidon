@@ -175,9 +175,10 @@ begin
       begin
         LStatus := 500;
         LCT := 'application/problem+json';
+        // Do not leak the raw exception message (info disclosure + JSON break).
         LBody   := TEncoding.UTF8.GetBytes(
           '{"type":"about:blank","title":"Internal Server Error",' +
-          '"status":500,"detail":"' + E.Message + '"}');
+          '"status":500,"detail":"An unexpected error occurred."}');
         SetLength(LExtra, 0);
       end;
     end;
