@@ -1023,6 +1023,18 @@ begin
     Exit;
   end;
 
+  // #M1 / RFC 7540 §5.1.1: a client-initiated stream id must be strictly greater
+  // than every previously opened id. A HEADERS opening a NEW stream (not tracked)
+  // with an id <= the highest seen means the client reused or lowered an id —
+  // a connection-level PROTOCOL_ERROR (guards against state confusion / a closed
+  // stream being silently re-created).
+  if (not AContinuation) and ((AStreamID and 1) = 1) and
+     (AStreamID <= FLastStreamID) and not FStreams.ContainsKey(AStreamID) then
+  begin
+    _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR);
+    Exit;
+  end;
+
   if AStreamID > FLastStreamID then
     FLastStreamID := AStreamID;
 
@@ -1198,6 +1210,21 @@ begin
   if not FStreams.TryGetValue(AStreamID, LStream) then
   begin
     // RFC 7540 §5.1: DATA on unknown/closed stream → RST_STREAM
+    SetLength(LRst, 4);
+    LRst[0] := (H2_ERR_STREAM_CLOSED shr 24) and $FF;
+    LRst[1] := (H2_ERR_STREAM_CLOSED shr 16) and $FF;
+    LRst[2] := (H2_ERR_STREAM_CLOSED shr  8) and $FF;
+    LRst[3] :=  H2_ERR_STREAM_CLOSED         and $FF;
+    _SendFrame(H2_FRAME_RST_STREAM, 0, AStreamID, @LRst[0], 4);
+    Exit;
+  end;
+
+  // #190: DATA after END_STREAM was already seen (half-closed remote, RFC 7540
+  // §5.1) — e.g. a stream lingering in FStreams while its response drains under
+  // flow control. Re-appending would re-dispatch the handler and double-count
+  // FActiveStreams (leaking the connection). Reject with STREAM_CLOSED and stop.
+  if LStream.EndStream then
+  begin
     SetLength(LRst, 4);
     LRst[0] := (H2_ERR_STREAM_CLOSED shr 24) and $FF;
     LRst[1] := (H2_ERR_STREAM_CLOSED shr 16) and $FF;
@@ -1543,6 +1570,8 @@ var
   LPPPayload:   TBytes;
   LBodyLen:     Integer;
   LPushStream:  TH2Stream;
+  LOfs:         Integer;
+  LChunk:       Integer;
 begin
   if FGoAwaySent then Exit;
 
@@ -1587,8 +1616,26 @@ begin
   begin
     _SendFrame(H2_FRAME_HEADERS, H2_FLAG_END_HEADERS,
       LPromisedID, @LHdrPayload[0], Length(LHdrPayload));
-    _SendFrame(H2_FRAME_DATA, H2_FLAG_END_STREAM,
-      LPromisedID, @APush.Body[0], LBodyLen);
+    // #191: chunk the push body by the peer's MAX_FRAME_SIZE — a single
+    // oversized DATA frame is a FRAME_SIZE_ERROR that kills the connection.
+    // Decrement the connection/stream send windows so later real responses see
+    // a correct window. (Push is best-effort: it does not buffer/block on an
+    // exhausted window like SendResponse does.)
+    LOfs := 0;
+    while LOfs < LBodyLen do
+    begin
+      LChunk := LBodyLen - LOfs;
+      if LChunk > FPeerMaxFrameSize then
+        LChunk := FPeerMaxFrameSize;
+      if LOfs + LChunk >= LBodyLen then
+        _SendFrame(H2_FRAME_DATA, H2_FLAG_END_STREAM,
+          LPromisedID, @APush.Body[LOfs], LChunk)
+      else
+        _SendFrame(H2_FRAME_DATA, 0, LPromisedID, @APush.Body[LOfs], LChunk);
+      Dec(FConnSendWindow,       LChunk);
+      Dec(LPushStream.SendWindow, LChunk);
+      Inc(LOfs, LChunk);
+    end;
   end;
 
   // Immediately close the synthetic stream — push responses are half-closed
