@@ -58,6 +58,7 @@ type
     BodyLen:         Integer;
     EndStream:       Boolean;
     HeadersComplete: Boolean;
+    Refused:         Boolean;   // over MAX_CONCURRENT_STREAMS: decode HPACK then RST
     // Per-stream flow control
     SendWindow:      Integer;   // peer's stream-level send window (how much we can send)
     RecvWindow:      Integer;   // server's stream-level receive window (how much we accept)
@@ -1070,22 +1071,21 @@ begin
   // Get or create stream
   if not FStreams.TryGetValue(AStreamID, LStream) then
   begin
-    // MAX_CONCURRENT_STREAMS enforcement (RFC 7540 §5.1.2). Reject the new
-    // stream with REFUSED_STREAM — connection stays alive, other streams keep
-    // working. Prevents OOM from unlimited concurrent stream open.
-    if TInterlocked.Read(FClientStreamCount) >= Int64(FMaxConcurrentStreams) then
-    begin
-      _SendRstRefusedStream(AStreamID);
-      Exit;
-    end;
     LStream := TH2Stream.Create;
     LStream.StreamID   := AStreamID;
     LStream.State      := hssOpen;
     // Initialize per-stream flow control windows
     LStream.SendWindow := FPeerInitWinSize;           // what the peer allows us to send
     LStream.RecvWindow := Integer(FInitialWindowSize); // what we allow the peer to send
+    // MAX_CONCURRENT_STREAMS enforcement (RFC 7540 §5.1.2). #189: a refused
+    // stream MUST still have its HEADERS block fed to the HPACK decoder or the
+    // shared dynamic table desyncs and every later header block fails. So mark
+    // it refused (don't count it), decode the block below, then RST + drop it.
+    if TInterlocked.Read(FClientStreamCount) >= Int64(FMaxConcurrentStreams) then
+      LStream.Refused := True
+    else
+      TInterlocked.Increment(FClientStreamCount);
     FStreams.Add(AStreamID, LStream);
-    TInterlocked.Increment(FClientStreamCount);
   end;
 
   if LEndHdrs then
@@ -1104,6 +1104,18 @@ begin
     end
     else
       _DecodeRequestHeaders(LStream, APayload, APayLen);
+
+    // #189: the HPACK dynamic table is now advanced by the decode above. A
+    // refused stream is dropped here (RST_STREAM) instead of dispatched — the
+    // connection and its shared HPACK state stay consistent.
+    if LStream.Refused then
+    begin
+      _SendRstRefusedStream(AStreamID);
+      FStreams.Remove(AStreamID);
+      LStream.Free;
+      FContinStreamID := 0;
+      Exit;
+    end;
 
     LStream.HeadersComplete := True;
     // Preserve END_STREAM captured on the opening HEADERS: only OR in the
