@@ -85,7 +85,8 @@ type
     // Connection state
     FPrefaceReceived: Boolean;
     FSettingsSent:    Boolean;
-    FGoAwaySent:      Boolean;
+    FGoAwaySent:      Boolean;   // WE sent GOAWAY -> suppress our sends
+    FGoAwayReceived:  Boolean;   // client sent GOAWAY -> let in-flight drain
 
     // Frame reassembly accumulator
     FFrameBuf: TBytes;
@@ -866,7 +867,10 @@ end;
 
 procedure TH2Conn._HandleGoAway(APayload: PByte; APayLen: Integer);
 begin
-  FGoAwaySent := True; // suppress further sends
+  // The PEER is going away — do NOT set FGoAwaySent (that suppresses OUR sends
+  // and would stop in-flight streams from ever completing, so FDeferClose would
+  // never fire). Track it separately and let active streams drain.
+  FGoAwayReceived := True;
   if FActiveStreams > 0 then
     FDeferClose := True
   else if Assigned(FCloseProc) then
@@ -1107,6 +1111,14 @@ begin
     begin
       // Append final fragment — reuse LTotal as combined length
       LTotal := FContinHeadersLen + APayLen;
+      // Bound the accumulated header block on the terminal fragment too — the
+      // check in the non-terminal branch alone let the block overrun by one
+      // max-frame (~80 KB) via the END_HEADERS frame.
+      if LTotal > CMaxContinHeadersSize then
+      begin
+        _GoAway(FLastStreamID, H2_ERR_ENHANCE_YOUR_CALM);
+        Exit;
+      end;
       if LTotal > Length(FContinHeaders) then
         SetLength(FContinHeaders, LTotal);
       Move(APayload^, FContinHeaders[FContinHeadersLen], APayLen);
@@ -1575,6 +1587,9 @@ var
 begin
   if FGoAwaySent then Exit;
 
+  // Stream ids are 31-bit; once the even space is exhausted, stop pushing rather
+  // than wrap (the high bit would be masked and even ids silently reused).
+  if FNextPushStreamID > $7FFFFFFE then Exit;
   // Allocate the next server-initiated even stream ID
   LPromisedID       := FNextPushStreamID;
   Inc(FNextPushStreamID, 2);
