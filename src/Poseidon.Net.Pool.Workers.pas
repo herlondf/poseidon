@@ -265,7 +265,11 @@ var
   LActive: Integer;
   LDequeIdx: Integer;
 begin
-  if TInterlocked.Add(FShutdown, 0) <> 0 then Exit;
+  // Plain aligned Integer reads are atomic on x64. FShutdown/FIdleWorkers/
+  // FActiveWorkers are only read here as a hint (shutdown flag + spawn
+  // heuristic), so a locked read (LOCK XADD) is unnecessary — it just dirties
+  // the cache line and ping-pongs it across IO threads on every Post.
+  if FShutdown <> 0 then Exit;
 
   LWrapper := TWorkWrapper.Create;
   LWrapper.Work := AWork;
@@ -281,8 +285,8 @@ begin
   FSemaphore.Release(1);
 
   // Spawn a new worker when all existing workers are busy and below max.
-  LIdle := TInterlocked.Add(FIdleWorkers, 0);
-  LActive := TInterlocked.Add(FActiveWorkers, 0);
+  LIdle := FIdleWorkers;
+  LActive := FActiveWorkers;
   if (LIdle = 0) and (LActive < FMaxWorkers) then
     _SpawnWorker(LDequeIdx);
 end;

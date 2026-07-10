@@ -595,6 +595,8 @@ begin
         end;
         LDelivered.FinFlag := True;
         LDelivered.RSV1 := False;
+        LDelivered.RSV2 := False;
+        LDelivered.RSV3 := False;
         LDelivered.Masked := False;
         LDelivered.Opcode := LState.Opcode;
         LDelivered.Payload := LState.Buffer;

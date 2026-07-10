@@ -561,7 +561,9 @@ begin
   LTEPresent := False;
   LIsChunked := False;
   LHdrCount  := 0;
-  SetLength(AHeaders, CMaxHeaderCount);
+  // #M13: start small and grow geometrically instead of pre-allocating (and
+  // zeroing) CMaxHeaderCount pairs on every request; trimmed to LHdrCount below.
+  SetLength(AHeaders, 16);
 
   LLineStart := LLineEnd + 2;
   while LLineStart < LHdrEnd do
@@ -618,6 +620,8 @@ begin
     LName  := BufToStr(LLineStart, LColonPos - LLineStart);
     LValue := BufToStr(LValStart,  LLineEnd  - LValStart);
 
+    if LHdrCount = Length(AHeaders) then
+      SetLength(AHeaders, Length(AHeaders) * 2);
     AHeaders[LHdrCount] := TPair<string,string>.Create(LName, LValue);
     Inc(LHdrCount);
 

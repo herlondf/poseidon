@@ -154,7 +154,7 @@ end;
 // second — avoids a DecodeDate/Format on every response while staying
 // lock-free (each IO thread owns its own copy).
 threadvar
-  GDateCacheSec: Int64;
+  GDateCacheTick: Int64;
   GDateCacheStr: string;
 
 // Current time as an RFC 1123 HTTP-date in GMT, using fixed English names
@@ -168,20 +168,22 @@ const
      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
 var
   LUtc: TDateTime;
-  LSec: Int64;
+  LNowTick: Int64;
   LY, LMo, LD: Word;
   LH, LMi, LS, LMs: Word;
 begin
+  // #M15: gate on the cheap monotonic tick FIRST — the previous code paid the
+  // Now() + TTimeZone.Local.ToUniversalTime conversion on every response before
+  // the cache check. Recompute (incl. the timezone conversion) at most once/sec.
+  LNowTick := TThread.GetTickCount64;
+  if (GDateCacheStr <> '') and (LNowTick - GDateCacheTick < 1000) then
+    Exit(GDateCacheStr);
   LUtc := TTimeZone.Local.ToUniversalTime(Now);
-  LSec := Round(LUtc * SecsPerDay);
-  if (LSec <> GDateCacheSec) or (GDateCacheStr = '') then
-  begin
-    DecodeDate(LUtc, LY, LMo, LD);
-    DecodeTime(LUtc, LH, LMi, LS, LMs);
-    GDateCacheStr := Format('%s, %.2d %s %.4d %.2d:%.2d:%.2d GMT',
-      [CDays[DayOfWeek(LUtc)], LD, CMonths[LMo], LY, LH, LMi, LS]);
-    GDateCacheSec := LSec;
-  end;
+  DecodeDate(LUtc, LY, LMo, LD);
+  DecodeTime(LUtc, LH, LMi, LS, LMs);
+  GDateCacheStr := Format('%s, %.2d %s %.4d %.2d:%.2d:%.2d GMT',
+    [CDays[DayOfWeek(LUtc)], LD, CMonths[LMo], LY, LH, LMi, LS]);
+  GDateCacheTick := LNowTick;
   Result := GDateCacheStr;
 end;
 
