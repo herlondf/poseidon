@@ -190,6 +190,7 @@ var
   LCRLF: Integer;
   LLine: AnsiString;
   LParts: TArray<string>;
+  LPortNum: Integer;
 begin
   Result := False;
   ARemoteAddr := '';
@@ -233,15 +234,32 @@ begin
     Exit;
   end;
 
-  if Length(LParts) < 6 then begin AInvalid := True; Exit; end;
+  // #M10: require EXACTLY the 6 fields — reject trailing garbage after the port.
+  if Length(LParts) <> 6 then begin AInvalid := True; Exit; end;
   if not (SameText(LParts[1], 'TCP4') or SameText(LParts[1], 'TCP6')) then
   begin
     AInvalid := True;
     Exit;
   end;
 
+  // #M10: cross-check the address family against the declared protocol so a
+  // TCP4 line cannot smuggle an IPv6 address (and vice-versa).
+  if SameText(LParts[1], 'TCP4') then
+  begin
+    if (Pos('.', LParts[2]) = 0) or (Pos(':', LParts[2]) > 0) then
+    begin AInvalid := True; Exit; end;
+  end
+  else
+    if Pos(':', LParts[2]) = 0 then
+    begin AInvalid := True; Exit; end;
+
+  // #M11: reject a port outside 0..65535 instead of silently truncating to 16 bits.
+  LPortNum := StrToIntDef(LParts[4], -1);
+  if (LPortNum < 0) or (LPortNum > 65535) then
+  begin AInvalid := True; Exit; end;
+
   ARemoteAddr := LParts[2];
-  ARemotePort := Word(StrToIntDef(LParts[4], 0));
+  ARemotePort := Word(LPortNum);
   AConsumed := LCRLf + 2;
   Result := True;
 end;

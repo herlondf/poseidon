@@ -113,7 +113,12 @@ function MinLengthAttribute.Validate(const AValue: TValue; const AFieldName: str
 var
   LStr: string;
 begin
-  LStr := AValue.ToString;
+  // #M16: measure the actual string; ToString on a non-string TValue would
+  // count its textual representation instead of a real character length.
+  if AValue.IsType<string> then
+    LStr := AValue.AsString
+  else
+    LStr := AValue.ToString;
   Result := Length(LStr) >= FMin;
   if not Result then
     AError := Format('"%s" must be at least %d characters', [AFieldName, FMin]);
@@ -131,7 +136,11 @@ function MaxLengthAttribute.Validate(const AValue: TValue; const AFieldName: str
 var
   LStr: string;
 begin
-  LStr := AValue.ToString;
+  // #M16: measure the actual string, not a non-string ToString representation.
+  if AValue.IsType<string> then
+    LStr := AValue.AsString
+  else
+    LStr := AValue.ToString;
   Result := Length(LStr) <= FMax;
   if not Result then
     AError := Format('"%s" must be at most %d characters', [AFieldName, FMax]);
@@ -161,7 +170,18 @@ function RangeAttribute.Validate(const AValue: TValue; const AFieldName: string;
 var
   LNum: Double;
 begin
-  LNum := AValue.AsExtended;
+  // #M17: guard non-numeric fields — AsExtended would raise EInvalidCast (a hard
+  // crash) instead of reporting a validation error.
+  case AValue.Kind of
+    tkInteger, tkInt64, tkFloat:
+      LNum := AValue.AsExtended;
+  else
+    begin
+      Result := False;
+      AError := Format('"%s" must be a numeric value', [AFieldName]);
+      Exit;
+    end;
+  end;
   Result := (LNum >= FMin) and (LNum <= FMax);
   if not Result then
     AError := Format('"%s" must be between %g and %g', [AFieldName, FMin, FMax]);
