@@ -166,6 +166,28 @@ begin
   ACtx.ExtraHeaders[LLen] := TPair<string,string>.Create(AName, AValue);
 end;
 
+// #188: a shared cache must not store per-user or explicitly non-cacheable
+// responses — doing so leaks the first caller's body/session cookie to others.
+function ResponseIsCacheable(const ACtx: TNativeRequestContext): Boolean;
+var
+  I: Integer;
+  LVal: string;
+begin
+  for I := 0 to High(ACtx.ExtraHeaders) do
+  begin
+    if SameText(ACtx.ExtraHeaders[I].Key, 'Set-Cookie') then
+      Exit(False);
+    if SameText(ACtx.ExtraHeaders[I].Key, 'Cache-Control') then
+    begin
+      LVal := ACtx.ExtraHeaders[I].Value.ToLower;
+      if LVal.Contains('no-store') or LVal.Contains('private') or
+         LVal.Contains('no-cache') then
+        Exit(False);
+    end;
+  end;
+  Result := True;
+end;
+
 function CacheMiddleware(ATTLSeconds: Integer; AMaxBytes: Int64): TNativeMiddlewareFunc;
 var
   LOpts: TCacheOptions;
@@ -191,6 +213,14 @@ begin
       LEntry: TCacheEntry;
     begin
       if ACtx.Method <> 'GET' then
+      begin
+        ANext();
+        Exit;
+      end;
+
+      // #188: requests carrying credentials get user-specific responses; never
+      // serve a shared-cache HIT nor store their response.
+      if (ACtx.Header('Authorization') <> '') or (ACtx.Header('Cookie') <> '') then
       begin
         ANext();
         Exit;
@@ -224,7 +254,8 @@ begin
 
       ANext();
 
-      if (ACtx.Status >= 200) and (ACtx.Status < 300) then
+      if (ACtx.Status >= 200) and (ACtx.Status < 300) and
+         ResponseIsCacheable(ACtx) then
       begin
         LETag := GenerateETag(ACtx.Body);
         LEntry.Body := ACtx.Body;
