@@ -1,3 +1,65 @@
+# ⟳ Reavaliação 2026-07-11 (pós-sessão de fuzzing + CI dual-face)
+
+**Nota geral honesta: ~74 → ~78/100.** Ganho real (+3,6), todo baseado em
+evidência desta sessão — nada inflado. Ainda **abaixo de 80**; ver o porquê no
+fim desta seção.
+
+### Descoberta que reenquadra o #203 (integração vermelha local)
+As 19 falhas de integração locais **não são bug do Poseidon** — são
+**ambientais**. Provado com um programa Winsock puro de ~5 linhas (zero código
+Poseidon): `WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER, AcceptEx)` retorna
+**WSAEINVAL (10022)** e as completions RIO idem. `accept()` básico funciona; só
+o I/O de extensão sobreposto (AcceptEx/RIO) é rejeitado neste Windows (build
+Insider 26200 / produto de segurança fazendo hook do Winsock). O build **Linux
+serve HTTP normalmente** (15.443 req/s no WSL nesta mesma sessão). Logo, `#203`
+"integração verde local" está bloqueado pelo ambiente — a alavanca é um runner
+limpo/Linux, não mudança de código.
+
+### O que subiu a nota (com prova)
+- **Fuzzing in-process** (`Poseidon.Tests.Fuzz`, #200/#201): 7 testes,
+  ~400k iterações, PRNG determinístico + watchdog de loop infinito, sobre
+  `ParseHTTP1Request`, `DecodeHTTP1Chunked`, `TH2HpackCodec.DecodeHeaders` e
+  `TWebSocketUtils.ParseFrame`. Todos verdes → superfícies de parsing **provadas
+  sem crash e sem hang**.
+- **DoS remoto real encontrado E corrigido** pelo fuzzer: `TEncoding.UTF8.
+  GetString` levanta `EEncodingError` neste RTL para bytes não-UTF-8; o decoder
+  HPACK passava octetos opacos de header por ele → um cliente HTTP/2 derrubava
+  o decoder sem autenticação. Corrigido (octetos → ISO-8859-1, igual ao HTTP/1).
+  Mesma classe varrida em **Cache** (ETag de corpo binário) e **JWT**.
+- **Gate de compilação dual-face** (#204): `ci/build-both-faces.ps1` — build
+  Win64 completo + compile-check Linux64 (epoll/io_uring) — **validado verde**.
+  Fecha o risco "bug de plataforma latente atrás de {$IFDEF}".
+- **#208**: idle-close rebaixado de llError → llDebug (parava de poluir o log
+  de erro em produção).
+
+### Tabela reavaliada (Δ vs 2026-07-10)
+| Dimensão | 07-10 | 07-11 | Motivo do Δ |
+|---|---:|---:|---|
+| Cobertura de testes | 55 | **67** | +8 testes; fuzzing das 3 superfícies (achou bug real); dual-face compila. Falta h2spec/Autobahn/soak/integração-verde. |
+| Segurança | 78 | **83** | DoS remoto (classe inteira) achado+corrigido via fuzzing; JWT/Cache endurecidos. |
+| Correção HTTP/1.1 | 85 | **88** | Parser provado sem crash/hang no fuzzing (sela as defesas de smuggling). |
+| Correção HTTP/2 | 70 | **75** | HPACK endurecido + fuzzado. Ainda sem h2spec. |
+| Correção WebSocket | 78 | **81** | ParseFrame fuzzado sem crash. Ainda sem Autobahn. |
+| Robustez | 68 | **74** | 3 superfícies provadas sem crash/hang; #208; classe de DoS varrida. |
+| Portabilidade | 80 | **85** | Compilação das 2 faces **agora validada** + gate no CI. |
+| Prontidão produção | 56 | **61** | Gate de CI; #203 reenquadrado (ambiente, não código). Sem soak/prova de integração ainda. |
+| Segurança de memória | 75 | **76** | Caminhos Cache/JWT endurecidos; fuzzing não achou leak nos parsers. |
+| Concorrência | 74 | 74 | Sem mudança (#196 não feito — refactor de concorrência sem runtime-test local seria arriscado). |
+| Arquitetura 88 · Performance 85 · API/DX 82 · Docs 74→75 · Ecossistema 80 · Qualidade 83 | — | — | ~estável |
+
+**Média ponderada (reliability-critical ×3, importantes ×2, contexto ×1): ~78.**
+
+### Por que ainda não é 80 (honestidade > meta)
+As âncoras pesadas que seguram a nota — **Prontidão (61), Concorrência (74),
+HTTP/2 (75), Testes (67)** — só sobem com itens que **este Windows não roda**:
+integração-verde, **h2spec**, **Autobahn**, **soak**, e o refactor #196. A regra
+de ouro desta avaliação proíbe arredondar para cima: 78 é o que a evidência
+sustenta hoje. O caminho honesto para 80+ é rodar a conformidade em **Linux**
+(WSL/Docker já funcionam nesta máquina — o build Linux serve HTTP), onde o
+problema de Winsock do Windows não existe.
+
+---
+
 # Poseidon — Avaliação de Maturidade & Plano de Ação (2026-07-10)
 
 Baseado em: revisão profunda de todo o `src/` + `middlewares/` (rodadas 07-08/07-09/07-10),
