@@ -1,0 +1,41 @@
+name: CI — dual-face build (Win64 + Linux64)
+
+# Issue #204 — compile BOTH platform faces on every push/PR so a bug behind an
+# {$IFDEF MSWINDOWS} / {$ELSE} (IOCP/RIO vs epoll/io_uring) cannot stay latent.
+#
+# NOTE: the Delphi compiler (dcc64 / dcclinux64) is licensed and is NOT present
+# on GitHub-hosted runners. This job therefore targets a SELF-HOSTED runner that
+# has RAD Studio installed and is labelled `delphi`. Without such a runner the
+# job stays queued — that is intentional; wire up the runner to enable the gate.
+#
+# The Windows face is a full build of the DUnitX test project; the Linux face is
+# a compile check of the epoll / io_uring backends (link is skipped unless the
+# Linux SDK / PAServer is available on the runner).
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build-both-faces:
+    runs-on: [ self-hosted, windows, delphi ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dual-face build gate
+        shell: pwsh
+        run: pwsh -NoProfile -File ci/build-both-faces.ps1
+
+      - name: Run DUnitX suite (Win64)
+        shell: pwsh
+        # The pure/logic + fuzz fixtures run headless; the live-socket
+        # integration fixtures require a host whose Winsock supports AcceptEx/RIO
+        # (some sandboxed/Insider builds return WSAEINVAL — see #203).
+        run: |
+          Push-Location tests
+          .\Poseidon.Tests.exe
+          Pop-Location

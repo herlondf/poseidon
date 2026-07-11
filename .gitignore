@@ -63,3 +63,9 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 sandbox/
+
+# CI build-check outputs
+ci/dculinux/
+ci/linux_check.txt
+ci/*.o
+ci/*.dcu
