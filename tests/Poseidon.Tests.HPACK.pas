@@ -37,6 +37,10 @@ type
     [Test] procedure EmptyBlock_ReturnsTrue_NoHeaders;
     [Test] procedure MultipleHeaders_AllDecoded;
     [Test] procedure CustomHeader_AppearsInHeadersArray;
+    // Regression: a header value carrying non-UTF-8 octets ($FF) must decode
+    // without raising (TEncoding.UTF8.GetString raises EEncodingError in this
+    // RTL — a remotely-triggerable HPACK DoS). Octets map 1:1 (ISO-8859-1).
+    [Test] procedure NonUTF8HeaderValue_DecodesAsLatin1_NoRaise;
   end;
 
   // ── Fixture 2: Huffman decode ────────────────────────────────────────────────
@@ -453,6 +457,34 @@ begin
     Assert.AreEqual<Integer>(1, Length(LHeaders));
     Assert.AreEqual('x-foo', LHeaders[0].Key);
     Assert.AreEqual('bar',   LHeaders[0].Value);
+  finally
+    LCodec.Free;
+  end;
+end;
+
+procedure THPackDecodeTests.NonUTF8HeaderValue_DecodesAsLatin1_NoRaise;
+var
+  LCodec:  TH2HpackCodec;
+  LMethod, LPath, LScheme, LAuth: string;
+  LHeaders: TArray<TPair<string, string>>;
+  LGA: Boolean;
+  LBlock: TBytes;
+begin
+  LCodec := TH2HpackCodec.Create;
+  try
+    // $00 literal-without-indexing, new name "x-bin" (5), value = one raw $FF
+    // octet (an invalid UTF-8 byte). H=0 so the value is a plain byte string.
+    LBlock := Bytes([
+      $00,
+      $05, $78,$2D,$62,$69,$6E,   // "x-bin"
+      $01, $FF                    // value: single octet 0xFF
+    ]);
+    Assert.IsTrue(Decode(LCodec, LBlock, LMethod, LPath, LScheme, LAuth,
+      LHeaders, LGA), 'decode must succeed without raising');
+    Assert.AreEqual<Integer>(1, Length(LHeaders));
+    Assert.AreEqual('x-bin', LHeaders[0].Key);
+    Assert.AreEqual<Integer>(1, Length(LHeaders[0].Value));
+    Assert.AreEqual<Integer>($FF, Ord(LHeaders[0].Value[Low(string)]));
   finally
     LCodec.Free;
   end;

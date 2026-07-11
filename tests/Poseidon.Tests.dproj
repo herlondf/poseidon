@@ -61,6 +61,7 @@
     <DCCReference Include="Poseidon.Tests.Connection.pas"/>
     <DCCReference Include="Poseidon.Tests.Workers.pas"/>
     <DCCReference Include="Poseidon.Tests.Validation.pas"/>
+    <DCCReference Include="Poseidon.Tests.Fuzz.pas"/>
     <DCCReference Include="Poseidon.Tests.Problem.pas"/>
     <DCCReference Include="mocks\Poseidon.Mock.SSLProvider.pas"/>
     <DCCReference Include="mocks\Poseidon.Mock.Context.pas"/>

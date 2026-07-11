@@ -23,6 +23,7 @@ uses
   Poseidon.Tests.Workers,
   Poseidon.Tests.Problem,
   Poseidon.Tests.Validation,
+  Poseidon.Tests.Fuzz,
   Poseidon.Mock.SSLProvider,
   Poseidon.Mock.Context,
   Poseidon.Tests.Middleware.CORS,
