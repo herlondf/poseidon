@@ -41,12 +41,20 @@ type
     [Test] procedure Fuzz_StructuredAdversarial_NeverCrashesNeverHangs;
   end;
 
+  [TestFixture]
+  TFuzzWebSocketTests = class
+  public
+    [Test] procedure Fuzz_RandomFrames_NeverCrashesNeverHangs;
+    [Test] procedure Fuzz_MutatedValidFrames_NeverCrashesNeverHangs;
+  end;
+
 implementation
 
 uses
   System.Generics.Defaults,
   Poseidon.Net.HTTP1.Parser,
-  Poseidon.Net.HTTP2.HPACK;
+  Poseidon.Net.HTTP2.HPACK,
+  Poseidon.Net.WebSocket;
 
 const
   CHTTP1Iterations = 60000;
@@ -451,8 +459,73 @@ begin
   end;
 end;
 
+// ---------------------------------------------------------------------------
+// WebSocket frame parser fuzz — a crafted 64-bit length field is a classic
+// OOM/DoS vector; ParseFrame must reject it, not allocate on it.
+// ---------------------------------------------------------------------------
+
+procedure FuzzWebSocket(AProgress: TFuzzProgress; AMutate: Boolean);
+var
+  LRng: TRng;
+  I, LConsumed: Integer;
+  LBuf: TBytes;
+  LFrame: TWebSocketFrame;
+  LMutations, M, LPos: Integer;
+begin
+  if AMutate then LRng.Seed($55AA55AA33CC33CC)
+  else LRng.Seed($1122334455667788);
+
+  for I := 0 to CHTTP1Iterations - 1 do
+  begin
+    AProgress.Mark(I, LRng.State);
+    if AMutate then
+    begin
+      // Start from a valid masked text frame, then corrupt a few bytes — keeps
+      // the fuzzer near the header/length/mask decision boundaries.
+      LBuf := TWebSocketUtils.TextFrame('hello world');
+      LMutations := LRng.InRange(1, 6);
+      for M := 0 to LMutations - 1 do
+      begin
+        if Length(LBuf) = 0 then Break;
+        LPos := LRng.InRange(0, Length(LBuf) - 1);
+        LBuf[LPos] := LRng.NextByte;
+      end;
+    end
+    else
+      LBuf := RandomBuf(LRng, 64);
+
+    if Length(LBuf) = 0 then Continue;
+    TWebSocketUtils.ParseFrame(@LBuf[0], Length(LBuf), LFrame, LConsumed);
+  end;
+end;
+
+procedure TFuzzWebSocketTests.Fuzz_RandomFrames_NeverCrashesNeverHangs;
+var
+  LProg: TFuzzProgress;
+begin
+  LProg := TFuzzProgress.Create;
+  try
+    RunWithWatchdog(LProg, procedure begin FuzzWebSocket(LProg, False); end);
+  finally
+    LProg.Free;
+  end;
+end;
+
+procedure TFuzzWebSocketTests.Fuzz_MutatedValidFrames_NeverCrashesNeverHangs;
+var
+  LProg: TFuzzProgress;
+begin
+  LProg := TFuzzProgress.Create;
+  try
+    RunWithWatchdog(LProg, procedure begin FuzzWebSocket(LProg, True); end);
+  finally
+    LProg.Free;
+  end;
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFuzzHTTP1ParserTests);
   TDUnitX.RegisterTestFixture(TFuzzHPACKTests);
+  TDUnitX.RegisterTestFixture(TFuzzWebSocketTests);
 
 end.

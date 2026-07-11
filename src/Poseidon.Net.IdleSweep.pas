@@ -112,8 +112,10 @@ begin
           LIdle := Integer(LDiff);
         if LIdle > FIdleTimeoutMs then
         begin
+          // #208: idle close is routine lifecycle, not an error — logging it at
+          // llError floods production error logs. Demote to llDebug.
           if Assigned(FOnLog) then
-            FOnLog(llError, '[sweep] idle close: ' + LConn.RemoteAddr +
+            FOnLog(llDebug, '[sweep] idle close: ' + LConn.RemoteAddr +
               ' idle=' + IntToStr(LIdle) + 'ms');
           FIOBackend.ShutdownConn(LSnap[I]);
         end;
