@@ -43,7 +43,16 @@ begin
     LPadded := LBase64;
   end;
   LBytes := TNetEncoding.Base64.DecodeStringToBytes(LPadded);
-  Result := TEncoding.UTF8.GetString(LBytes);
+  // A JWT segment must be valid UTF-8 JSON. TEncoding.UTF8.GetString RAISES
+  // EEncodingError on invalid UTF-8 in this RTL; a malformed-but-signed token
+  // would then surface as a 500 instead of a clean 401. Treat undecodable
+  // bytes as an invalid segment (empty → JSON parse fails → Unauthorized).
+  try
+    Result := TEncoding.UTF8.GetString(LBytes);
+  except
+    on EEncodingError do
+      Result := '';
+  end;
 end;
 
 // Constant-time string comparison — never short-circuits on the first

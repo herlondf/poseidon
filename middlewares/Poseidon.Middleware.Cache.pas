@@ -150,11 +150,21 @@ begin
 end;
 
 function GenerateETag(const ABody: TBytes): string;
+var
+  LMD5: THashMD5;
 begin
   if Length(ABody) = 0 then
     Result := '"0"'
   else
-    Result := '"' + LowerCase(THashMD5.GetHashString(TEncoding.UTF8.GetString(ABody))) + '"';
+  begin
+    // Hash the raw octets — a binary body (image/pdf/gzip) is not valid UTF-8,
+    // and TEncoding.UTF8.GetString RAISES EEncodingError on it in this RTL
+    // (crash while ETagging a cacheable binary response). Hashing bytes is also
+    // the correct ETag semantics (exact byte identity).
+    LMD5 := THashMD5.Create;
+    LMD5.Update(ABody);
+    Result := '"' + LowerCase(LMD5.HashAsString) + '"';
+  end;
 end;
 
 procedure AddHeader(var ACtx: TNativeRequestContext; const AName, AValue: string);

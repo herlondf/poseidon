@@ -445,6 +445,22 @@ begin
   end;
 end;
 
+// HPACK header-field names/values are opaque octet sequences (RFC 7541 §1.3),
+// NOT required to be UTF-8. Decode them as ISO-8859-1 (raw byte → code point):
+// this NEVER raises (TEncoding.UTF8.GetString raises EEncodingError on invalid
+// UTF-8 in this RTL — a remotely-triggerable DoS via a non-UTF-8 header) and is
+// consistent with the HTTP/1 parser (_FastBufToStr), which maps octets the same
+// way. Faithful and reversible; a genuine UTF-8 value round-trips via GetBytes.
+function _HpackOctetsToStr(const ABytes: TBytes; ALen: Integer): string;
+var
+  LI: Integer;
+begin
+  if ALen <= 0 then begin Result := ''; Exit; end;
+  SetLength(Result, ALen);
+  for LI := 0 to ALen - 1 do
+    PWord(@PChar(Pointer(Result))[LI])^ := ABytes[LI];
+end;
+
 // ===========================================================================
 // TH2HpackCodec
 // ===========================================================================
@@ -646,7 +662,7 @@ begin
   end;
 
   SetLength(LBytes, LBLen);
-  AResult := TEncoding.UTF8.GetString(LBytes);
+  AResult := _HpackOctetsToStr(LBytes, LBLen);
   Result := True;
 end;
 
@@ -690,7 +706,7 @@ begin
     SetLength(LSlice, LLen);
     if LLen > 0 then
       Move(LRaw^, LSlice[0], LLen);
-    Result := TEncoding.UTF8.GetString(LSlice);
+    Result := _HpackOctetsToStr(LSlice, Integer(LLen));
   end;
 end;
 
