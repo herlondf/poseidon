@@ -38,8 +38,11 @@ begin
         Writeln(ErrOutput, '[log:', Ord(ALevel), '] ', AMessage);
         Flush(ErrOutput);
       end;
-    App.ConfigureSSL('server.crt', 'server.key');
+    // ALPN is registered by ConfigureSSL based on the H2-enabled flag captured
+    // at call time — EnableHTTP2 MUST precede ConfigureSSL or "h2" never
+    // negotiates (see #213 investigation).
     App.EnableHTTP2;
+    App.ConfigureSSL('server.crt', 'server.key');
 
     App.Get('/',
       procedure(var Ctx: TNativeRequestContext)
