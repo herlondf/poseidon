@@ -58,6 +58,10 @@ type
     BodyLen:         Integer;
     EndStream:       Boolean;
     HeadersComplete: Boolean;
+    // RFC 7540 §8.1.2.6 — a declared content-length must equal the sum of DATA
+    // payloads. HasContentLength distinguishes "0" from "absent".
+    HasContentLength: Boolean;
+    ContentLength:    Int64;
     Refused:         Boolean;   // over MAX_CONCURRENT_STREAMS: decode HPACK then RST
     // Per-stream flow control
     SendWindow:      Integer;   // peer's stream-level send window (how much we can send)
@@ -1433,6 +1437,8 @@ var
   LProtoErr:  Boolean;
   LRst:       TBytes;
   LErrCode:   Cardinal;
+  LI:         Integer;
+  LCL:        Int64;
 
   procedure _SendStreamProtocolError;
   begin
@@ -1496,6 +1502,29 @@ begin
     end;
   end;
 
+  // RFC 7540 §8.1.2.1 — response pseudo-headers (e.g. :status) are invalid in a
+  // request. Valid request pseudo-headers were extracted into LMethod/LPath/
+  // LScheme/LAuthority, so any name still starting with ':' here is illegal.
+  // §8.1.2.6 — capture a declared content-length for later DATA validation.
+  for LI := 0 to High(LHeaders) do
+  begin
+    if (LHeaders[LI].Key <> '') and (LHeaders[LI].Key[Low(string)] = ':') then
+    begin
+      _SendStreamProtocolError;
+      Exit;
+    end;
+    if LHeaders[LI].Key = 'content-length' then
+    begin
+      if not TryStrToInt64(LHeaders[LI].Value, LCL) or (LCL < 0) then
+      begin
+        _SendStreamProtocolError;
+        Exit;
+      end;
+      AStream.HasContentLength := True;
+      AStream.ContentLength    := LCL;
+    end;
+  end;
+
   AStream.Method    := LMethod;
   AStream.Path      := LPath;
   AStream.Scheme    := LScheme;
@@ -1518,7 +1547,26 @@ var
   I: Integer;
   LQ: Integer;
   LIsClientStream: Boolean;
+  LClRst: TBytes;
 begin
+  // RFC 7540 §8.1.2.6 — a declared content-length that disagrees with the sum
+  // of DATA frame payloads is a stream error (PROTOCOL_ERROR). Reject before
+  // invoking the application handler.
+  if AStream.HasContentLength and (AStream.ContentLength <> Int64(AStream.BodyLen)) then
+  begin
+    SetLength(LClRst, 4);
+    LClRst[0] := (H2_ERR_PROTOCOL_ERROR shr 24) and $FF;
+    LClRst[1] := (H2_ERR_PROTOCOL_ERROR shr 16) and $FF;
+    LClRst[2] := (H2_ERR_PROTOCOL_ERROR shr  8) and $FF;
+    LClRst[3] :=  H2_ERR_PROTOCOL_ERROR         and $FF;
+    _SendFrame(H2_FRAME_RST_STREAM, 0, AStream.StreamID, @LClRst[0], 4);
+    FStreams.Remove(AStream.StreamID);
+    if (AStream.StreamID and 1) = 1 then
+      TInterlocked.Decrement(FClientStreamCount);
+    AStream.Free;
+    Exit;
+  end;
+
   LReq.StreamID  := AStream.StreamID;
   LReq.Method    := AStream.Method;
   LReq.Protocol  := 'HTTP/2';

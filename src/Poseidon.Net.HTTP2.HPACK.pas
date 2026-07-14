@@ -835,6 +835,7 @@ var
   LHasPath: Boolean;
   LHasScheme: Boolean;
   LHasAuthority: Boolean;
+  LSeenField: Boolean;
   I: Integer;
   LChar: Char;
   LHopByHop: Boolean;
@@ -846,6 +847,17 @@ var
     Result := (AN = 'connection') or (AN = 'keep-alive') or
               (AN = 'proxy-connection') or (AN = 'transfer-encoding') or
               (AN = 'upgrade');
+  end;
+
+  // Resolve a table index into LName/LValue. RFC 7541 §2.3.3 / §6.1 — an index
+  // that addresses neither the static nor the dynamic table is a decoding error
+  // (COMPRESSION_ERROR at the caller).
+  function _ResolveIndex(AIndex: Cardinal): Boolean;
+  begin
+    if AIndex <= STATIC_TABLE_SIZE then
+      Result := _HpackGetStatic(AIndex, LName, LValue)
+    else
+      Result := _HpackGetDynamic(AIndex, LName, LValue);
   end;
 
 begin
@@ -862,6 +874,7 @@ begin
   AAuthority := '';
   SetLength(AHeaders, 0);
   LSawRegular := False;
+  LSeenField := False;
   LHasMethod := False;
   LHasPath := False;
   LHasScheme := False;
@@ -881,13 +894,13 @@ begin
         Result := False;
         Exit;
       end;
-      if LIdx <= STATIC_TABLE_SIZE then
+      // §6.1 — an indexed representation with an index that resolves to no
+      // table entry is a COMPRESSION_ERROR (not a silent skip).
+      if not _ResolveIndex(LIdx) then
       begin
-        if not _HpackGetStatic(LIdx, LName, LValue) then Continue;
-      end
-      else
-      begin
-        if not _HpackGetDynamic(LIdx, LName, LValue) then Continue;
+        if Assigned(AOnGoAway) then AOnGoAway;
+        Result := False;
+        Exit;
       end;
       LAddDyn := False;
     end
@@ -900,8 +913,14 @@ begin
       LNameOnly := (LIdx = 0);
       if not LNameOnly then
       begin
-        if LIdx <= STATIC_TABLE_SIZE then _HpackGetStatic(LIdx, LName, LValue)
-        else _HpackGetDynamic(LIdx, LName, LValue);
+        // §6.2 — a literal with a name index that resolves to no table entry
+        // is a COMPRESSION_ERROR.
+        if not _ResolveIndex(LIdx) then
+        begin
+          if Assigned(AOnGoAway) then AOnGoAway;
+          Result := False;
+          Exit;
+        end;
       end
       else
         LName := _HpackDecodeStr(ABuf, ALen, LPos);
@@ -916,8 +935,14 @@ begin
       LNameOnly := (LIdx = 0);
       if not LNameOnly then
       begin
-        if LIdx <= STATIC_TABLE_SIZE then _HpackGetStatic(LIdx, LName, LValue)
-        else _HpackGetDynamic(LIdx, LName, LValue);
+        // §6.2 — a literal with a name index that resolves to no table entry
+        // is a COMPRESSION_ERROR.
+        if not _ResolveIndex(LIdx) then
+        begin
+          if Assigned(AOnGoAway) then AOnGoAway;
+          Result := False;
+          Exit;
+        end;
       end
       else
         LName := _HpackDecodeStr(ABuf, ALen, LPos);
@@ -932,8 +957,14 @@ begin
       LNameOnly := (LIdx = 0);
       if not LNameOnly then
       begin
-        if LIdx <= STATIC_TABLE_SIZE then _HpackGetStatic(LIdx, LName, LValue)
-        else _HpackGetDynamic(LIdx, LName, LValue);
+        // §6.2 — a literal with a name index that resolves to no table entry
+        // is a COMPRESSION_ERROR.
+        if not _ResolveIndex(LIdx) then
+        begin
+          if Assigned(AOnGoAway) then AOnGoAway;
+          Result := False;
+          Exit;
+        end;
       end
       else
         LName := _HpackDecodeStr(ABuf, ALen, LPos);
@@ -941,6 +972,15 @@ begin
     end
     else if (LByte and $E0) = $20 then
     begin
+      // §4.2 — a dynamic table size update MUST appear at the beginning of a
+      // header block, before any header field representation. One that follows
+      // a field is a COMPRESSION_ERROR.
+      if LSeenField then
+      begin
+        if Assigned(AOnGoAway) then AOnGoAway;
+        Result := False;
+        Exit;
+      end;
       // §6.3 Dynamic Table Size Update — cap silently against the server's
       // announced ceiling (CServerMaxDynTableSize). Value above the cap is
       // clamped, not treated as an error, so that badly-tuned clients still
@@ -958,6 +998,11 @@ begin
       Inc(LPos); // unknown — skip
       Continue;
     end;
+
+    // A header field representation was decoded (size-update / unknown branches
+    // Continue above). Any later dynamic table size update in this block is now
+    // out of position (§4.2).
+    LSeenField := True;
 
     // Malformed Huffman sequence detected during string decode: RFC 7541 §5.2
     // → COMPRESSION_ERROR, connection error.
