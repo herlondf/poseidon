@@ -1298,7 +1298,13 @@ begin
       if FWSManager <> nil then
         FWSManager.DropConnection(AConn);
     end;
-    FreeAndNil(LConn.H2Conn);
+    // #213: do NOT free H2Conn here. _CloseConn can be reached from within the
+    // H2 dispatch on the same worker thread (a failed response send calls
+    // _EncryptAndSend -> _CloseConn), so freeing TH2Conn now would pull the
+    // object out from under _DispatchStream / ProcessData still on the stack,
+    // and its finally (FStreams.Remove) would fault on the freed dictionary.
+    // TNativeConn.Destroy frees H2Conn instead — it runs only at refcount 0,
+    // after the in-flight worker's Release, so no H2Conn method is live.
     if LConn.SSLHandle <> nil then
     begin
       FSSLManager.FreeSSL(LConn.SSLHandle);  // also frees both BIOs
