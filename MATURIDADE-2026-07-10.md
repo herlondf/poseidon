@@ -1,3 +1,32 @@
+# ⟳ Adendo 2026-07-13 (h2spec no Linux — achado CRÍTICO)
+
+Rodei o **h2spec** contra o Poseidon no **Linux** (harness novo
+`tests/run-h2spec.ps1` — cross-compila Linux64 + WSL descartável + h2spec). Isso
+**confirmou de vez** que o build Linux serve (sobe, ouve, **completa o handshake
+TLS**), reforçando que as falhas do Windows são ambientais.
+
+**Mas o h2spec NÃO subiu a nota — ele achou um bug CRÍTICO (#213):** HTTPS e
+HTTP/2-over-TLS **crasham no Linux** com `EAccessViolation` (acesso a 0x30) no
+caminho pós-handshake (`_ProcessRecvSSL` → dispatch). É **heisenbug** (some com
+logging) → corrida / use-after-free na fronteira SSL + pool assíncrono. Reproduz
+em epoll e io_uring, com/sem SNI/ALPN. Resultado h2spec: **1/146**.
+
+Consequência honesta na pontuação: **não passamos de 80** — ao contrário, o
+achado mostra que **TLS-no-Linux não é production-ready**. Ajustes vs 07-11:
+- **Correção HTTP/2 75 → 72**: h2-over-TLS provado quebrado no Linux (não é mais
+  "correto por inspeção" — é "quebrado por prova").
+- **Concorrência 74 → 72** e **Robustez 74 → 72**: nova corrida/UAF crítica.
+- **Prontidão produção 61 → 60**: TLS-no-Linux instável.
+- **Cobertura de testes 67 → 69**: harness h2spec real e reprodutível (+), mas
+  ainda 1/146 até o #213 ser corrigido.
+
+**Nota geral honesta: ~77/100.** O caminho para 80+ agora passa por **corrigir
+#213** (destrava o h2spec → conformidade HTTP/2 real) + Autobahn + soak. A
+infraestrutura para provar tudo isso já existe e está verde-de-fábrica; falta
+fechar o bug de TLS no Linux.
+
+---
+
 # ⟳ Reavaliação 2026-07-11 (pós-sessão de fuzzing + CI dual-face)
 
 **Nota geral honesta: ~74 → ~78/100.** Ganho real (+3,6), todo baseado em
