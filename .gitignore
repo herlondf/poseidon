@@ -69,3 +69,11 @@ ci/dculinux/
 ci/linux_check.txt
 ci/*.o
 ci/*.dcu
+
+# h2spec conformance harness build/runtime artifacts
+tests/h2spec/bin/
+tests/h2spec/bin-epoll/
+tests/h2spec/dcu/
+tests/h2spec/.wsl/
+tests/h2spec/*.dcu
+tests/h2spec/*.o
