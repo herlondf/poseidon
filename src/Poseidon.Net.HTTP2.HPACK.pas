@@ -981,15 +981,18 @@ begin
         Result := False;
         Exit;
       end;
-      // §6.3 Dynamic Table Size Update — cap silently against the server's
-      // announced ceiling (CServerMaxDynTableSize). Value above the cap is
-      // clamped, not treated as an error, so that badly-tuned clients still
-      // interoperate; a value ABOVE UInt31 is malformed HPACK and does error.
+      // §6.3 Dynamic Table Size Update. RFC 7541 §6.3 — the new maximum MUST NOT
+      // exceed the limit the server announced (SETTINGS_HEADER_TABLE_SIZE, here
+      // CServerMaxDynTableSize); a larger value is a decoding error
+      // (COMPRESSION_ERROR). h2spec enforces this.
       LIdx := _HpackDecodeInt(ABuf, ALen, 5, LPos);
       if LIdx > Cardinal(CServerMaxDynTableSize) then
-        FDynTableMaxSize := CServerMaxDynTableSize
-      else
-        FDynTableMaxSize := Integer(LIdx);
+      begin
+        if Assigned(AOnGoAway) then AOnGoAway;
+        Result := False;
+        Exit;
+      end;
+      FDynTableMaxSize := Integer(LIdx);
       _HpackEvict(FDynTableMaxSize);
       Continue;
     end

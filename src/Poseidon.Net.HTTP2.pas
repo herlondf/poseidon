@@ -829,6 +829,8 @@ var
   LVal:        Cardinal;
   LDelta:      Integer;
   LStreamPair: TPair<Cardinal, TH2Stream>;
+  LPendingList: TList<TH2Stream>;
+  LStream:      TH2Stream;
 begin
   // ACK — the peer acknowledged OUR settings. RFC 7540 §6.5: a SETTINGS frame
   // with the ACK flag set MUST carry an empty payload — otherwise FRAME_SIZE_ERROR.
@@ -899,6 +901,28 @@ begin
               Exit;
             end;
             Inc(LStreamPair.Value.SendWindow, LDelta);
+          end;
+          // RFC 7540 §6.9.2 — enlarging the initial window frees credit for
+          // streams whose response DATA was buffered awaiting flow control.
+          // Flush them now. Snapshot first: _DrainPendingStream may remove/free
+          // a stream, invalidating a live enumerator over FStreams.
+          if LDelta > 0 then
+          begin
+            LPendingList := TList<TH2Stream>.Create;
+            try
+              for LStreamPair in FStreams do
+                if (LStreamPair.Value.PendingBody <> nil) and
+                   (LStreamPair.Value.PendingBodyOfs <
+                      Length(LStreamPair.Value.PendingBody)) then
+                  LPendingList.Add(LStreamPair.Value);
+              for LStream in LPendingList do
+              begin
+                if FConnSendWindow <= 0 then Break;
+                _DrainPendingStream(LStream);
+              end;
+            finally
+              LPendingList.Free;
+            end;
           end;
         end;
       // Other settings: silently accept

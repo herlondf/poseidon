@@ -357,12 +357,13 @@ begin
   try
     // §6.3: $3F = 0b00111111 = size-update with 5-bit prefix saturated (31),
     // then multi-byte continuation: $E1 $FF $FF $07 encodes 31 + 0x1FFFFE0 = 33554463.
-    // Novo comportamento (M2): valor acima do CServerMaxDynTableSize (4096) é
-    // silenciosamente capped (não é erro protocolar) — decode continua True,
-    // GOAWAY não é chamado. Defesa contra decoder-side amplification.
+    // RFC 7541 §6.3 — a size update above the announced maximum
+    // (CServerMaxDynTableSize = 4096) is a decoding error: decode returns False
+    // and GOAWAY (COMPRESSION_ERROR) is invoked. h2spec enforces this.
     LBlock := Bytes([$3F, $E1, $FF, $FF, $07]);
-    Assert.IsTrue(Decode(LCodec, LBlock, LMethod, LPath, LScheme, LAuth, LHeaders, LGA));
-    Assert.IsFalse(LGA, 'GOAWAY must NOT be called — oversized size update is silently capped');
+    Assert.IsFalse(Decode(LCodec, LBlock, LMethod, LPath, LScheme, LAuth, LHeaders, LGA),
+      'oversized dynamic table size update must fail the decode');
+    Assert.IsTrue(LGA, 'GOAWAY (COMPRESSION_ERROR) must be called on oversized size update');
   finally
     LCodec.Free;
   end;
