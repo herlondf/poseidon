@@ -149,6 +149,7 @@ type
     procedure _HandleWindowUpdate(AStreamID: Cardinal; APayload: PByte; APayLen: Integer);
     procedure _HandlePing(AFlags: Byte; APayload: PByte; APayLen: Integer);
     procedure _HandleGoAway(APayload: PByte; APayLen: Integer);
+    procedure _HandlePriority(AStreamID: Cardinal; APayload: PByte; APayLen: Integer);
     procedure _HandleRstStream(AStreamID: Cardinal; APayload: PByte; APayLen: Integer);
     procedure _HandleContinuation(AFlags: Byte; AStreamID: Cardinal;
       APayload: PByte; APayLen: Integer);
@@ -653,12 +654,18 @@ var
 begin
   if FGoAwaySent then Exit;
 
-  // Append to accumulator
-  LNeeded := FFrameLen + ALen;
-  if LNeeded > Length(FFrameBuf) then
-    SetLength(FFrameBuf, LNeeded + 4096);
-  Move(ABuf^, FFrameBuf[FFrameLen], ALen);
-  Inc(FFrameLen, ALen);
+  // Append to accumulator. Guard against a nil source with a positive length:
+  // @AccumBuf[0] evaluates to nil when AccumBuf is an empty array, and Move(nil^)
+  // faults on address 0. A nil buffer carries no bytes, so skip the append and
+  // still drain any frames already buffered in FFrameBuf.
+  if (ALen > 0) and (ABuf <> nil) then
+  begin
+    LNeeded := FFrameLen + ALen;
+    if LNeeded > Length(FFrameBuf) then
+      SetLength(FFrameBuf, LNeeded + 4096);
+    Move(ABuf^, FFrameBuf[FFrameLen], ALen);
+    Inc(FFrameLen, ALen);
+  end;
 
   // Check preface
   if not FPrefaceReceived then
@@ -744,23 +751,61 @@ begin
     Exit;
   end;
 
+  // RFC 7540 §5.1 — a stream in the "idle" state (a client id above the highest
+  // we have opened, never seen before) may only receive HEADERS or PRIORITY.
+  // DATA / RST_STREAM / WINDOW_UPDATE on such a stream is a connection-level
+  // PROTOCOL_ERROR.
+  if (AStreamID <> 0) and ((AStreamID and 1) = 1) and
+     (AStreamID > FLastStreamID) and
+     ((AType = H2_FRAME_DATA) or (AType = H2_FRAME_RST_STREAM) or
+      (AType = H2_FRAME_WINDOW_UPDATE)) then
+  begin
+    _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR);
+    Exit;
+  end;
+
   case AType of
     H2_FRAME_DATA:
       _HandleData(AFlags, AStreamID, APayload, APayLen);
     H2_FRAME_HEADERS:
       _HandleHeaders(AFlags, AStreamID, APayload, APayLen);
     H2_FRAME_PRIORITY:
-      ; // ignore — RFC 7540 §6.3 says it may arrive on any stream state
+      _HandlePriority(AStreamID, APayload, APayLen);
     H2_FRAME_RST_STREAM:
-      _HandleRstStream(AStreamID, APayload, APayLen);
+      begin
+        // RFC 7540 §6.4 — RST_STREAM MUST identify a stream (id 0x0 = conn error).
+        if AStreamID = 0 then
+          _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR)
+        else
+          _HandleRstStream(AStreamID, APayload, APayLen);
+      end;
     H2_FRAME_SETTINGS:
-      _HandleSettings(AFlags, APayload, APayLen);
+      begin
+        // RFC 7540 §6.5 — SETTINGS is a connection frame; a non-zero stream id
+        // is a connection-level PROTOCOL_ERROR.
+        if AStreamID <> 0 then
+          _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR)
+        else
+          _HandleSettings(AFlags, APayload, APayLen);
+      end;
     H2_FRAME_PUSH_PROMISE:
       _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR); // client must not send push-promise
     H2_FRAME_PING:
-      _HandlePing(AFlags, APayload, APayLen);
+      begin
+        // RFC 7540 §6.7 — PING is a connection frame; non-zero stream id = error.
+        if AStreamID <> 0 then
+          _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR)
+        else
+          _HandlePing(AFlags, APayload, APayLen);
+      end;
     H2_FRAME_GOAWAY:
-      _HandleGoAway(APayload, APayLen);
+      begin
+        // RFC 7540 §6.8 — GOAWAY is a connection frame; non-zero stream id = error.
+        if AStreamID <> 0 then
+          _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR)
+        else
+          _HandleGoAway(APayload, APayLen);
+      end;
     H2_FRAME_WINDOW_UPDATE:
       _HandleWindowUpdate(AStreamID, APayload, APayLen);
     H2_FRAME_CONTINUATION:
@@ -781,8 +826,14 @@ var
   LDelta:      Integer;
   LStreamPair: TPair<Cardinal, TH2Stream>;
 begin
-  // ACK — nothing to do
-  if (AFlags and H2_FLAG_ACK) <> 0 then Exit;
+  // ACK — the peer acknowledged OUR settings. RFC 7540 §6.5: a SETTINGS frame
+  // with the ACK flag set MUST carry an empty payload — otherwise FRAME_SIZE_ERROR.
+  if (AFlags and H2_FLAG_ACK) <> 0 then
+  begin
+    if APayLen <> 0 then
+      _GoAway(FLastStreamID, H2_ERR_FRAME_SIZE_ERROR);
+    Exit;
+  end;
 
   // Each setting is 6 bytes
   if (APayLen mod 6) <> 0 then
@@ -804,7 +855,16 @@ begin
       H2_SETTINGS_HEADER_TABLE_SIZE:
         FHpack.MaxDynTableSize := LVal;
       H2_SETTINGS_ENABLE_PUSH:
-        FClientEnablePush := (LVal <> 0);
+        begin
+          // RFC 7540 §6.5.2 — SETTINGS_ENABLE_PUSH accepts only 0 or 1; any
+          // other value is a connection-level PROTOCOL_ERROR.
+          if LVal > 1 then
+          begin
+            _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR);
+            Exit;
+          end;
+          FClientEnablePush := (LVal <> 0);
+        end;
       H2_SETTINGS_MAX_FRAME_SIZE:
         begin
           if (LVal < 16384) or (LVal > 16777215) then
@@ -887,6 +947,49 @@ end;
 // ===========================================================================
 // _HandleRstStream
 // ===========================================================================
+
+// ===========================================================================
+// _HandlePriority — RFC 7540 §6.3 / §5.3.1
+// ===========================================================================
+
+procedure TH2Conn._HandlePriority(AStreamID: Cardinal; APayload: PByte;
+  APayLen: Integer);
+var
+  LDep: Cardinal;
+  LRst: TBytes;
+
+  procedure _SendStreamRst(AErrCode: Cardinal);
+  begin
+    SetLength(LRst, 4);
+    LRst[0] := (AErrCode shr 24) and $FF; LRst[1] := (AErrCode shr 16) and $FF;
+    LRst[2] := (AErrCode shr  8) and $FF; LRst[3] :=  AErrCode         and $FF;
+    _SendFrame(H2_FRAME_RST_STREAM, 0, AStreamID, @LRst[0], 4);
+  end;
+
+begin
+  // §6.3 — PRIORITY MUST reference a stream; id 0x0 is a connection error.
+  if AStreamID = 0 then
+  begin
+    _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR);
+    Exit;
+  end;
+  // §6.3 — a length other than 5 octets is a stream error FRAME_SIZE_ERROR.
+  if APayLen <> 5 then
+  begin
+    _SendStreamRst(H2_ERR_FRAME_SIZE_ERROR);
+    Exit;
+  end;
+  // §5.3.1 — a stream cannot depend on itself: stream error PROTOCOL_ERROR.
+  LDep := ((Cardinal(APayload[0]) shl 24) or (Cardinal(APayload[1]) shl 16) or
+           (Cardinal(APayload[2]) shl  8) or  Cardinal(APayload[3])) and $7FFFFFFF;
+  if LDep = AStreamID then
+  begin
+    _SendStreamRst(H2_ERR_PROTOCOL_ERROR);
+    Exit;
+  end;
+  // Prioritization is not implemented — a well-formed PRIORITY is accepted and
+  // ignored (RFC 7540 §5.3.2 allows treating priority as advisory).
+end;
 
 procedure TH2Conn._HandleRstStream(AStreamID: Cardinal; APayload: PByte; APayLen: Integer);
 var
@@ -1016,6 +1119,7 @@ var
   LEndHdrs:  Boolean;
   LEndStrm:  Boolean;
   LTotal:    Integer;
+  LDep:      Cardinal;
 begin
   if AStreamID = 0 then
   begin
@@ -1073,6 +1177,15 @@ begin
   if LHasPri then
   begin
     if APayLen < 5 then
+    begin
+      _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR);
+      Exit;
+    end;
+    // RFC 7540 §5.3.1 — a stream cannot depend on itself. The dependency is the
+    // first 4 octets of the priority block (top bit is the exclusive flag).
+    LDep := ((Cardinal(APayload[0]) shl 24) or (Cardinal(APayload[1]) shl 16) or
+             (Cardinal(APayload[2]) shl  8) or  Cardinal(APayload[3])) and $7FFFFFFF;
+    if LDep = AStreamID then
     begin
       _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR);
       Exit;

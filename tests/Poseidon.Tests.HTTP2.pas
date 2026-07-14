@@ -112,9 +112,9 @@ type
     [Test]
     procedure GoAway_NoStreams_CloseProcCalledImmediately;
 
-    // RST_STREAM for non-existent stream is silently ignored
+    // RST_STREAM on an idle stream is a connection error (RFC 7540 §5.1)
     [Test]
-    procedure RstStream_NonExistentStream_DoesNotClose;
+    procedure RstStream_IdleStream_ConnectionError;
 
     // Server push — PUSH_PROMISE + promised response sent before reply
     [Test]
@@ -715,19 +715,21 @@ end;
 
 procedure TH2ConnUnitTests.WindowUpdate_StreamLevel_DoesNotClose;
 var
-  LH: TH2TestHarness;
+  LH:     TH2TestHarness;
+  LHpack: TBytes;
 begin
   LH := TH2TestHarness.Create;
   try
     LH.Feed(H2ClientPreface);
-    // Stream 1 may not exist, but RFC 7540 says unknown stream WINDOW_UPDATE
-    // on a closed/non-existent stream should be silently ignored or raise
-    // STREAM_CLOSED error; the connection itself should remain open.
+    // Open stream 1 with a real request first so it is NOT "idle": RFC 7540
+    // §5.1 makes WINDOW_UPDATE on an idle stream a connection error, but on an
+    // existing (or already-closed) stream it must not close the connection.
+    LHpack := TBytes.Create($82, $84, $86,
+      $01, $09, $6C, $6F, $63, $61, $6C, $68, $6F, $73, $74);
+    LH.Feed(H2BuildFrame(H2T_HEADERS, $05, 1, LHpack));
     LH.Feed(H2BuildWindowUpdate(1, 1000));
-    // Regardless of what happens to stream 1, connection should not be closed
-    // (server may send RST_STREAM but not GOAWAY for this)
     Assert.IsFalse(LH.Closed,
-      'WINDOW_UPDATE on unknown stream should not close the connection');
+      'stream-level WINDOW_UPDATE on an existing stream must not close the connection');
   finally
     LH.Free;
   end;
@@ -735,15 +737,21 @@ end;
 
 procedure TH2ConnUnitTests.RstStream_ClientSendsRst_StreamDropped;
 var
-  LH: TH2TestHarness;
+  LH:     TH2TestHarness;
+  LHpack: TBytes;
 begin
   LH := TH2TestHarness.Create;
   try
     LH.Feed(H2ClientPreface);
-    // RST_STREAM on a non-existent stream — server should not crash or close
+    // Open stream 1 first (so it is not "idle"), then RST_STREAM it. A client
+    // RST on an existing/closed stream drops the stream without closing the
+    // connection (RFC 7540 §5.1 idle-state error only applies to never-opened ids).
+    LHpack := TBytes.Create($82, $84, $86,
+      $01, $09, $6C, $6F, $63, $61, $6C, $68, $6F, $73, $74);
+    LH.Feed(H2BuildFrame(H2T_HEADERS, $05, 1, LHpack));
     LH.Feed(H2BuildRstStream(1, 0 {NO_ERROR}));
     Assert.IsFalse(LH.Closed,
-      'RST_STREAM from client should not trigger connection close');
+      'RST_STREAM for an existing stream must not trigger connection close');
   finally
     LH.Free;
   end;
@@ -1067,9 +1075,10 @@ begin
   end;
 end;
 
-procedure TH2ConnUnitTests.RstStream_NonExistentStream_DoesNotClose;
-// RST_STREAM for a stream that was never opened must be silently ignored
-// (no connection-level error, no close).
+procedure TH2ConnUnitTests.RstStream_IdleStream_ConnectionError;
+// RFC 7540 §5.1 — RST_STREAM on an IDLE stream (an id never opened and above
+// the highest seen) MUST be treated as a connection error PROTOCOL_ERROR.
+// h2spec http2/6.4 enforces this.
 var
   LH: TH2TestHarness;
 begin
@@ -1077,10 +1086,8 @@ begin
   try
     LH.Feed(H2ClientPreface);
     LH.Feed(H2BuildRstStream(99, 0 {NO_ERROR}));
-    Assert.IsFalse(LH.Closed,
-      'RST_STREAM for non-existent stream must be silently ignored');
-    Assert.IsFalse(H2HasGoAway(LH.SentBytes),
-      'RST_STREAM for non-existent stream must not trigger GOAWAY');
+    Assert.IsTrue(LH.Closed or H2HasGoAway(LH.SentBytes),
+      'RST_STREAM on an idle stream must be a connection error (GOAWAY/close)');
   finally
     LH.Free;
   end;
