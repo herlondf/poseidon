@@ -534,6 +534,15 @@ begin
   // we need to re-arm recv for the next handshake message.
   if (LConn.SSLHandle <> nil) and not LConn.SSLHandshook then
     FServer._PostRecv(AConn)
+  // #213: HTTP/2 drives its own read cycle — StepH2Branch re-arms recv once,
+  // AFTER TH2Conn.ProcessData fully returns. On the epoll backend a response
+  // send inside ProcessData completes inline and lands here synchronously while
+  // the worker is still in ProcessData; re-arming recv now would let a second
+  // recv run _ProcessRecvSSL (SSL_Read) concurrently with the worker's
+  // _EncryptAndSend (SSL_Write) on the same SSL* / H2Conn. Skip — the dispatch
+  // path owns the re-arm.
+  else if LConn.H2Conn <> nil then
+    // no-op: StepH2Branch.PostRecv handles it
   else if LConn.KeepAlive then
   begin
     if LConn.AccumLen > 0 then
@@ -771,7 +780,16 @@ begin
     begin
       try
         TNativeConn(AConn).LastActivityTick := TThread.GetTickCount64;  // reset idle-clock at dequeue time
-        FDispatcher.Dispatch(AConn, LCfg);
+        // #213: serialize the whole dispatch (reads AccumBuf, mutates H2Conn,
+        // calls SSL_Write) against the IO thread's _ProcessRecvSSL on this conn.
+        // The AddRef taken before Post keeps LConn (and its Lock) alive until
+        // the Release below, even if the handler triggers _CloseConn.
+        TNativeConn(AConn).Lock.Enter;
+        try
+          FDispatcher.Dispatch(AConn, LCfg);
+        finally
+          TNativeConn(AConn).Lock.Leave;
+        end;
       finally
         TInterlocked.Decrement(FInFlightCount);
         TInterlocked.Decrement(TNativeConn(AConn).InFlightPool);
@@ -786,22 +804,38 @@ var
   LConn:    TNativeConn absolute AConn;
   LAborted: Boolean;
 begin
+  // #213: hold a ref across the whole call — a nested _CloseConn (SSL/parse
+  // error paths) can drop the last (server) ref and Destroy the connection
+  // (the epoll backend keeps no per-recv ref), which would free LConn.Lock out
+  // from under the finally below.
+  LConn.AddRef;
   try
-    LConn.LastActivityTick := TThread.GetTickCount64;  // vDSO on Linux — no syscall
-    LAborted := False;
-    if LConn.SSLHandle <> nil then
-      _ProcessRecvSSL(AConn, ABuf, ALen, LAborted)
-    else if ALen > 0 then
-      _ProcessRecvPlain(AConn, ABuf, ALen);
-    if not LAborted then
-      _DispatchAccumBuf(AConn);
-  except
-    on E: Exception do
-    begin
-      _Log(llError, '[recv] ' + LConn.RemoteAddr + ' EX [' + E.ClassName +
-        ']: ' + E.Message);
-      try _CloseConn(AConn); except on E: Exception do; end;
+    // #213: serialize the entire recv/decrypt/dispatch against the request
+    // worker pool, which reads AccumBuf and calls SSL_Write on this same conn.
+    LConn.Lock.Enter;
+    try
+      try
+        LConn.LastActivityTick := TThread.GetTickCount64;  // vDSO on Linux — no syscall
+        LAborted := False;
+        if LConn.SSLHandle <> nil then
+          _ProcessRecvSSL(AConn, ABuf, ALen, LAborted)
+        else if ALen > 0 then
+          _ProcessRecvPlain(AConn, ABuf, ALen);
+        if not LAborted then
+          _DispatchAccumBuf(AConn);
+      except
+        on E: Exception do
+        begin
+          _Log(llError, '[recv] ' + LConn.RemoteAddr + ' EX [' + E.ClassName +
+            ']: ' + E.Message);
+          try _CloseConn(AConn); except on E: Exception do; end;
+        end;
+      end;
+    finally
+      LConn.Lock.Leave;
     end;
+  finally
+    LConn.Release;
   end;
 end;
 
@@ -1244,28 +1278,38 @@ var
   LConn: TNativeConn absolute AConn;
   LIdx:  Integer;
 begin
-  // Remove from TConnectionManager (handles per-IP unregister)
+  // Remove from TConnectionManager (handles per-IP unregister). Kept OUTSIDE
+  // LConn.Lock so ConnManager.Lock is never nested inside LConn.Lock (no
+  // lock-order inversion). Remove also guarantees exactly one caller proceeds.
   LIdx := FConnManager.Remove(AConn);
   if LIdx < 0 then Exit;  // already closed by Stop()
-  if LConn.WSMode = CCMWebSocket then
-  begin
-    if LConn.WSConn <> nil then
-      (LConn.WSConn as TPoseidonWSConn).Invalidate;
-    LConn.WSConn := nil;
-    // #178: free per-connection fragmentation state so FFragStates does not
-    // leak (and no stale entry lingers to collide with a reused pointer).
-    if FWSManager <> nil then
-      FWSManager.DropConnection(AConn);
+  // #213: serialize teardown (frees SSL* + both BIOs and H2Conn) against a
+  // worker still touching them under LConn.Lock. The server ref is still held
+  // (Released only below), so the object and its Lock stay alive here.
+  LConn.Lock.Enter;
+  try
+    if LConn.WSMode = CCMWebSocket then
+    begin
+      if LConn.WSConn <> nil then
+        (LConn.WSConn as TPoseidonWSConn).Invalidate;
+      LConn.WSConn := nil;
+      // #178: free per-connection fragmentation state so FFragStates does not
+      // leak (and no stale entry lingers to collide with a reused pointer).
+      if FWSManager <> nil then
+        FWSManager.DropConnection(AConn);
+    end;
+    FreeAndNil(LConn.H2Conn);
+    if LConn.SSLHandle <> nil then
+    begin
+      FSSLManager.FreeSSL(LConn.SSLHandle);  // also frees both BIOs
+      LConn.SSLHandle   := nil;
+      LConn.SSLReadBio  := nil;
+      LConn.SSLWriteBio := nil;
+    end;
+    FIOBackend.SocketClose(LConn);  // platform-specific: epoll DEL + shutdown + close
+  finally
+    LConn.Lock.Leave;
   end;
-  FreeAndNil(LConn.H2Conn);
-  if LConn.SSLHandle <> nil then
-  begin
-    FSSLManager.FreeSSL(LConn.SSLHandle);  // also frees both BIOs
-    LConn.SSLHandle   := nil;
-    LConn.SSLReadBio  := nil;
-    LConn.SSLWriteBio := nil;
-  end;
-  FIOBackend.SocketClose(LConn);  // platform-specific: epoll DEL + shutdown + close
   LConn.Release;  // Drop server ref; object lives until all IOCP ops complete
   // R-1: wake the drain event so Stop() can proceed without polling
   if Assigned(FDrainEvent) then FDrainEvent.SetEvent;

@@ -43,6 +43,12 @@ type
     Socket: Integer;
 {$ENDIF}
     RemoteAddr: string;
+    // #213: serializes ALL per-connection access to the SSL object, AccumBuf,
+    // and H2Conn across the IO/core thread (_ProcessRecvSSL) and the request
+    // worker pool (dispatch / _EncryptAndSend). Recursive (TCriticalSection),
+    // so nested same-thread acquisition (e.g. _ProcessRecvSSL -> _EncryptAndSend
+    // during handshake) does not deadlock.
+    Lock: TCriticalSection;
     AccumBuf: TBytes;
     AccumLen: Integer;
     KeepAlive: Boolean;
@@ -101,6 +107,7 @@ begin
 {$ENDIF}
   RemoteAddr := AAddr;
   FRefCount := 1;
+  Lock := TCriticalSection.Create;
   AccumBuf := TBufferPool.Acquire;
   AccumLen := 0;
   KeepAlive := False;
@@ -129,6 +136,9 @@ begin
   if PendingSend <> nil then TBufferPool.Release(PendingSend);
 {$ENDIF}
   FreeAndNil(H2Conn);
+  // Refcount is 0 here — no other thread references this connection, so the
+  // lock is uncontended and safe to free last.
+  FreeAndNil(Lock);
   inherited Destroy;
 end;
 

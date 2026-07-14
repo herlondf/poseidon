@@ -22,6 +22,7 @@ uses
   Posix.ArpaInet,
   Posix.Unistd,
   Posix.Errno,
+  Posix.Signal,
   Poseidon.Net.IO,
   Poseidon.Net.Connection,
   Poseidon.Net.Pool.Buffer;
@@ -624,6 +625,16 @@ begin
     end;
   end;
 end;
+
+initialization
+  // #213: a network server must never be killed by SIGPIPE when it writes to a
+  // socket whose peer already closed/reset the connection — h2spec and abusive
+  // clients trigger this constantly. MSG_NOSIGNAL guards the epoll send loop,
+  // but not writev() nor OpenSSL/libc internals, so ignore SIGPIPE process-wide
+  // as the authoritative guard. This unit is always in the Linux `uses` graph
+  // (HttpServer references both the epoll and io_uring backends), so this runs
+  // regardless of which backend is selected at runtime.
+  signal(SIGPIPE, TSignalHandler(SIG_IGN));
 
 {$ELSE}
 

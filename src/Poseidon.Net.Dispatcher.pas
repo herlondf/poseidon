@@ -306,6 +306,7 @@ end;
 procedure TProtocolDispatcher.StepH2Branch(var ACtx: TDispatchContext);
 var
   LConn: TNativeConn;
+  LLen:  Integer;
 begin
   LConn := TNativeConn(ACtx.Conn);
 
@@ -314,8 +315,15 @@ begin
 
   if LConn.AccumLen > 0 then
   begin
-    LConn.H2Conn.ProcessData(@LConn.AccumBuf[0], LConn.AccumLen);
+    // #213: zero AccumLen BEFORE ProcessData. On the epoll backend a response
+    // send issued inside ProcessData completes inline and re-enters
+    // OnSendComplete synchronously; if AccumLen were still > 0 there, the H2
+    // conn (SSLHandshook, KeepAlive) path re-dispatches the SAME AccumBuf on a
+    // second worker-pool thread — two concurrent TH2Conn.ProcessData calls
+    // racing on FStreams/HPACK/flow-control → heap corruption / EAccessViolation.
+    LLen := LConn.AccumLen;
     LConn.AccumLen := 0;
+    LConn.H2Conn.ProcessData(@LConn.AccumBuf[0], LLen);
   end;
   // ProcessData may have closed the connection (GOAWAY / connection error on an
   // idle conn), which frees H2Conn (FreeAndNil). Guard against the nil-deref.
