@@ -676,6 +676,10 @@ var
 begin
   if APos >= ABufLen then
   begin
+    // A representation demanded a string but the block ends here — the header
+    // block fragment is truncated: COMPRESSION_ERROR (DecodeHeaders picks up
+    // FDecodeError after the representation returns).
+    FDecodeError := True;
     Result := '';
     Exit;
   end;
@@ -683,9 +687,12 @@ begin
   LLen := _HpackDecodeInt(ABuf, ABufLen, 7, APos);
   // Unsigned bounds check: guard against LLen with bit 31 set (would go negative
   // under signed cast and pass a naive check, then SetLength/Move ~2GB → OOB).
+  // A length that runs past the buffer is a truncated/invalid fragment →
+  // COMPRESSION_ERROR.
   if (APos < 0) or (APos > ABufLen) or
      (UInt32(LLen) > UInt32(ABufLen - APos)) then
   begin
+    FDecodeError := True;
     Result := '';
     Exit;
   end;
