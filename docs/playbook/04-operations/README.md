@@ -8,3 +8,5 @@
 - [Security headers & server identity](security.md)
 - [Prometheus metrics](metrics.md)
 - [Proxy Protocol](proxy-protocol.md)
+- [Testing & conformance](testing-and-conformance.md)
+- [Platform notes & known limitations](platform-notes.md)

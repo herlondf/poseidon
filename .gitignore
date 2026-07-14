@@ -77,3 +77,6 @@ tests/h2spec/dcu/
 tests/h2spec/.wsl/
 tests/h2spec/*.dcu
 tests/h2spec/*.o
+
+# Checkpoint temporario de sessao (nao commitar)
+CHECKPOINT-SESSAO-*.md
