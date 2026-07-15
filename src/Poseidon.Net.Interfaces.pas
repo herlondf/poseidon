@@ -51,6 +51,7 @@ type
 
     // Protocol settings
     procedure SetMinVersion(ACtx: Pointer; AVersion: Integer);
+    procedure SetSecurityOptions(ACtx: Pointer);
     procedure EnableSessionCache(ACtx: Pointer);
 
     // SNI + ALPN
@@ -132,6 +133,7 @@ type
     procedure LoadKey(ACtx: Pointer; const AFile: string);
     procedure VerifyKey(ACtx: Pointer);
     procedure SetMinVersion(ACtx: Pointer; AVersion: Integer);
+    procedure SetSecurityOptions(ACtx: Pointer);
     procedure EnableSessionCache(ACtx: Pointer);
     procedure SetSNICallback(ACtx: Pointer; ACallback: Pointer; AArg: Pointer);
     procedure SetALPN(ACtx: Pointer; AServer: TObject);
@@ -189,6 +191,11 @@ end;
 procedure TDefaultSSLProvider.SetMinVersion(ACtx: Pointer; AVersion: Integer);
 begin
   TPoseidonSSL.CTX_SetMinVersion(ACtx, AVersion);
+end;
+
+procedure TDefaultSSLProvider.SetSecurityOptions(ACtx: Pointer);
+begin
+  TPoseidonSSL.CTX_SetSecurityOptions(ACtx);
 end;
 
 procedure TDefaultSSLProvider.EnableSessionCache(ACtx: Pointer);

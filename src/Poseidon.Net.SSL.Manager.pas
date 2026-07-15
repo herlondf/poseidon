@@ -118,6 +118,7 @@ begin
   FSSLProvider.LoadKey(FSSLCtx, AKeyFile);
   FSSLProvider.VerifyKey(FSSLCtx);
   FSSLProvider.SetMinVersion(FSSLCtx, FMinTLSVersion);
+  FSSLProvider.SetSecurityOptions(FSSLCtx);
   FSSLProvider.EnableSessionCache(FSSLCtx);
   // SNI callback — uses Self (TSSLManager) as arg
   FSSLProvider.SetSNICallback(FSSLCtx, @SSLManagerSNICallback, Self);
@@ -166,6 +167,7 @@ begin
     // SNI-matched host silently loses ALPN (h2 -> HTTP/1.1 downgrade), the TLS
     // floor, and mTLS client-cert verification.
     FSSLProvider.SetMinVersion(LCtx, FMinTLSVersion);
+    FSSLProvider.SetSecurityOptions(LCtx);
     if FH2Enabled then
       FSSLProvider.SetALPN(LCtx, FServerRef);
     if FCAFile <> '' then

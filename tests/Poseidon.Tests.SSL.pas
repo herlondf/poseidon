@@ -38,6 +38,8 @@ type
     [Test]
     procedure ConfigureSSL_CallsSetMinVersion;
     [Test]
+    procedure ConfigureSSL_CallsSetSecurityOptions;
+    [Test]
     procedure ConfigureSSL_CallsEnableSessionCache;
     [Test]
     procedure ConfigureSSL_CallsSetSNICallback;
@@ -171,6 +173,23 @@ begin
   LServer := MakeConfigured(LSpy);
   try
     Assert.IsTrue(LSpy.WasCalled('SetMinVersion'), 'SetMinVersion not called');
+  finally
+    LServer.Free;
+  end;
+end;
+
+// #209/TLS-runtime: ConfigureSSL must harden the context (disable client-
+// initiated renegotiation, TLS compression, and set server cipher preference).
+procedure TSSLInjectionTests.ConfigureSSL_CallsSetSecurityOptions;
+var
+  LSpy:    TSpySSLProvider;
+  LServer: TPoseidonNativeServer;
+begin
+  LSpy    := TSpySSLProvider.Create;
+  LServer := MakeConfigured(LSpy);
+  try
+    Assert.IsTrue(LSpy.WasCalled('SetSecurityOptions'),
+      'SetSecurityOptions not called — renegotiation/compression not hardened');
   finally
     LServer.Free;
   end;

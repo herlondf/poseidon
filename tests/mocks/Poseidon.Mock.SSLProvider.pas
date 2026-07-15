@@ -68,6 +68,7 @@ type
     procedure LoadKey(ACtx: Pointer; const AFile: string);
     procedure VerifyKey(ACtx: Pointer);
     procedure SetMinVersion(ACtx: Pointer; AVersion: Integer);
+    procedure SetSecurityOptions(ACtx: Pointer);
     procedure EnableSessionCache(ACtx: Pointer);
     procedure SetSNICallback(ACtx: Pointer; ACallback: Pointer; AArg: Pointer);
     procedure SetALPN(ACtx: Pointer; AServer: TObject);
@@ -186,6 +187,11 @@ end;
 procedure TSpySSLProvider.SetMinVersion(ACtx: Pointer; AVersion: Integer);
 begin
   _Log('SetMinVersion(' + IntToStr(AVersion) + ')');
+end;
+
+procedure TSpySSLProvider.SetSecurityOptions(ACtx: Pointer);
+begin
+  _Log('SetSecurityOptions');
 end;
 
 procedure TSpySSLProvider.EnableSessionCache(ACtx: Pointer);

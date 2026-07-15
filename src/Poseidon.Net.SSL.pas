@@ -67,6 +67,10 @@ type
   TFn_bio_ctrl    = function(bio: Pointer; cmd, larg: Integer; parg: Pointer): Integer; cdecl;
   TFn_ctx_ctrl    = function(ctx: Pointer; cmd: Integer; larg: NativeInt; parg: Pointer): NativeInt; cdecl;
   TFn_ctx_cbctrl  = function(ctx: Pointer; cmd: Integer; cb: Pointer): NativeInt; cdecl;
+  // uint64_t SSL_CTX_set_options(SSL_CTX*, uint64_t) — a real function since
+  // OpenSSL 1.1.0 (the old SSL_CTRL_OPTIONS ctrl was removed, so the ctrl path
+  // would silently no-op). op/return are 64-bit — bind as NativeUInt.
+  TFn_ctx_setopt  = function(ctx: Pointer; op: NativeUInt): NativeUInt; cdecl;
   TFn_ssl_getname = function(ssl: Pointer; nametype: Integer): PAnsiChar; cdecl;
   TFn_ssl_setctx  = function(ssl, ctx: Pointer): Pointer; cdecl;
   TFn_err_get         = function: NativeUInt; cdecl;
@@ -116,6 +120,7 @@ type
     class var f_SSL_get0_alpn_selected: TFn_ssl_get0_alpn;
     class var f_SSL_CTX_set_verify: TFn_ctx_set_verify;
     class var f_SSL_CTX_load_verify_locations: TFn_ctx_load_verify;
+    class var f_SSL_CTX_set_options: TFn_ctx_setopt;
 
     class function  TryLoadLib(const AName: string): TPoseidonLibHandle;
     class function  RequireProc(ALib: TPoseidonLibHandle; const AName: string): Pointer;
@@ -163,6 +168,11 @@ type
     // Use constants TLS1_2_VERSION ($0303) or TLS1_3_VERSION ($0304).
     // No-op when AMinVersion = 0 (library default — OpenSSL 3.x: TLS 1.2).
     class procedure CTX_SetMinVersion(ACtx: Pointer; AMinVersion: Integer);
+
+    // Harden the context: disable client-initiated renegotiation (TLS 1.2
+    // CPU-amplification DoS), disable TLS compression (CRIME), and prefer the
+    // server's cipher order. No-op if SSL_CTX_set_options is unavailable.
+    class procedure CTX_SetSecurityOptions(ACtx: Pointer);
 
     // Enable server-side TLS session cache to reduce handshake cost on
     // reconnections. ACacheSize is the max number of cached sessions (default 1024).
@@ -305,6 +315,13 @@ begin
 {$ELSE}
   @f_SSL_CTX_set_verify            := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_set_verify')));
   @f_SSL_CTX_load_verify_locations := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_load_verify_locations')));
+{$ENDIF}
+
+  // Real function since OpenSSL 1.1.0 (optional load for safety on older libs).
+{$IFDEF MSWINDOWS}
+  @f_SSL_CTX_set_options := GetProcAddress(FLibSSL, 'SSL_CTX_set_options');
+{$ELSE}
+  @f_SSL_CTX_set_options := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_set_options')));
 {$ENDIF}
 
   FLoaded := True;
@@ -544,6 +561,22 @@ class procedure TPoseidonSSL.CTX_SetMinVersion(ACtx: Pointer; AMinVersion: Integ
 begin
   if AMinVersion = 0 then Exit;  // 0 = let OpenSSL use its own default
   f_SSL_CTX_ctrl(ACtx, SSL_CTRL_SET_MIN_PROTO_VERSION, AMinVersion, nil);
+end;
+
+// ---------------------------------------------------------------------------
+// Security hardening options (SSL_CTX_set_options)
+// ---------------------------------------------------------------------------
+
+class procedure TPoseidonSSL.CTX_SetSecurityOptions(ACtx: Pointer);
+const
+  SSL_OP_NO_COMPRESSION           = NativeUInt($00020000);  // CRIME
+  SSL_OP_CIPHER_SERVER_PREFERENCE = NativeUInt($00400000);
+  SSL_OP_NO_RENEGOTIATION         = NativeUInt($40000000);  // TLS 1.2 reneg DoS
+begin
+  if not Assigned(f_SSL_CTX_set_options) then Exit;
+  f_SSL_CTX_set_options(ACtx,
+    SSL_OP_NO_RENEGOTIATION or SSL_OP_NO_COMPRESSION or
+    SSL_OP_CIPHER_SERVER_PREFERENCE);
 end;
 
 // ---------------------------------------------------------------------------
