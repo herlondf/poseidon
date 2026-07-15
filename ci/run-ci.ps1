@@ -28,7 +28,8 @@ param(
   [switch]$Linux,
   [switch]$Autobahn,
   [string]$H2SpecDistro  = 'PoseidonH2Spec',
-  [string]$AutobahnDistro = 'Benchmark'
+  [string]$AutobahnDistro = 'Benchmark',
+  [string]$BenchmarkRoot  = 'D:\IA\Projetos\Delphi\Benchmark'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,6 +67,35 @@ function Run-Suite($exe, $xml) {
   if (-not (Test-Path $path)) { throw "no results xml: $xml" }
   [xml]$x = Get-Content $path
   return $x.SelectNodes('//test-case')
+}
+
+# Cross-compile a headless Linux64 ELF (dcclinux64 + Benchmark linker stubs).
+# Returns $true when the ELF is produced with no COMPILE error (link may be
+# skipped/fail without the Linux SDK; only compile errors matter).
+function Build-LinuxElf($dprDir, $dprName) {
+  $dcc   = Join-Path $Bds 'bin\dcclinux64.exe'
+  $stubs = Join-Path $BenchmarkRoot 'tools\linux_stubs'
+  $rtl   = Join-Path $Bds 'lib\linux64\release'
+  if (-not (Test-Path $dcc))   { throw "dcclinux64 not found: $dcc" }
+  if (-not (Test-Path $stubs)) { throw "Linux stubs not found: $stubs" }
+  $bin = Join-Path $dprDir 'bin'; $dcu = Join-Path $bin 'dcu'
+  New-Item -ItemType Directory -Force $bin, $dcu | Out-Null
+  $sp = '.\;..\..\src;..\..\middlewares'
+  $ns = 'System;System.Win;Winapi;Data;Data.Win;Datasnap;Datasnap.Win;Web;Web.Win;Posix'
+  Push-Location $dprDir
+  try {
+    $out = & $dcc "$dprName.dpr" -B "-U$sp" "-N$dcu" "-E$bin" "-NS$ns" `
+      "--libpath:$stubs;$rtl" '-$O+' '-$D-' '-Q' 2>&1
+  } finally { Pop-Location }
+  if ($out | Where-Object { $_ -match '\.pas\(\d+\).*(Error|Fatal)' }) {
+    $out | Select-Object -Last 10 | Out-Host; return $false
+  }
+  return (Test-Path (Join-Path $bin $dprName))
+}
+
+# Windows path -> WSL /mnt path.
+function To-WslPath($winPath) {
+  return [regex]::Replace(($winPath -replace '\\','/'), '^([A-Za-z]):', { param($m) '/mnt/' + $m.Groups[1].Value.ToLower() })
 }
 
 # ── 1. Dual-face compile gate ──────────────────────────────────────────────────
@@ -120,11 +150,18 @@ if ($Linux) {
 
   if ($Autobahn) {
     Stage 'autobahn' {
-      $shWin = Join-Path $tests 'autobahn\run-autobahn.sh'
-      $sh = [regex]::Replace(($shWin -replace '\\','/'), '^([A-Za-z]):', { param($m) '/mnt/' + $m.Groups[1].Value.ToLower() })
-      $out = wsl -d $AutobahnDistro -u root -- bash -lc "bash '$sh' 9011 fuzzingclient.json" 2>&1
-      $out | Out-Host
-      return ($out -match 'FAILED\s*:\s*0' -or $out -notmatch 'FAILED')
+      $abDir = Join-Path $tests 'autobahn'
+      if (-not (Build-LinuxElf $abDir 'poseidon-autobahn-server')) {
+        Write-Host '    autobahn ELF build failed' -ForegroundColor Red; return $false
+      }
+      $sh = To-WslPath (Join-Path $abDir 'run-autobahn.sh')
+      $py = To-WslPath (Join-Path $abDir 'analyze-autobahn.py')
+      wsl -d $AutobahnDistro -u root -- bash -lc "bash '$sh' 9011 fuzzingclient.json" 2>&1 | Out-Host
+      $an = wsl -d $AutobahnDistro -u root -- bash -lc "python3 '$py' /opt/autobahn/reports/clients/index.json" 2>&1
+      $an | Out-Host
+      $m = $an | Select-String -Pattern 'problemas=(\d+)'
+      if (-not $m) { return $false }
+      return ([int][regex]::Match($m.ToString(), 'problemas=(\d+)').Groups[1].Value -eq 0)
     }
   }
 }
