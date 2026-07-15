@@ -20,6 +20,8 @@ type
     [Test]
     procedure WrongPasswordReturns401;
     [Test]
+    procedure UriMismatch_Returns401;
+    [Test]
     procedure DigestHA1ProducesConsistentHash;
   end;
 
@@ -150,6 +152,47 @@ begin
     .Header('Authorization', LAuthHeader)
     .Build;
   LMw(LCtx, procedure begin end);
+  Assert.AreEqual(401, LCtx.Status);
+end;
+
+// #209 regression: a cryptographically VALID Digest header computed for uri=
+// "/admin" must be rejected when replayed on a request whose path is "/public"
+// (and vice-versa). The uri field must be bound to the actual request path.
+procedure TDigestMiddlewareTests.UriMismatch_Returns401;
+var
+  LCtx: TNativeRequestContext;
+  LMw: TNativeMiddlewareFunc;
+  LNonce, LHA1, LAuthHeader: string;
+  LCalled: Boolean;
+  LProbeCtx: TNativeRequestContext;
+begin
+  LMw := DigestMiddleware(CRealm, TestGetHA1);
+
+  LProbeCtx := TContextBuilder.New.Build;
+  LMw(LProbeCtx, procedure begin end);
+  LNonce := '';
+  var LWww := GetExtraHeader(LProbeCtx, 'WWW-Authenticate');
+  var LPos := Pos('nonce="', LWww);
+  if LPos > 0 then
+  begin
+    Inc(LPos, Length('nonce="'));
+    var LEnd := LPos;
+    while (LEnd <= Length(LWww)) and (LWww[LEnd] <> '"') do
+      Inc(LEnd);
+    LNonce := Copy(LWww, LPos, LEnd - LPos);
+  end;
+
+  LHA1 := DigestHA1(CUser, CRealm, CPass);
+  // Valid digest for "/admin" ...
+  LAuthHeader := BuildDigestHeader('GET', '/admin', LNonce, LHA1);
+  // ... delivered on a request for "/public".
+  LCtx := TContextBuilder.New
+    .Path('/public')
+    .Header('Authorization', LAuthHeader)
+    .Build;
+  LCalled := False;
+  LMw(LCtx, procedure begin LCalled := True; end);
+  Assert.IsFalse(LCalled, 'header uri must be bound to the actual request path');
   Assert.AreEqual(401, LCtx.Status);
 end;
 

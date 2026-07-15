@@ -19,6 +19,8 @@ type
     procedure ExceedingLimitRaisesException;
     [Test]
     procedure UsesXForwardedForIfPresent;
+    [Test]
+    procedure DistinctKeysBeyondCap_Refused;
   end;
 
 implementation
@@ -94,6 +96,35 @@ begin
   LMw(LCtx2, procedure begin end);
 
   Assert.AreEqual('98', GetExtraHeader(LCtx2, 'X-RateLimit-Remaining'));
+end;
+
+// #209 regression: an unbounded counter map is a memory-DoS — a distinct-key
+// flood (IPv6 rotation / spoofed XFF) inserts one live entry per request. With
+// the map capped at 5 tracked keys, the 6th distinct source must be refused
+// (429) rather than growing the map.
+procedure TRateLimitMiddlewareTests.DistinctKeysBeyondCap_Refused;
+var
+  LCtx: TNativeRequestContext;
+  LMw: TNativeMiddlewareFunc;
+  I: Integer;
+  LRaised: Boolean;
+begin
+  LMw := RateLimitMiddleware(100, 60, 'Too Many Requests', False, nil, 5);
+  for I := 1 to 5 do
+  begin
+    LCtx := TContextBuilder.New.RemoteAddr('10.0.0.' + IntToStr(I)).Build;
+    LMw(LCtx, procedure begin end);  // 5 distinct keys fill the capped map
+  end;
+
+  LRaised := False;
+  LCtx := TContextBuilder.New.RemoteAddr('10.0.0.6').Build;  // 6th distinct key
+  try
+    LMw(LCtx, procedure begin end);
+  except
+    on E: EPoseidonException do
+      LRaised := True;
+  end;
+  Assert.IsTrue(LRaised, '6th distinct key beyond the cap must be refused (429)');
 end;
 
 initialization

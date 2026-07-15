@@ -14,7 +14,8 @@ uses
 function RateLimitMiddleware(AMaxRequests: Integer; AWindowSeconds: Integer;
   const AMessage: string = 'Too Many Requests';
   ATrustProxy: Boolean = False;
-  const ATrustedProxies: TArray<string> = nil): TNativeMiddlewareFunc;
+  const ATrustedProxies: TArray<string> = nil;
+  AMaxTrackedKeys: Integer = 100000): TNativeMiddlewareFunc;
 
 implementation
 
@@ -28,6 +29,12 @@ uses
   Poseidon.Status,
   Poseidon.Net.Security;
 
+const
+  // Longest textual IP (IPv6 with embedded IPv4 + zone) is 45 chars — an
+  // X-Forwarded-For token longer than this is not a real address; cap it so a
+  // malicious multi-KB XFF value can't bloat per-entry key memory (#209).
+  CMaxKeyLen = 45;
+
 type
   TWindowEntry = record
     Count: Integer;
@@ -37,19 +44,23 @@ type
 function RateLimitMiddleware(AMaxRequests: Integer; AWindowSeconds: Integer;
   const AMessage: string;
   ATrustProxy: Boolean;
-  const ATrustedProxies: TArray<string>): TNativeMiddlewareFunc;
+  const ATrustedProxies: TArray<string>;
+  AMaxTrackedKeys: Integer): TNativeMiddlewareFunc;
 var
   LTable: TDictionary<string, TWindowEntry>;
   LLock: TCriticalSection;
   LLastCleanup: TDateTime;
   LTrustProxy: Boolean;
   LTrustedProxies: TArray<string>;
+  LMaxKeys: Integer;
 begin
   LTable := TDictionary<string, TWindowEntry>.Create(256);
   LLock := TCriticalSection.Create;
   LLastCleanup := Now;
   LTrustProxy := ATrustProxy and (Length(ATrustedProxies) > 0);
   LTrustedProxies := ATrustedProxies;
+  LMaxKeys := AMaxTrackedKeys;
+  if LMaxKeys < 1 then LMaxKeys := 100000;
 
   Result :=
     procedure(var ACtx: TNativeRequestContext; ANext: TProc)
@@ -81,7 +92,13 @@ begin
         begin
           LXFF := ACtx.Header('X-Forwarded-For');
           if LXFF <> '' then
+          begin
             LIP := LXFF.Split([','])[0].Trim;
+            // Reject an implausible (empty/oversized) XFF token — a client-
+            // controlled multi-KB value would otherwise become a huge map key.
+            if (LIP = '') or (Length(LIP) > CMaxKeyLen) then
+              LIP := ACtx.RemoteAddr;
+          end;
         end;
       end;
 
@@ -117,9 +134,36 @@ begin
         end
         else
         begin
-          LEntry.Count := 1;
-          LEntry.WindowStart := LNow;
-          LTable.Add(LIP, LEntry);
+          // New key. An unbounded map is itself a memory-DoS: a distinct-key
+          // flood (IPv6 source rotation, spoofed XFF) inserts one live entry per
+          // request. At the cap, force ONE amortized stale sweep (gated by
+          // LLastCleanup so the flood can't turn it into an O(n)/request cost);
+          // if still full, fail closed (429) for the new key instead of growing.
+          if LTable.Count >= LMaxKeys then
+          begin
+            if SecondsBetween(LNow, LLastCleanup) >= 5 then
+            begin
+              SetLength(LStale, 0);
+              for LPair in LTable do
+                if SecondsBetween(LNow, LPair.Value.WindowStart) >= AWindowSeconds then
+                begin
+                  LIdx := Length(LStale);
+                  SetLength(LStale, LIdx + 1);
+                  LStale[LIdx] := LPair.Key;
+                end;
+              for LIdx := 0 to High(LStale) do
+                LTable.Remove(LStale[LIdx]);
+              LLastCleanup := LNow;
+            end;
+          end;
+          if LTable.Count >= LMaxKeys then
+            LEntry.Count := AMaxRequests + 1  // over limit → 429 below, no insert
+          else
+          begin
+            LEntry.Count := 1;
+            LEntry.WindowStart := LNow;
+            LTable.Add(LIP, LEntry);
+          end;
         end;
         LRemaining := AMaxRequests - LEntry.Count;
       finally

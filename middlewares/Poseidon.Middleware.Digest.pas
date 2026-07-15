@@ -32,8 +32,9 @@ uses
   System.DateUtils;
 
 const
-  CNonceTtlSec = 300;      // issued nonces are valid for 5 minutes
-  CMaxNonces   = 100000;   // hard cap so a 401 flood cannot exhaust memory
+  CNonceTtlSec     = 300;    // issued nonces are valid for 5 minutes
+  CMaxNonces       = 100000; // hard cap so a 401 flood cannot exhaust memory
+  CPurgeIntervalSec = 30;    // amortize the O(n) sweep: at most once per 30s
 
 type
   TNonceState = record
@@ -50,6 +51,7 @@ type
     FNonces: TDictionary<string, TNonceState>;
     FSecret: string;
     FCounter: Int64;
+    FLastPurge: TDateTime;
     procedure Purge(ANow: TDateTime);
   public
     constructor Create;
@@ -104,6 +106,7 @@ begin
   FLock := TCriticalSection.Create;
   FNonces := TDictionary<string, TNonceState>.Create;
   FCounter := 0;
+  FLastPurge := 0;
   Randomize;
   // Per-process secret. Nonce unpredictability is defense-in-depth; the real
   // replay protection is the issued-nonce + nc tracking in Accept().
@@ -127,6 +130,15 @@ var
   LStale: TArray<string>;
   LKey: string;
 begin
+  // Amortize: the O(n) scan runs at most once per CPurgeIntervalSec, so a 401
+  // flood (every unauthenticated request calls NewNonce -> Purge) cannot turn
+  // this into an O(n)-per-request lock-held DoS. Per-lookup expiry is enforced
+  // inline in Accept(), so a not-yet-purged expired nonce is still rejected;
+  // Purge is purely memory reclamation. Caller holds FLock.
+  if (FLastPurge <> 0) and (SecondsBetween(ANow, FLastPurge) < CPurgeIntervalSec) then
+    Exit;
+  FLastPurge := ANow;
+
   SetLength(LStale, 0);
   for LPair in FNonces do
     if SecondsBetween(ANow, LPair.Value.IssuedAt) > CNonceTtlSec then
@@ -171,6 +183,13 @@ begin
     Purge(Now);
     if not FNonces.TryGetValue(ANonce, LState) then
       Exit;  // unknown / expired / never issued -> reject (replay or forgery)
+    // Inline expiry — enforce the TTL per-lookup so a nonce not yet swept by the
+    // amortized Purge is still rejected once past CNonceTtlSec.
+    if SecondsBetween(Now, LState.IssuedAt) > CNonceTtlSec then
+    begin
+      FNonces.Remove(ANonce);
+      Exit;
+    end;
     if ANc <= LState.LastNc then
       Exit;  // nc must strictly increase -> blocks replay of a captured header
     LState.LastNc := ANc;
@@ -251,6 +270,8 @@ begin
       LAuthHeader: string;
       LUsername, LRealm, LNonce, LUri, LQop, LNc, LCnonce, LResponse: string;
       LHA1, LHA2, LExpected: string;
+      LUriPath: string;
+      LQPos: Integer;
     begin
       LAuthHeader := ACtx.Header('Authorization');
 
@@ -271,6 +292,20 @@ begin
 
       // We only advertise qop="auth"; require it (rejects the weaker legacy mode).
       if not SameText(LQop, 'auth') then
+      begin
+        Unauthorized(ACtx, ARealm, LStore, False);
+        Exit;
+      end;
+
+      // Bind the authenticated request-target to the ACTUAL request path (RFC
+      // 7616 §3.4.6). The digest is computed over the header's `uri`, so without
+      // this a captured Authorization header for /public could be replayed on a
+      // request line for /admin and still verify — defeating resource binding.
+      LUriPath := LUri;
+      LQPos := Pos('?', LUriPath);
+      if LQPos > 0 then
+        LUriPath := Copy(LUriPath, 1, LQPos - 1);
+      if LUriPath <> ACtx.Path then
       begin
         Unauthorized(ACtx, ARealm, LStore, False);
         Exit;
