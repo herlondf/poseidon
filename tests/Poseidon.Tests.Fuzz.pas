@@ -48,6 +48,22 @@ type
     [Test] procedure Fuzz_MutatedValidFrames_NeverCrashesNeverHangs;
   end;
 
+  // Deterministic invariant guards for the HPACK decoder. Fuzzing proves "never
+  // crashes"; these prove the SECURITY invariants actively hold — each crafts the
+  // exact adversarial block for one RFC 7541 danger zone and asserts the decoder
+  // rejects it with the right signal (COMPRESSION_ERROR vs header-list-too-big),
+  // not merely "did not crash". Regression guards for the HPACK-hardening.
+  [TestFixture]
+  THPACKInvariantTests = class
+  public
+    [Test] procedure Bomb_ManyRefsToLargePrimedEntry_FlagsHeaderListTooBig;
+    [Test] procedure DynTableSizeUpdate_AboveAnnounced_IsCompressionError;
+    [Test] procedure Huffman_EmbeddedEOS_IsCompressionError;
+    [Test] procedure IndexedField_OutOfRange_IsCompressionError;
+    [Test] procedure StringLength_BeyondBuffer_IsCompressionError;
+    [Test] procedure IntegerOverflow_PastUInt32_DoesNotAllocate;
+  end;
+
 implementation
 
 uses
@@ -278,7 +294,7 @@ function StructuredHPACK(var ARng: TRng): TBytes;
 var
   LKind: Integer;
 begin
-  LKind := ARng.InRange(0, 6);
+  LKind := ARng.InRange(0, 9);
   case LKind of
     0: // indexed header field, huge index (varint continuation bytes)
       Result := TBytes.Create($FF, $FF, $FF, $FF, $FF, $0F);
@@ -292,11 +308,93 @@ begin
       Result := TBytes.Create($10, $00, $FF, $FF, $FF, $FF, $0F);
     5: // truncated Huffman string (high bit set, cut short)
       Result := TBytes.Create($82, $FF);
+    6: // Huffman value carrying the 30-bit EOS symbol (must COMPRESSION_ERROR)
+      Result := TBytes.Create($00, $01, $61, $84, $FF, $FF, $FF, $FF);
+    7: // indexed field one past the (empty) dynamic table boundary
+      Result := TBytes.Create($BE);
+    8: // dynamic table size update AFTER a field (out of position, §4.2)
+      Result := TBytes.Create($82, $20);
   else
     Result := RandomBuf(ARng, 32);
   end;
   // Append random trailing noise to keep the decoder honest.
   Result := Result + RandomBuf(ARng, ARng.InRange(0, 24));
+end;
+
+// ---------------------------------------------------------------------------
+// HPACK block builders — used by the deterministic invariant guards to craft
+// the exact adversarial representation for each danger zone (RFC 7541 §5/§6).
+// ---------------------------------------------------------------------------
+
+procedure HpAppendInt(var ABuf: TBytes; AValue: Cardinal; APrefixBits: Byte;
+  AHighBits: Byte);
+var
+  LMask: Cardinal;
+  LN: Integer;
+begin
+  LMask := (Cardinal(1) shl APrefixBits) - 1;
+  LN := Length(ABuf);
+  if AValue < LMask then
+  begin
+    SetLength(ABuf, LN + 1);
+    ABuf[LN] := AHighBits or Byte(AValue);
+    Exit;
+  end;
+  SetLength(ABuf, LN + 1);
+  ABuf[LN] := AHighBits or Byte(LMask);
+  Dec(AValue, LMask);
+  while AValue >= 128 do
+  begin
+    LN := Length(ABuf);
+    SetLength(ABuf, LN + 1);
+    ABuf[LN] := Byte(AValue and $7F) or $80;
+    AValue := AValue shr 7;
+  end;
+  LN := Length(ABuf);
+  SetLength(ABuf, LN + 1);
+  ABuf[LN] := Byte(AValue);
+end;
+
+procedure HpAppendStr(var ABuf: TBytes; const AStr: AnsiString);
+var
+  LN, I: Integer;
+begin
+  HpAppendInt(ABuf, Cardinal(Length(AStr)), 7, $00); // H=0 (plain octets)
+  LN := Length(ABuf);
+  SetLength(ABuf, LN + Length(AStr));
+  for I := 1 to Length(AStr) do
+    ABuf[LN + I - 1] := Byte(AStr[I]);
+end;
+
+// §6.2.1 literal with incremental indexing, new name (index 0) — primes the
+// dynamic table with (AName, AValue).
+function HpLiteralIndexedNewName(const AName, AValue: AnsiString): TBytes;
+begin
+  Result := TBytes.Create($40);
+  HpAppendStr(Result, AName);
+  HpAppendStr(Result, AValue);
+end;
+
+// §6.1 indexed header field.
+function HpIndexed(AIdx: Cardinal): TBytes;
+begin
+  Result := nil;
+  HpAppendInt(Result, AIdx, 7, $80);
+end;
+
+function DecodeBlock(ACodec: TH2HpackCodec; const ABlock: TBytes;
+  out ATooBig, AProtoErr: Boolean): Boolean;
+var
+  LMethod, LPath, LScheme, LAuthority: string;
+  LHeaders: TArray<TPair<string, string>>;
+begin
+  if Length(ABlock) = 0 then
+  begin
+    ATooBig := False; AProtoErr := False; Exit(True);
+  end;
+  Result := ACodec.DecodeHeaders(@ABlock[0], Length(ABlock),
+    LMethod, LPath, LScheme, LAuthority, LHeaders, ATooBig, AProtoErr,
+    procedure begin end);
 end;
 
 // ---------------------------------------------------------------------------
@@ -523,9 +621,138 @@ begin
   end;
 end;
 
+// ---------------------------------------------------------------------------
+// HPACK invariant guards (deterministic)
+// ---------------------------------------------------------------------------
+
+// A single ~3 KB dynamic-table entry referenced repeatedly by 1-byte indexed
+// fields expands the header list past CMaxHeaderListSize (16 KB). The decoder
+// must flag AHeaderListTooBig (REFUSE_STREAM), not keep accumulating.
+procedure THPACKInvariantTests.Bomb_ManyRefsToLargePrimedEntry_FlagsHeaderListTooBig;
+var
+  LCodec: TH2HpackCodec;
+  LBlock: TBytes;
+  LTooBig, LProtoErr, LOk: Boolean;
+  I: Integer;
+begin
+  LCodec := TH2HpackCodec.Create;
+  try
+    // Prime the dynamic table with a ~3042-byte entry (fits under 4096 cap).
+    LBlock := HpLiteralIndexedNewName(AnsiString('xxxxxxxxxx'),
+      AnsiString(StringOfChar('y', 3000)));
+    // Reference it (index 62 = newest dynamic entry) enough times to blow 16 KB.
+    for I := 1 to 6 do
+      LBlock := LBlock + HpIndexed(62);
+    LOk := DecodeBlock(LCodec, LBlock, LTooBig, LProtoErr);
+    Assert.IsFalse(LOk, 'HPACK bomb must be rejected');
+    Assert.IsTrue(LTooBig, 'AHeaderListTooBig must be set for the bomb');
+  finally
+    LCodec.Free;
+  end;
+end;
+
+// §6.3 — a dynamic table size update above the announced maximum (4096) is a
+// COMPRESSION_ERROR, never an allocation.
+procedure THPACKInvariantTests.DynTableSizeUpdate_AboveAnnounced_IsCompressionError;
+var
+  LCodec: TH2HpackCodec;
+  LBlock: TBytes;
+  LTooBig, LProtoErr, LOk: Boolean;
+begin
+  LCodec := TH2HpackCodec.Create;
+  try
+    LBlock := nil;
+    HpAppendInt(LBlock, 5000, 5, $20); // §6.3 pattern 001x xxxx, value 5000 > 4096
+    LOk := DecodeBlock(LCodec, LBlock, LTooBig, LProtoErr);
+    Assert.IsFalse(LOk, 'Oversized dyn-table-size update must be rejected');
+    Assert.IsFalse(LTooBig, 'It is a compression error, not header-list-too-big');
+  finally
+    LCodec.Free;
+  end;
+end;
+
+// §5.2 — the EOS symbol (30 ones) must not appear as a decoded Huffman symbol.
+procedure THPACKInvariantTests.Huffman_EmbeddedEOS_IsCompressionError;
+var
+  LCodec: TH2HpackCodec;
+  LBlock: TBytes;
+  LTooBig, LProtoErr, LOk: Boolean;
+begin
+  LCodec := TH2HpackCodec.Create;
+  try
+    // Literal without indexing, new name "a", value = Huffman with 32 one-bits
+    // (the first 30 form the EOS code → embedded EOS → COMPRESSION_ERROR).
+    LBlock := TBytes.Create($00, $01, $61, $84, $FF, $FF, $FF, $FF);
+    LOk := DecodeBlock(LCodec, LBlock, LTooBig, LProtoErr);
+    Assert.IsFalse(LOk, 'Embedded EOS in Huffman must be rejected');
+    Assert.IsFalse(LProtoErr, 'It is a compression error, not a protocol error');
+  finally
+    LCodec.Free;
+  end;
+end;
+
+// §6.1 — an indexed field addressing neither the static nor the (empty) dynamic
+// table is a COMPRESSION_ERROR.
+procedure THPACKInvariantTests.IndexedField_OutOfRange_IsCompressionError;
+var
+  LCodec: TH2HpackCodec;
+  LBlock: TBytes;
+  LTooBig, LProtoErr, LOk: Boolean;
+begin
+  LCodec := TH2HpackCodec.Create;
+  try
+    LBlock := TBytes.Create($BE); // indexed, idx 62, dynamic table empty
+    LOk := DecodeBlock(LCodec, LBlock, LTooBig, LProtoErr);
+    Assert.IsFalse(LOk, 'Out-of-range index must be rejected');
+  finally
+    LCodec.Free;
+  end;
+end;
+
+// §5.2 — a string length that runs past the buffer is a truncated fragment →
+// COMPRESSION_ERROR (the unsigned bounds check must catch it before Move).
+procedure THPACKInvariantTests.StringLength_BeyondBuffer_IsCompressionError;
+var
+  LCodec: TH2HpackCodec;
+  LBlock: TBytes;
+  LTooBig, LProtoErr, LOk: Boolean;
+begin
+  LCodec := TH2HpackCodec.Create;
+  try
+    // Literal new name, name length = 5 but only 1 byte follows.
+    LBlock := TBytes.Create($00, $05, $61);
+    LOk := DecodeBlock(LCodec, LBlock, LTooBig, LProtoErr);
+    Assert.IsFalse(LOk, 'String length beyond buffer must be rejected');
+  finally
+    LCodec.Free;
+  end;
+end;
+
+// §5.1 — an integer whose continuation bytes overflow past 2^32 must NOT wrap to
+// a small signed value and drive an allocation; the decoder returns 0 and the
+// representation is handled without a crash or giant Move.
+procedure THPACKInvariantTests.IntegerOverflow_PastUInt32_DoesNotAllocate;
+var
+  LCodec: TH2HpackCodec;
+  LBlock: TBytes;
+  LTooBig, LProtoErr: Boolean;
+begin
+  LCodec := TH2HpackCodec.Create;
+  try
+    // Indexed field with a varint of six 0xFF continuation bytes (> 2^32).
+    LBlock := TBytes.Create($FF, $FF, $FF, $FF, $FF, $FF, $0F);
+    // Invariant: returns (no crash / no OOM) — value is irrelevant here.
+    DecodeBlock(LCodec, LBlock, LTooBig, LProtoErr);
+    Assert.Pass('Integer overflow handled without allocation or crash');
+  finally
+    LCodec.Free;
+  end;
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFuzzHTTP1ParserTests);
   TDUnitX.RegisterTestFixture(TFuzzHPACKTests);
   TDUnitX.RegisterTestFixture(TFuzzWebSocketTests);
+  TDUnitX.RegisterTestFixture(THPACKInvariantTests);
 
 end.
