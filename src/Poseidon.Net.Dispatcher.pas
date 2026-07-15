@@ -284,6 +284,14 @@ var
 begin
   LConn := TNativeConn(ACtx.Conn);
 
+  // #199: a WebSocket connection's AccumBuf holds WS frame bytes, NOT an HTTP
+  // request — its size is bounded by MaxWSFrameSize in the WS manager. Applying
+  // the HTTP MaxRequestSize here rejected any WS message larger than it with a
+  // 413 (garbage in the WS stream) and closed the connection before StepWSBranch
+  // could echo it — Autobahn 9.1.5/6, 9.2.5/6 (>4 MB messages).
+  if LConn.WSMode = CCMWebSocket then
+    Exit;
+
   if LConn.AccumLen <= ACtx.Config^.MaxRequestSize then
     Exit;
 

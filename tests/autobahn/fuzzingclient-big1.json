@@ -1,0 +1,1 @@
+{ "outdir": "./reports/clients", "servers": [ { "agent": "poseidon-v2", "url": "ws://127.0.0.1:9011" } ], "cases": ["9.1.5"], "exclude-cases": [], "exclude-agent-cases": {} }
