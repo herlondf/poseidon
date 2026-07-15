@@ -46,6 +46,11 @@ type
     [Test] procedure H2Connection_HandlerNotInvoked;
     [Test] procedure WSConnection_BranchTaken;
     [Test] procedure WSConnection_HandlerNotInvoked;
+    // #199 regression — StepSizeCheck runs before StepWSBranch in the pipeline.
+    // It must skip WebSocket connections: a WS message whose AccumBuf exceeds
+    // MaxRequestSize is NOT an oversized HTTP request and must not be 413-closed
+    // before the WS branch echoes it (WS frames are capped by MaxWSFrameSize).
+    [Test] procedure WSConnection_OversizedAccum_NotRejectedBySizeCheck;
   end;
 
   [TestFixture]
@@ -548,6 +553,33 @@ begin
     DoDispatch(LConn, LConfig, LMock);
     Assert.IsFalse(LMock.HandlerInvoked,
       'WS branch must not invoke the HTTP/1.1 handler');
+  finally
+    LConn.Free;
+    LMock := nil;
+  end;
+end;
+
+procedure TDispatcherProtocolTests.WSConnection_OversizedAccum_NotRejectedBySizeCheck;
+var
+  LConn:   TNativeConn;
+  LMock:   TMockCallbacks;
+  LConfig: TDispatchConfig;
+begin
+  // The accumulated GET buffer (~55 bytes) exceeds this cap; on a WS connection
+  // StepSizeCheck must skip it rather than emit 413 + close (the #199 bug).
+  LConn   := MakeConn('GET', '/ws');
+  LConn.WSMode := CCMWebSocket;
+  LMock   := TMockCallbacks.Create;
+  LConfig := DefaultConfig;
+  LConfig.MaxRequestSize := 10;
+  try
+    DoDispatch(LConn, LConfig, LMock);
+    Assert.IsTrue(LMock.DispatchWSCalled,
+      '#199: a WS connection whose AccumBuf exceeds MaxRequestSize must still ' +
+      'reach the WS branch');
+    Assert.AreNotEqual(413, LMock.SendResponseStatus,
+      '#199: StepSizeCheck must skip WebSocket connections (no 413/close on a ' +
+      'large WS frame)');
   finally
     LConn.Free;
     LMock := nil;
