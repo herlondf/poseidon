@@ -48,6 +48,23 @@ type
     [Test] procedure Fuzz_MutatedValidFrames_NeverCrashesNeverHangs;
   end;
 
+  // Deterministic smuggling guards for the HTTP/1 parser. Fuzzing proves "never
+  // crashes"; these prove the SMUGGLING defenses actively hold — each crafts the
+  // exact request for one RFC 7230 §3.3.3 desync vector and asserts the parser
+  // flags ABadRequest (→ 400 / close), not merely "did not crash".
+  [TestFixture]
+  THTTP1SmugglingTests = class
+  public
+    [Test] procedure ContentLengthAndChunked_Rejected;
+    [Test] procedure DuplicateConflictingContentLength_Rejected;
+    [Test] procedure TransferEncodingNotChunked_Rejected;
+    [Test] procedure TransferEncodingChunkedChunked_Rejected;
+    [Test] procedure ObsFoldContinuationLine_Rejected;
+    [Test] procedure WhitespaceBeforeColon_Rejected;
+    [Test] procedure OversizedContentLength_Rejected;
+    [Test] procedure WellFormedRequest_Accepted;
+  end;
+
   // Deterministic invariant guards for the HPACK decoder. Fuzzing proves "never
   // crashes"; these prove the SECURITY invariants actively hold — each crafts the
   // exact adversarial block for one RFC 7541 danger zone and asserts the decoder
@@ -622,6 +639,136 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
+// HTTP/1 smuggling guards (deterministic)
+// ---------------------------------------------------------------------------
+
+function ReqBytes(const AStr: AnsiString): TBytes;
+var
+  I: Integer;
+begin
+  SetLength(Result, Length(AStr));
+  for I := 1 to Length(AStr) do
+    Result[I - 1] := Byte(AStr[I]);
+end;
+
+// Parses AStr as an HTTP/1 request; returns ABadRequest and outputs whether the
+// parse succeeded (AOk). Generous size caps so only the smuggling logic decides.
+function ParseReqIsBad(const AStr: AnsiString; out AOk: Boolean): Boolean;
+var
+  LBuf: TBytes;
+  LMethod, LPath, LQuery: string;
+  LHeaders: TArray<TPair<string, string>>;
+  LBody: TBytes;
+  LKeepAlive: Boolean;
+  LConsumed: Integer;
+  LBad: Boolean;
+begin
+  LBuf := ReqBytes(AStr);
+  AOk := ParseHTTP1Request(LBuf, Length(LBuf), 65536, 8388608,
+    LMethod, LPath, LQuery, LHeaders, LBody, LKeepAlive, LConsumed, LBad);
+  Result := LBad;
+end;
+
+// §3.3.3: Content-Length together with Transfer-Encoding: chunked is a CL.TE
+// smuggling vector — the parser must reject the whole message.
+procedure THTTP1SmugglingTests.ContentLengthAndChunked_Rejected;
+var
+  LOk: Boolean;
+begin
+  Assert.IsTrue(ParseReqIsBad(
+    'POST / HTTP/1.1'#13#10 + 'Host: x'#13#10 +
+    'Content-Length: 5'#13#10 + 'Transfer-Encoding: chunked'#13#10#13#10 +
+    '0'#13#10#13#10, LOk), 'CL + TE:chunked must be rejected');
+  Assert.IsFalse(LOk, 'must not parse as a valid request');
+end;
+
+// §3.3.3: two Content-Length headers with different values (CL.CL smuggling).
+procedure THTTP1SmugglingTests.DuplicateConflictingContentLength_Rejected;
+var
+  LOk: Boolean;
+begin
+  Assert.IsTrue(ParseReqIsBad(
+    'POST / HTTP/1.1'#13#10 + 'Host: x'#13#10 +
+    'Content-Length: 5'#13#10 + 'Content-Length: 6'#13#10#13#10 +
+    'hello', LOk), 'Conflicting duplicate Content-Length must be rejected');
+  Assert.IsFalse(LOk, 'must not parse as a valid request');
+end;
+
+// §3.3.3: a Transfer-Encoding whose final coding is not "chunked" leaves the
+// message length undeterminable — reject.
+procedure THTTP1SmugglingTests.TransferEncodingNotChunked_Rejected;
+var
+  LOk: Boolean;
+begin
+  Assert.IsTrue(ParseReqIsBad(
+    'POST / HTTP/1.1'#13#10 + 'Host: x'#13#10 +
+    'Transfer-Encoding: gzip'#13#10#13#10, LOk),
+    'TE not exactly chunked must be rejected');
+  Assert.IsFalse(LOk, 'must not parse as a valid request');
+end;
+
+// §3.3.3: "chunked, chunked" — final coding not a bare "chunked" → reject.
+procedure THTTP1SmugglingTests.TransferEncodingChunkedChunked_Rejected;
+var
+  LOk: Boolean;
+begin
+  Assert.IsTrue(ParseReqIsBad(
+    'POST / HTTP/1.1'#13#10 + 'Host: x'#13#10 +
+    'Transfer-Encoding: chunked, chunked'#13#10#13#10 + '0'#13#10#13#10, LOk),
+    'TE chunked,chunked must be rejected');
+  Assert.IsFalse(LOk, 'must not parse as a valid request');
+end;
+
+// §3.2.4: obsolete line folding (a header line starting with SP/HT) must be
+// rejected — it is a classic header-injection / desync vector.
+procedure THTTP1SmugglingTests.ObsFoldContinuationLine_Rejected;
+var
+  LOk: Boolean;
+begin
+  Assert.IsTrue(ParseReqIsBad(
+    'GET / HTTP/1.1'#13#10 + 'Host: x'#13#10 +
+    'X-Foo: bar'#13#10 + ' baz'#13#10#13#10, LOk),
+    'obs-fold continuation must be rejected');
+  Assert.IsFalse(LOk, 'must not parse as a valid request');
+end;
+
+// §3.2.4: whitespace before the colon ("Name : value") is a smuggling vector.
+procedure THTTP1SmugglingTests.WhitespaceBeforeColon_Rejected;
+var
+  LOk: Boolean;
+begin
+  Assert.IsTrue(ParseReqIsBad(
+    'GET / HTTP/1.1'#13#10 + 'Host : x'#13#10#13#10, LOk),
+    'whitespace before colon must be rejected');
+  Assert.IsFalse(LOk, 'must not parse as a valid request');
+end;
+
+// §3.3.2 / #158: a Content-Length longer than 18 digits (Int64 overflow guard).
+procedure THTTP1SmugglingTests.OversizedContentLength_Rejected;
+var
+  LOk: Boolean;
+begin
+  Assert.IsTrue(ParseReqIsBad(
+    'POST / HTTP/1.1'#13#10 + 'Host: x'#13#10 +
+    'Content-Length: 99999999999999999999'#13#10#13#10, LOk),
+    'oversized Content-Length must be rejected');
+  Assert.IsFalse(LOk, 'must not parse as a valid request');
+end;
+
+// Positive control: a well-formed request with a body parses cleanly. Guards
+// against the suite trivially passing because everything is rejected.
+procedure THTTP1SmugglingTests.WellFormedRequest_Accepted;
+var
+  LOk, LBad: Boolean;
+begin
+  LBad := ParseReqIsBad(
+    'GET /path?q=1 HTTP/1.1'#13#10 + 'Host: x'#13#10 +
+    'Content-Length: 5'#13#10#13#10 + 'hello', LOk);
+  Assert.IsFalse(LBad, 'well-formed request must not be flagged bad');
+  Assert.IsTrue(LOk, 'well-formed request must parse');
+end;
+
+// ---------------------------------------------------------------------------
 // HPACK invariant guards (deterministic)
 // ---------------------------------------------------------------------------
 
@@ -753,6 +900,7 @@ initialization
   TDUnitX.RegisterTestFixture(TFuzzHTTP1ParserTests);
   TDUnitX.RegisterTestFixture(TFuzzHPACKTests);
   TDUnitX.RegisterTestFixture(TFuzzWebSocketTests);
+  TDUnitX.RegisterTestFixture(THTTP1SmugglingTests);
   TDUnitX.RegisterTestFixture(THPACKInvariantTests);
 
 end.
