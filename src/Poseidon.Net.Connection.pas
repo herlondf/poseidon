@@ -70,6 +70,14 @@ type
     PendingSendActual: Integer;
     SentBytes: Integer;
     OwnerEpollFd: Integer;
+    // #11: io_uring send serialization. TLS requires strict byte ordering, but
+    // io_uring does NOT order independent SEND SQEs — several frames in one
+    // dispatch would submit concurrent sends that interleave on the wire ->
+    // 'bad record MAC'. Enforce ONE send in flight per connection; queue the
+    // rest here (guarded by Lock) and submit on completion.
+    SendInFlight: Boolean;
+    SendBacklog: TBytes;
+    SendBacklogLen: Integer;
 {$ENDIF}
     // R-1: ASocket is NativeUInt so callers need no {$IFDEF} for socket type.
     // Internally cast to TSocket (Windows) or Integer (Linux).

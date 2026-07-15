@@ -95,6 +95,12 @@ type
     function  _SubmitAcceptMultishot(AListenFd: Integer): Boolean;
     procedure _ProcessCQE(AUserData: UInt64; ARes: Int32; AFlags: UInt32);
     procedure _ResubmitSend(AConn: TNativeConn);
+    // #11: per-connection send serialization (see TNativeConn.SendInFlight).
+    // _BeginSend returns True if the caller should submit AData now, False if it
+    // was queued (in flight). _KickNextSend, called on send completion, submits
+    // the next queued chunk and returns True, or marks the conn idle -> False.
+    function  _BeginSend(AConn: TNativeConn; const AData: TBytes; ALen: Integer): Boolean;
+    function  _KickNextSend(AConn: TNativeConn): Boolean;
     function  _RecvPoolAcquire: Pointer;
     procedure _RecvPoolRelease(ACtx: Pointer);
     procedure _NotifyKernel;
@@ -798,6 +804,7 @@ var
   LConn: TNativeConn absolute AConn;
   LSendLen: Integer;
   LZCRef: PSendZCRef;
+  LTmp: TBytes;
 begin
   LSendLen := AActualLen;
   if LSendLen = 0 then LSendLen := Length(AData);
@@ -805,6 +812,15 @@ begin
   if LSendLen = 0 then
   begin
     FCallbacks.OnSendComplete(AConn);
+    Exit;
+  end;
+
+  // #11: serialize — io_uring won't order independent SEND SQEs, so at most ONE
+  // send may be in flight per connection. If one already is, queue and return.
+  if not _BeginSend(LConn, AData, LSendLen) then
+  begin
+    LTmp := AData;                 // copied into the backlog by _BeginSend
+    TBufferPool.Release(LTmp);
     Exit;
   end;
 
@@ -1104,6 +1120,66 @@ end;
 // Internal: send helper — submits a SEND SQE for the remaining bytes
 // ---------------------------------------------------------------------------
 
+// #11 — serialization gate. Under LConn.Lock: if a send is already in flight,
+// copy AData onto the connection's ordered backlog and return False (queued);
+// otherwise mark in-flight and return True (caller submits now).
+function TIOUringBackend._BeginSend(AConn: TNativeConn; const AData: TBytes;
+  ALen: Integer): Boolean;
+begin
+  AConn.Lock.Enter;
+  try
+    if AConn.SendInFlight then
+    begin
+      if AConn.SendBacklogLen + ALen > Length(AConn.SendBacklog) then
+        SetLength(AConn.SendBacklog, AConn.SendBacklogLen + ALen + 8192);
+      if ALen > 0 then
+        Move(AData[0], AConn.SendBacklog[AConn.SendBacklogLen], ALen);
+      Inc(AConn.SendBacklogLen, ALen);
+      Result := False;
+    end
+    else
+    begin
+      AConn.SendInFlight := True;
+      Result := True;
+    end;
+  finally
+    AConn.Lock.Leave;
+  end;
+end;
+
+// #11 — called when a send op fully completes. If the backlog holds queued
+// bytes, move them into PendingSend and submit ONE regular SEND (keeping the
+// conn in-flight, order preserved) -> True. Otherwise clear in-flight -> False.
+function TIOUringBackend._KickNextSend(AConn: TNativeConn): Boolean;
+var
+  LLen: Integer;
+  LBuf: TBytes;
+begin
+  AConn.Lock.Enter;
+  try
+    if AConn.SendBacklogLen > 0 then
+    begin
+      LLen := AConn.SendBacklogLen;
+      LBuf := TBufferPool.Acquire(LLen);
+      Move(AConn.SendBacklog[0], LBuf[0], LLen);
+      AConn.SendBacklogLen := 0;
+      AConn.PendingSend := LBuf;
+      AConn.PendingSendActual := LLen;
+      AConn.SentBytes := 0;
+      Result := True;
+    end
+    else
+    begin
+      AConn.SendInFlight := False;
+      Result := False;
+    end;
+  finally
+    AConn.Lock.Leave;
+  end;
+  if Result then
+    _ResubmitSend(AConn);  // acquires FSQLock; ordering LConn.Lock -> FSQLock ok
+end;
+
 procedure TIOUringBackend._ResubmitSend(AConn: TNativeConn);
 var
   LTotal, LRemain: Integer;
@@ -1242,8 +1318,10 @@ begin
       end
       else
       begin
-        // All bytes sent — buffer stays alive for notification CQE (if any)
-        FCallbacks.OnSendComplete(LConn);
+        // All bytes sent (buffer stays alive for the notification CQE). #11:
+        // submit the next queued chunk in order, else notify the server.
+        if not _KickNextSend(LConn) then
+          FCallbacks.OnSendComplete(LConn);
         LConn.Release;                     // result ref
       end;
     end;
@@ -1321,10 +1399,13 @@ begin
     end
     else
     begin
-      // All bytes delivered — return buffer, notify server, then drop our ref.
+      // All bytes delivered — return buffer, then either submit the next queued
+      // chunk (#11: preserves TLS byte order) or notify the server. Drop our ref.
       TBufferPool.Release(LConn.PendingSend);
+      LConn.PendingSend := nil;
       LConn.PendingSendActual := 0;
-      FCallbacks.OnSendComplete(LConn);
+      if not _KickNextSend(LConn) then
+        FCallbacks.OnSendComplete(LConn);
       LConn.Release;
     end;
   end
