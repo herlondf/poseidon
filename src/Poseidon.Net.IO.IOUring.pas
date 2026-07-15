@@ -91,10 +91,10 @@ type
     function _MakeAcceptThread(AListenFd: Integer): TThread;
     procedure _CompletionLoop;
     function  _SubmitSQE(AOpcode: Byte; AFd: Integer; ABuf: Pointer;
-      ALen: UInt32; AUserData: UInt64): Boolean;
+      ALen: UInt32; AUserData: UInt64; AFlags: Byte = 0): Boolean;
     function  _SubmitAcceptMultishot(AListenFd: Integer): Boolean;
     procedure _ProcessCQE(AUserData: UInt64; ARes: Int32; AFlags: UInt32);
-    procedure _ResubmitSend(AConn: TNativeConn);
+    procedure _ResubmitSend(AConn: TNativeConn; AAsync: Boolean = False);
     // #11: per-connection send serialization (see TNativeConn.SendInFlight).
     // _BeginSend returns True if the caller should submit AData now, False if it
     // was queued (in flight). _KickNextSend, called on send completion, submits
@@ -162,6 +162,9 @@ const
 
   // SQE flags
   IOSQE_FIXED_FILE = Byte(1 shl 0);
+  IOSQE_ASYNC = Byte(1 shl 4);  // force io-wq (blocking) execution
+
+  CEAGAIN = 11;  // -EAGAIN from a SEND on a full non-blocking socket buffer
 
   // CQE flags
   IORING_CQE_F_MORE = UInt32(1 shl 1);  // more CQEs to come from this SQE
@@ -1077,7 +1080,7 @@ end;
 // ---------------------------------------------------------------------------
 
 function TIOUringBackend._SubmitSQE(AOpcode: Byte; AFd: Integer;
-  ABuf: Pointer; ALen: UInt32; AUserData: UInt64): Boolean;
+  ABuf: Pointer; ALen: UInt32; AUserData: UInt64; AFlags: Byte): Boolean;
 var
   LTail, LIdx: UInt32;
   LSQE: PIOUringSQE;
@@ -1108,6 +1111,7 @@ begin
   end
   else
     LSQE^.fd := AFd;
+  LSQE^.flags := LSQE^.flags or AFlags;  // #199: e.g. IOSQE_ASYNC on -EAGAIN retry
 
   // x86-64 TSO: plain store sufficient; io_uring_enter acts as full barrier
   FPSQTail^ := LTail + 1;
@@ -1180,20 +1184,24 @@ begin
     _ResubmitSend(AConn);  // acquires FSQLock; ordering LConn.Lock -> FSQLock ok
 end;
 
-procedure TIOUringBackend._ResubmitSend(AConn: TNativeConn);
+procedure TIOUringBackend._ResubmitSend(AConn: TNativeConn; AAsync: Boolean);
 var
   LTotal, LRemain: Integer;
+  LFlags: Byte;
 begin
   LTotal  := AConn.PendingSendActual;
   if LTotal = 0 then LTotal := Length(AConn.PendingSend);
   LRemain := LTotal - AConn.SentBytes;
+
+  LFlags := 0;
+  if AAsync then LFlags := IOSQE_ASYNC;
 
   AConn.AddRef;
   FSQLock.Acquire;
   try
     if not _SubmitSQE(IORING_OP_SEND, AConn.Socket,
       @AConn.PendingSend[AConn.SentBytes], UInt32(LRemain),
-      UInt64(AConn) or CUdTagSend) then
+      UInt64(AConn) or CUdTagSend, LFlags) then
     begin
       AConn.Release;  // op not posted — drop the ref we just took
       FCallbacks.OnConnError(AConn);
@@ -1299,7 +1307,10 @@ begin
           // pool (which would corrupt another request's data). The original is
           // freed by the F_NOTIF path; do NOT nil it here.
           LRemainLen := LZCRef^.TotalLen - LZCRef^.SentBytes;
-          LRemainBuf := TBufferPool.Acquire;
+          LRemainBuf := TBufferPool.Acquire(LRemainLen);  // #199: size for the
+          // REMAINDER — the no-arg Acquire returned an 8 KB tier buffer and the
+          // Move below overflowed it for any send >4 MB (socket buffer) that
+          // partial-completed, corrupting the heap and killing the connection.
           Move(LZCRef^.SendBuf[LZCRef^.SentBytes], LRemainBuf[0], LRemainLen);
           LConn.PendingSend       := LRemainBuf;
           LConn.PendingSendActual := LRemainLen;
@@ -1379,6 +1390,16 @@ begin
   begin
     LConn := TNativeConn(Pointer(UInt64(AUserData and not CUdTagSend)));
 
+    // #199: a non-blocking SEND on a full socket buffer returns -EAGAIN. That is
+    // NOT fatal — re-submit the same remaining bytes via io-wq (IOSQE_ASYNC) so
+    // the kernel completes the send as the peer drains. Without this a WS/HTTP
+    // response larger than the socket send buffer (~4 MB) kills the connection.
+    if ARes = -CEAGAIN then
+    begin
+      _ResubmitSend(LConn, True);
+      LConn.Release;                       // drop this op's ref; resubmit took its own
+      Exit;
+    end;
     if ARes <= 0 then
     begin
       FCallbacks.OnConnError(LConn);
