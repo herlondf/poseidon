@@ -63,6 +63,10 @@ type
     HasContentLength: Boolean;
     ContentLength:    Int64;
     Refused:         Boolean;   // over MAX_CONCURRENT_STREAMS: decode HPACK then RST
+    // True once this stream was counted in FActiveStreams (_DispatchStream). Any
+    // out-of-band free (RST_STREAM) of a still-counted stream must mirror the
+    // FActiveStreams decrement, else a graceful GOAWAY drain never completes.
+    ActiveCounted:   Boolean;
     // Per-stream flow control
     SendWindow:      Integer;   // peer's stream-level send window (how much we can send)
     RecvWindow:      Integer;   // server's stream-level receive window (how much we accept)
@@ -128,6 +132,13 @@ type
     FRstCount:       Int64;
     FRstWindowStart: Int64;   // TThread.GetTickCount64 at window start
 
+    // Control-frame flood defense (CVE-2019-9512 PING, -9515 SETTINGS, -9518
+    // empty-frame): rolling window counter of "unproductive" frames — ones that
+    // make the server emit a reply (PING->PONG, SETTINGS->ACK) or do no work
+    // (empty DATA/HEADERS). Exceeding the window bound -> GOAWAY ENHANCE_YOUR_CALM.
+    FFloodCount:       Int64;
+    FFloodWindowStart: Int64;
+
     // Server push (RFC 7540 §8.2)
     FNextPushStreamID: Cardinal;  // server-initiated streams are even (2, 4, 6, …)
     FClientEnablePush: Boolean;   // True until client sends ENABLE_PUSH=0
@@ -191,6 +202,7 @@ type
     // Rapid-reset defense + REFUSED_STREAM helper
     procedure _SendRstRefusedStream(AStreamID: Cardinal);
     function  _RegisterRstAndCheckRapidReset: Boolean;
+    function  _RegisterUnproductiveAndCheckFlood: Boolean;
 
   public
     constructor Create(AConn: Pointer;
@@ -283,6 +295,11 @@ const
   // Exceeding CRapidResetMax RST_STREAMs inside CRapidResetWindowMs → GOAWAY.
   CRapidResetWindowMs = 60 * 1000;         // 60 s
   CRapidResetMax      = 100;
+
+  // Control-frame flood defense (CVE-2019-9512/9515/9518). Generous headroom for
+  // legitimate keepalive PINGs / SETTINGS; a flood far exceeds it.
+  CFrameFloodWindowMs = 30 * 1000;         // 30 s
+  CFrameFloodMax      = 1000;
 
   // Server's advertised SETTINGS_MAX_FRAME_SIZE (also the minimum allowed by
   // RFC 7540 §6.5.2). Peers exceeding this on any incoming frame get
@@ -484,6 +501,27 @@ begin
     TInterlocked.Exchange(FRstCount, 0);
   end;
   Result := TInterlocked.Increment(FRstCount) > CRapidResetMax;
+end;
+
+function TH2Conn._RegisterUnproductiveAndCheckFlood: Boolean;
+// Rolling-window counter of unproductive control/empty frames (CVE-2019-9512/
+// 9515/9518). Returns True when the peer exceeded CFrameFloodMax inside
+// CFrameFloodWindowMs — caller responds with GOAWAY ENHANCE_YOUR_CALM.
+var
+  LNow:     Int64;
+  LElapsed: Int64;
+  LFreq:    Int64;
+begin
+  LNow  := TStopwatch.GetTimeStamp;
+  LFreq := TStopwatch.Frequency;
+  if LFreq <= 0 then LFreq := 1;
+  LElapsed := ((LNow - FFloodWindowStart) * 1000) div LFreq;
+  if LElapsed > CFrameFloodWindowMs then
+  begin
+    FFloodWindowStart := LNow;
+    TInterlocked.Exchange(FFloodCount, 0);
+  end;
+  Result := TInterlocked.Increment(FFloodCount) > CFrameFloodMax;
 end;
 
 procedure TH2Conn._SendWindowUpdate(AStreamID: Cardinal; AIncrement: Integer);
@@ -848,6 +886,14 @@ begin
     Exit;
   end;
 
+  // Control-frame flood defense (CVE-2019-9515): each non-ACK SETTINGS makes us
+  // emit an ACK; bound the rate.
+  if _RegisterUnproductiveAndCheckFlood then
+  begin
+    _GoAway(FLastStreamID, H2_ERR_ENHANCE_YOUR_CALM);
+    Exit;
+  end;
+
   LPos := 0;
   while LPos < APayLen do
   begin
@@ -945,6 +991,13 @@ begin
     _GoAway(FLastStreamID, H2_ERR_FRAME_SIZE_ERROR);
     Exit;
   end;
+  // Control-frame flood defense (CVE-2019-9512): each non-ACK PING makes us emit
+  // a PONG; bound the rate.
+  if _RegisterUnproductiveAndCheckFlood then
+  begin
+    _GoAway(FLastStreamID, H2_ERR_ENHANCE_YOUR_CALM);
+    Exit;
+  end;
   // Echo back with ACK
   _SendFrame(H2_FRAME_PING, H2_FLAG_ACK, 0, APayload, 8);
 end;
@@ -1022,6 +1075,7 @@ end;
 procedure TH2Conn._HandleRstStream(AStreamID: Cardinal; APayload: PByte; APayLen: Integer);
 var
   LStream: TH2Stream;
+  LWasActive: Boolean;
 begin
   if APayLen <> 4 then
   begin
@@ -1030,12 +1084,22 @@ begin
   end;
   if FStreams.TryGetValue(AStreamID, LStream) then
   begin
+    LWasActive := LStream.ActiveCounted;
     FStreams.Remove(AStreamID);
     LStream.Free;
     // Client-initiated streams have odd IDs (RFC 7540 §5.1.1). Only decrement
     // the client stream counter for those.
     if (AStreamID and 1) = 1 then
       TInterlocked.Decrement(FClientStreamCount);
+    // A dispatched stream whose response was flow-control-buffered keeps
+    // FActiveStreams incremented (cleanup normally deferred to
+    // _CloseStreamAfterSend). If the peer RSTs it instead, mirror that decrement
+    // here — otherwise a pending GOAWAY drain (FDeferClose) never completes and
+    // the connection lingers as a zombie until the idle sweep.
+    if LWasActive then
+      if TInterlocked.Decrement(FActiveStreams) = 0 then
+        if FDeferClose and Assigned(FCloseProc) then
+          FCloseProc(FConn);
   end;
   // Rapid-reset defense (CVE-2023-44487): too many RST_STREAM in the window →
   // GOAWAY with ENHANCE_YOUR_CALM and close the connection.
@@ -1323,6 +1387,16 @@ begin
   if AStreamID <> FContinStreamID then
   begin
     _GoAway(FLastStreamID, H2_ERR_PROTOCOL_ERROR);
+    Exit;
+  end;
+  // CONTINUATION-flood defense: the accumulated-bytes cap (CMaxContinHeadersSize)
+  // does not stop a stream of ZERO-length CONTINUATION frames that never set
+  // END_HEADERS (they add 0 bytes, so the size guard never trips) — the peer
+  // pins the connection in header-assembly forever. Count each CONTINUATION
+  // toward the flood budget so an unbounded run trips GOAWAY.
+  if _RegisterUnproductiveAndCheckFlood then
+  begin
+    _GoAway(FLastStreamID, H2_ERR_ENHANCE_YOUR_CALM);
     Exit;
   end;
   _HandleHeaders(AFlags, AStreamID, APayload, APayLen, True);
@@ -1635,6 +1709,7 @@ begin
 
   // Track active streams
   TInterlocked.Increment(FActiveStreams);
+  AStream.ActiveCounted := True;
   try
     try
       if Assigned(FOnRequest) then
@@ -1902,6 +1977,7 @@ begin
   SetLength(LPushResources, 0);
 
   TInterlocked.Increment(FActiveStreams);
+  LStream.ActiveCounted := True;
   try
     try
       if Assigned(FOnRequest) then

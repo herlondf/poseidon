@@ -119,6 +119,15 @@ type
     // Server push — PUSH_PROMISE + promised response sent before reply
     [Test]
     procedure ServerPush_OnePushResource_SendsPushPromiseThenResponse;
+
+    // Control-frame flood (CVE-2019-9512): a PING flood must trip GOAWAY.
+    [Test]
+    procedure ControlFrameFlood_PingFlood_TriggersGoAway;
+
+    // Lifetime regression: RST of a flow-control-buffered stream must decrement
+    // FActiveStreams so a deferred GOAWAY close can complete (item-2 audit).
+    [Test]
+    procedure RstOfBufferedStream_CompletesDeferredGoAwayClose;
   end;
   {$M-}
 
@@ -1131,6 +1140,67 @@ begin
       'Server push must not trigger GOAWAY');
     Assert.IsFalse(LH.Closed,
       'Connection must stay open after server push');
+  finally
+    LH.Free;
+  end;
+end;
+
+procedure TH2ConnUnitTests.ControlFrameFlood_PingFlood_TriggersGoAway;
+// CVE-2019-9512: the server emits a PONG per non-ACK PING. Without a rate bound
+// a client floods PINGs to force unbounded outbound frames. A flood must trip
+// GOAWAY (ENHANCE_YOUR_CALM). Loops with a generous safety cap so the test does
+// not hard-code the exact threshold.
+var
+  LH:    TH2TestHarness;
+  LPing: TBytes;
+  I:     Integer;
+begin
+  LH := TH2TestHarness.Create;
+  try
+    LH.Feed(H2ClientPreface);
+    LH.ClearSent;
+    LPing := H2BuildPing(0);
+    I := 0;
+    while (I < 5000) and (not H2HasGoAway(LH.SentBytes)) do
+    begin
+      LH.Feed(LPing);
+      Inc(I);
+    end;
+    Assert.IsTrue(H2HasGoAway(LH.SentBytes),
+      'a PING flood must eventually trigger GOAWAY (control-frame flood defense)');
+  finally
+    LH.Free;
+  end;
+end;
+
+procedure TH2ConnUnitTests.RstOfBufferedStream_CompletesDeferredGoAwayClose;
+// Item-2 lifetime regression. With the peer's INITIAL_WINDOW_SIZE=0 the response
+// DATA cannot be sent and is buffered (stream stays alive, FActiveStreams still
+// incremented). A client GOAWAY then defers the close. RST of that buffered
+// stream must decrement FActiveStreams and complete the deferred close — before
+// the fix FActiveStreams leaked and the close never fired.
+var
+  LH:     TH2TestHarness;
+  LHpack: TBytes;
+begin
+  LH := TH2TestHarness.Create;
+  try
+    LH.Feed(H2ClientPreface);
+    // Peer advertises INITIAL_WINDOW_SIZE = 0 → our per-stream send window is 0.
+    LH.Feed(H2BuildSettingsParam($0004, 0));
+    // Open stream 1 (END_STREAM): handler runs, but the 'ok' DATA cannot be sent
+    // (window 0) → buffered; FActiveStreams stays incremented.
+    LHpack := TBytes.Create($82, $84, $86,
+      $01, $09, $6C, $6F, $63, $61, $6C, $68, $6F, $73, $74);
+    LH.Feed(H2BuildFrame(H2T_HEADERS, $05, 1, LHpack));
+    Assert.IsFalse(LH.Closed, 'a buffered stream must keep the connection open');
+    // Client GOAWAY with an active (buffered) stream → close deferred.
+    LH.Feed(H2BuildGoAway(1, 0 {NO_ERROR}));
+    Assert.IsFalse(LH.Closed, 'GOAWAY with a pending stream must defer the close');
+    // RST the buffered stream → must fire the deferred close.
+    LH.Feed(H2BuildRstStream(1, 0 {NO_ERROR}));
+    Assert.IsTrue(LH.Closed,
+      'RST of the last buffered stream must complete the deferred GOAWAY close');
   finally
     LH.Free;
   end;
