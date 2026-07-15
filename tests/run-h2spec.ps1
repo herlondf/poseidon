@@ -26,7 +26,12 @@ param(
   [string]$Bds           = 'C:\Program Files (x86)\Embarcadero\Studio\22.0',
   [string]$BenchmarkRoot = 'D:\IA\Projetos\Delphi\Benchmark',
   [switch]$Cleanup,
-  [switch]$SkipBuild
+  [switch]$SkipBuild,
+  # CI-safe mode: reuse an ALREADY-provisioned distro instead of unregister/
+  # install/wsl --shutdown (which would kill the user's other running distros).
+  # The distro must already exist and have openssl + h2spec installed (a prior
+  # non-Reuse run provisions it). Only the ELF is rebuilt and h2spec re-run.
+  [switch]$Reuse
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,27 +68,40 @@ if (-not $SkipBuild) {
 }
 
 # ── 2. (Re)create the throwaway distro ─────────────────────────────────────────
-Say "=== [2/5] Recreating WSL distro '$Distro' (Ubuntu-24.04) ==="
-$existing = (wsl --list --quiet 2>$null | ForEach-Object { $_ -replace '\0','' }) -contains $Distro
-if ($existing) { Say "    unregistering existing '$Distro'"; wsl --unregister $Distro | Out-Null }
-$loc = Join-Path $h2dir ".wsl\$Distro"
-New-Item -ItemType Directory -Force $loc | Out-Null
-wsl --install Ubuntu-24.04 --name $Distro --location $loc --no-launch | Out-Null
-
-# First boot on a busy WSL host often needs a VM reset (HCS timeout).
 function Try-Boot { (wsl -d $Distro -u root -- bash -c 'echo BOOT_OK' 2>&1 | ForEach-Object { $_ -replace '\0','' }) -match 'BOOT_OK' }
-if (-not (Try-Boot)) {
-  Say '    first boot timed out — wsl --shutdown then retry (briefly stops other distros)' Yellow
-  wsl --shutdown | Out-Null; Start-Sleep 6
-  if (-not (Try-Boot)) { throw "Distro '$Distro' will not boot." }
-}
-Say '    distro up' Green
 
-# ── 3. Provision (openssl + h2spec) ────────────────────────────────────────────
-Say '=== [3/5] Provisioning (openssl, h2spec) ==='
-$prov = wsl -d $Distro -u root -- bash "$h2dirWsl/provision-in-wsl.sh" 2>&1
-$prov | ForEach-Object { $_ }
-if (-not ($prov -match 'PROVISION_OK')) { throw 'Provisioning failed.' }
+if ($Reuse) {
+  Say "=== [2/5] Reusing existing distro '$Distro' (CI-safe: no recreate) ==="
+  $existing = (wsl --list --quiet 2>$null | ForEach-Object { $_ -replace '\0','' }) -contains $Distro
+  if (-not $existing) {
+    throw "Distro '$Distro' not found. Run once WITHOUT -Reuse to create+provision it."
+  }
+  if (-not (Try-Boot)) { throw "Distro '$Distro' will not boot (do NOT wsl --shutdown in -Reuse mode)." }
+  Say '    distro up (reused)' Green
+
+  Say '=== [3/5] Provisioning skipped (-Reuse) ==='
+} else {
+  Say "=== [2/5] Recreating WSL distro '$Distro' (Ubuntu-24.04) ==="
+  $existing = (wsl --list --quiet 2>$null | ForEach-Object { $_ -replace '\0','' }) -contains $Distro
+  if ($existing) { Say "    unregistering existing '$Distro'"; wsl --unregister $Distro | Out-Null }
+  $loc = Join-Path $h2dir ".wsl\$Distro"
+  New-Item -ItemType Directory -Force $loc | Out-Null
+  wsl --install Ubuntu-24.04 --name $Distro --location $loc --no-launch | Out-Null
+
+  # First boot on a busy WSL host often needs a VM reset (HCS timeout).
+  if (-not (Try-Boot)) {
+    Say '    first boot timed out — wsl --shutdown then retry (briefly stops other distros)' Yellow
+    wsl --shutdown | Out-Null; Start-Sleep 6
+    if (-not (Try-Boot)) { throw "Distro '$Distro' will not boot." }
+  }
+  Say '    distro up' Green
+
+  # ── 3. Provision (openssl + h2spec) ──────────────────────────────────────────
+  Say '=== [3/5] Provisioning (openssl, h2spec) ==='
+  $prov = wsl -d $Distro -u root -- bash "$h2dirWsl/provision-in-wsl.sh" 2>&1
+  $prov | ForEach-Object { $_ }
+  if (-not ($prov -match 'PROVISION_OK')) { throw 'Provisioning failed.' }
+}
 
 # ── 4. Run the server + h2spec ─────────────────────────────────────────────────
 Say '=== [4/5] Running h2spec against Poseidon (TLS/ALPN h2) ==='

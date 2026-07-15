@@ -1,0 +1,49 @@
+name: CI
+
+# Two-face CI for Poseidon (issue #204): compile + test the Windows (IOCP/RIO)
+# and Linux (epoll/io_uring) faces from a single entry point (ci/run-ci.ps1).
+#
+# IMPORTANT: this runs on a SELF-HOSTED Windows runner. GitHub-hosted runners
+# cannot build Poseidon — it needs RAD Studio (dcc64 + dcclinux64), which is not
+# installable on hosted images. Register a self-hosted runner on a machine with:
+#   - RAD Studio 12 (Embarcadero Studio 22.0) with the Linux64 toolchain,
+#   - WSL2, and (for the Linux conformance job) the pre-provisioned distros
+#     'PoseidonH2Spec' (h2spec) and 'Benchmark' (Docker, for Autobahn).
+# See ci/README.md for one-time distro provisioning.
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      linux_conformance:
+        description: 'Also run Linux h2spec + Autobahn (needs the WSL distros)'
+        type: boolean
+        default: false
+
+jobs:
+  # Core gate: compiles both faces, runs the socket-free fuzz runner (hard gate)
+  # and the full Win64 suite (env failures tolerated via the baseline). Fast and
+  # dependency-light — runs on every push/PR.
+  compile-and-test:
+    runs-on: [ self-hosted, windows, delphi ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Two-face compile + fuzz + Win64 suite
+        shell: pwsh
+        run: ./ci/run-ci.ps1
+
+  # Linux conformance: h2spec (TLS/ALPN h2) + Autobahn (WebSocket), reusing the
+  # already-provisioned WSL distros (CI-safe: no distro recreate / wsl --shutdown).
+  # Opt-in via workflow_dispatch so a busy dev machine is not disrupted on push.
+  linux-conformance:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_conformance }}
+    runs-on: [ self-hosted, windows, delphi ]
+    needs: compile-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: h2spec + Autobahn (Linux face)
+        shell: pwsh
+        run: ./ci/run-ci.ps1 -Linux -Autobahn
