@@ -78,6 +78,7 @@ type
   TFn_ssl_setctx  = function(ssl, ctx: Pointer): Pointer; cdecl;
   TFn_err_get         = function: NativeUInt; cdecl;
   TFn_err_str         = function(e: NativeUInt; buf: PAnsiChar): PAnsiChar; cdecl;
+  TFn_err_clear       = procedure; cdecl;
   TFn_ctx_alpn_cb     = procedure(ctx: Pointer; cb: Pointer; arg: Pointer); cdecl;
   TFn_ssl_get0_alpn   = procedure(ssl: Pointer; dataptr: Pointer; lenptr: Pointer); cdecl;
   TFn_ctx_set_verify  = procedure(ctx: Pointer; mode: Integer; cb: Pointer); cdecl;
@@ -119,6 +120,7 @@ type
     class var f_SSL_set_SSL_CTX: TFn_ssl_setctx;
     class var f_ERR_get_error: TFn_err_get;
     class var f_ERR_error_string: TFn_err_str;
+    class var f_ERR_clear_error: TFn_err_clear;
     class var f_SSL_CTX_set_alpn_select_cb: TFn_ctx_alpn_cb;
     class var f_SSL_get0_alpn_selected: TFn_ssl_get0_alpn;
     class var f_SSL_CTX_set_verify: TFn_ctx_set_verify;
@@ -301,6 +303,7 @@ begin
   @f_SSL_set_SSL_CTX := RequireProc(FLibSSL, 'SSL_set_SSL_CTX');
   @f_ERR_get_error := RequireProc(FLibCrypto, 'ERR_get_error');
   @f_ERR_error_string := RequireProc(FLibCrypto, 'ERR_error_string');
+  @f_ERR_clear_error := RequireProc(FLibCrypto, 'ERR_clear_error');
 
   // ALPN — optional, requires OpenSSL 1.0.2+
 {$IFDEF MSWINDOWS}
@@ -426,17 +429,20 @@ begin
   if (ASSL <> nil) and FLoaded then f_SSL_free(ASSL);
 end;
 
+// ERR_clear_error before each SSL op so a subsequent SSL_get_error classifies
+// THIS op's result (SSL_ERROR_SSL vs SYSCALL) using a fresh error queue, not a
+// stale entry left by an earlier op (OpenSSL man page requirement).
 class function TPoseidonSSL.Do_Handshake(ASSL: Pointer): Integer;
-begin Result := f_SSL_do_handshake(ASSL); end;
+begin f_ERR_clear_error; Result := f_SSL_do_handshake(ASSL); end;
 
 class function TPoseidonSSL.Get_Error(ASSL: Pointer; ARet: Integer): Integer;
 begin Result := f_SSL_get_error(ASSL, ARet); end;
 
 class function TPoseidonSSL.SSL_Read(ASSL, ABuf: Pointer; ALen: Integer): Integer;
-begin Result := f_SSL_read(ASSL, ABuf, ALen); end;
+begin f_ERR_clear_error; Result := f_SSL_read(ASSL, ABuf, ALen); end;
 
 class function TPoseidonSSL.SSL_Write(ASSL: Pointer; const ABuf: Pointer; ALen: Integer): Integer;
-begin Result := f_SSL_write(ASSL, ABuf, ALen); end;
+begin f_ERR_clear_error; Result := f_SSL_write(ASSL, ABuf, ALen); end;
 
 class function TPoseidonSSL.SSL_Pending(ASSL: Pointer): Integer;
 begin Result := f_SSL_pending(ASSL); end;

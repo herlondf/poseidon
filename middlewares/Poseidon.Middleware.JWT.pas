@@ -16,8 +16,15 @@ uses
   System.JSON,
   Poseidon.Native.Types;
 
+// AIssuer / AAudience: when non-empty, the token's `iss` / `aud` claim MUST match
+// (RFC 7519 §4.1.1 / §4.1.3) — without this, a token minted for another service
+// sharing the same HMAC secret is accepted (cross-service replay). ARequireExp:
+// when True, a token without an `exp` claim is rejected (no everlasting tokens).
 function JWTMiddleware(const ASecret: string;
-  const AUnauthorizedMsg: string = 'Unauthorized'): TNativeMiddlewareFunc;
+  const AUnauthorizedMsg: string = 'Unauthorized';
+  const AIssuer: string = '';
+  const AAudience: string = '';
+  ARequireExp: Boolean = False): TNativeMiddlewareFunc;
 
 function JWTSign(APayload: TJSONObject; const ASecret: string): string;
 
@@ -114,8 +121,33 @@ begin
   Result := ConstantTimeEquals(LExpected, ASignature);
 end;
 
+// RFC 7519 §4.1.3 — `aud` may be a single string OR an array of strings; the
+// token is acceptable when the configured audience is present in either form.
+function _AudienceMatches(AJSON: TJSONObject; const AAudience: string): Boolean;
+var
+  LStr: string;
+  LVal: TJSONValue;
+  LArr: TJSONArray;
+  I: Integer;
+begin
+  if AJSON.TryGetValue<string>('aud', LStr) then
+    Exit(LStr = AAudience);
+  LVal := AJSON.GetValue('aud');
+  if LVal is TJSONArray then
+  begin
+    LArr := TJSONArray(LVal);
+    for I := 0 to LArr.Count - 1 do
+      if LArr.Items[I].Value = AAudience then
+        Exit(True);
+  end;
+  Result := False;
+end;
+
 function JWTMiddleware(const ASecret: string;
-  const AUnauthorizedMsg: string): TNativeMiddlewareFunc;
+  const AUnauthorizedMsg: string;
+  const AIssuer: string;
+  const AAudience: string;
+  ARequireExp: Boolean): TNativeMiddlewareFunc;
 begin
   Result :=
     procedure(var ACtx: TNativeRequestContext; ANext: TProc)
@@ -128,6 +160,8 @@ begin
       LExp: Int64;
       LNbf: Int64;
       LNowUnix: Int64;
+      LHasExp: Boolean;
+      LIss: string;
     begin
       LAuthHeader := ACtx.Header('Authorization');
       if not LAuthHeader.StartsWith('Bearer ', True) then
@@ -158,17 +192,23 @@ begin
       LJSON := TJSONObject(LValue);
       try
         LNowUnix := DateTimeToUnix(TTimeZone.Local.ToUniversalTime(Now));
-        if LJSON.TryGetValue<Int64>('exp', LExp) then
-        begin
-          if LExp < LNowUnix then
-            raise EPoseidonException.Create('Token expired', THTTPStatus.Unauthorized);
-        end;
+        LHasExp := LJSON.TryGetValue<Int64>('exp', LExp);
+        if LHasExp and (LExp < LNowUnix) then
+          raise EPoseidonException.Create('Token expired', THTTPStatus.Unauthorized);
+        if ARequireExp and not LHasExp then
+          raise EPoseidonException.Create(AUnauthorizedMsg, THTTPStatus.Unauthorized);
         // RFC 7519 §4.1.5 — reject a token used before its not-before time.
         if LJSON.TryGetValue<Int64>('nbf', LNbf) then
         begin
           if LNowUnix < LNbf then
             raise EPoseidonException.Create('Token not yet valid', THTTPStatus.Unauthorized);
         end;
+        // RFC 7519 §4.1.1 issuer / §4.1.3 audience — enforced only when configured.
+        if (AIssuer <> '') and
+           ((not LJSON.TryGetValue<string>('iss', LIss)) or (LIss <> AIssuer)) then
+          raise EPoseidonException.Create(AUnauthorizedMsg, THTTPStatus.Unauthorized);
+        if (AAudience <> '') and (not _AudienceMatches(LJSON, AAudience)) then
+          raise EPoseidonException.Create(AUnauthorizedMsg, THTTPStatus.Unauthorized);
       finally
         LJSON.Free;
       end;
