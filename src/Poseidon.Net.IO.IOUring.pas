@@ -1288,6 +1288,27 @@ begin
     // would have done. #194
     LHasNotif := (AFlags and IORING_CQE_F_MORE) <> 0;
 
+    // #207: a zero-copy SEND on an already-full socket buffer returns -EAGAIN
+    // with NO buffer reference taken (F_MORE clear ⇒ no F_NOTIF will follow).
+    // Like the regular SEND path (#199), this is NOT fatal — retry the whole
+    // buffer via a blocking regular SEND (io-wq). The #199 -EAGAIN fix only
+    // covered the regular completion; on kernel 6.0+ ZC is the DEFAULT send, so
+    // without this a large response to a slow peer whose socket buffer is full
+    // kills the connection. (Not hit by Autobahn's ping-pong echo, which drains
+    // the buffer between messages; hit under pipelined/streamed large sends.)
+    if (ARes = -CEAGAIN) and (not LHasNotif) then
+    begin
+      LConn.PendingSend       := LZCRef^.SendBuf;
+      LConn.PendingSendActual := LZCRef^.TotalLen;
+      LConn.SentBytes         := LZCRef^.SentBytes;  // 0 — ZC is only the 1st op
+      LZCRef^.SendBuf := nil;                         // ownership → PendingSend
+      Dispose(LZCRef);
+      _ResubmitSend(LConn, True);                     // io-wq async; own AddRef
+      LConn.Release;                                  // result ref
+      LConn.Release;                                  // notification ref (none coming)
+      Exit;
+    end;
+
     if ARes <= 0 then
     begin
       FCallbacks.OnConnError(LConn);
