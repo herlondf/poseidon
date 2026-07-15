@@ -64,7 +64,10 @@ type
   TFn_bio_smem    = function: Pointer; cdecl;
   TFn_bio_new     = function(t: Pointer): Pointer; cdecl;
   TFn_bio_rw      = function(bio, data: Pointer; dlen: Integer): Integer; cdecl;
-  TFn_bio_ctrl    = function(bio: Pointer; cmd, larg: Integer; parg: Pointer): Integer; cdecl;
+  // long BIO_ctrl(BIO*, int cmd, long larg, void* parg) — larg/return are `long`
+  // (64-bit on Linux64); bind as NativeInt so a future cmd with a nonzero 64-bit
+  // larg or return is not truncated.
+  TFn_bio_ctrl    = function(bio: Pointer; cmd: Integer; larg: NativeInt; parg: Pointer): NativeInt; cdecl;
   TFn_ctx_ctrl    = function(ctx: Pointer; cmd: Integer; larg: NativeInt; parg: Pointer): NativeInt; cdecl;
   TFn_ctx_cbctrl  = function(ctx: Pointer; cmd: Integer; cb: Pointer): NativeInt; cdecl;
   // uint64_t SSL_CTX_set_options(SSL_CTX*, uint64_t) — a real function since
@@ -445,7 +448,7 @@ class function TPoseidonSSL.BIO_Read(ABIO, ABuf: Pointer; ALen: Integer): Intege
 begin Result := f_BIO_read(ABIO, ABuf, ALen); end;
 
 class function TPoseidonSSL.BIO_Pending(ABIO: Pointer): Integer;
-begin Result := f_BIO_ctrl(ABIO, BIO_CTRL_PENDING, 0, nil); end;
+begin Result := Integer(f_BIO_ctrl(ABIO, BIO_CTRL_PENDING, 0, nil)); end;
 
 class procedure TPoseidonSSL.CTX_SetSNICallback(ACtx, ACallback, AArg: Pointer);
 begin
@@ -496,16 +499,28 @@ begin
     end;
     Inc(I, L);
   end;
-  // Fallback: accept whatever the client listed first
-  if AInLen > 0 then
+  // Second pass: "http/1.1" — the ONLY other protocol the server speaks. Never
+  // select the client's first-listed protocol blindly (RFC 7301 §3.2): claiming
+  // a protocol the server does not implement is a protocol-confusion bug. With no
+  // overlap, leave Result = NOACK (no ALPN in ServerHello; the connection then
+  // proceeds as plain HTTP/1.1).
+  I := 0;
+  while I < AInLen do
   begin
-    L := AIn[0];
-    if L > 0 then
+    L := AIn[I];
+    Inc(I);
+    if (L = 8) and (I + 7 < AInLen)
+      and (AIn[I]   = Ord('h')) and (AIn[I+1] = Ord('t'))
+      and (AIn[I+2] = Ord('t')) and (AIn[I+3] = Ord('p'))
+      and (AIn[I+4] = Ord('/')) and (AIn[I+5] = Ord('1'))
+      and (AIn[I+6] = Ord('.')) and (AIn[I+7] = Ord('1')) then
     begin
-      PPointer(AOutPP)^ := @AIn[1];
+      PPointer(AOutPP)^ := @AIn[I];
       PByte(AOutlenP)^  := L;
       Result := SSL_TLSEXT_ERR_OK;
+      Exit;
     end;
+    Inc(I, L);
   end;
 end;
 
