@@ -466,6 +466,18 @@ begin
       FListenSockets[I] := -1;
     end;
 
+  // #197: if the completion thread was started but never joined (exception in
+  // StartListening after FCompThread.Start, or Destroy without a clean Stop),
+  // signal it to exit and WAIT before unmapping the rings it reads — otherwise
+  // the munmaps below race a live thread (UAF). Safe when FCompThread<>nil: the
+  // ring fd and FSQLock always exist by the time the thread is started.
+  if FCompThread <> nil then
+  begin
+    SignalWorkers;
+    FCompThread.WaitFor;
+    FreeAndNil(FCompThread);
+  end;
+
   // Safety net: clean up mmaps and ring fd if JoinWorkers was never called
   // (e.g. exception during StartListening after mmap succeeded).
   if (FSQEs <> nil) and (FSQEs <> MAP_FAILED) then
