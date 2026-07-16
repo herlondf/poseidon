@@ -1,15 +1,18 @@
-# Builds and runs the Free Pascal slice-1 smoke test (issue #5).
+# Builds and runs the Free Pascal smoke test (issue #5).
 #
-# Compiles the pure-logic Poseidon units + tests/fpc/smoke.pas as an
-# x86_64-win64 target using the FPC cross compiler, then runs the resulting
-# executable. Exit code 0 = every unit compiled under FPC and the smoke passed.
+# Compiles the Poseidon units in the FPC-supported slice + tests/fpc/smoke.pas
+# as an x86_64-win64 target, then runs the resulting executable. Exit code 0 =
+# every unit compiled under FPC and the smoke passed.
 #
-# Requires FPC 3.2.2+ (winget: FreePascal.FreePascalCompiler). Override the
-# location with -FpcBin if it is not at the default winget path.
+# Requires FPC 3.3.1 (trunk/main): the callback types (`reference to`) need the
+# functionreferences / anonymousfunctions modeswitches, which do not exist in
+# the 3.2.2 release. Build trunk from source (bootstrap with 3.2.2) or via
+# fpcupdeluxe selecting the `trunk` FPC version. Override the compiler location
+# with -FpcBin.
 
 [CmdletBinding()]
 param(
-  [string]$FpcBin = 'C:\FPC\3.2.2\bin\i386-win32'
+  [string]$FpcBin = 'C:\fpc-trunk\bin\x86_64-win64'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,13 +33,17 @@ Write-Host "FPC:    $((fpc -iV))  (target x86_64-win64)"
 Write-Host "src:    $srcDir"
 Write-Host "out:    $outDir`n"
 
-# -Px86_64 -Twin64 : cross to Win64 (matches Delphi Win64)
-# -MDELPHIUNICODE  : Delphi-compatible mode, UnicodeString default
-# -Fu / -FU / -FE  : unit search path / unit output / exe output
-# -Sew -vw         : warnings visible; do NOT treat notes as errors
+# -Twin64                 : native Win64 target (matches Delphi Win64)
+# -MDELPHIUNICODE         : Delphi-compatible mode, UnicodeString default
+# -Mfunctionreferences    : enable Delphi `reference to` types (FPC 3.3.1+)
+# -Manonymousfunctions    : enable inline anonymous method bodies (FPC 3.3.1+)
+# -Fu / -FU / -FE         : unit search path / unit output / exe output
+# -vw                     : warnings visible; notes are not errors
 & fpc `
-  -Px86_64 -Twin64 `
+  -Twin64 `
   -MDELPHIUNICODE `
+  -Mfunctionreferences `
+  -Manonymousfunctions `
   -Fu"$srcDir" `
   -Fu"$compatDir" `
   -FU"$outDir" `

@@ -7,13 +7,12 @@ program smoke;
 // API. Success = every unit in the closure compiles under FPC AND the basic
 // behaviour matches Delphi.
 //
-// Units forced to compile via `uses`: Status, Exception, Net.Security,
-// Net.HTTP1.Parser, Net.HTTP2.HPACK.
+// Units forced to compile via `uses`: Status, Exception, Net.Types,
+// Net.Security, Net.HTTP1.Parser, Net.HTTP2.HPACK.
 //
-// NOTE: Poseidon.Net.Types (callback/handler types) is intentionally NOT in
-// this slice — it declares `reference to` (anonymous method) types, which need
-// FPC 3.3.1's {$modeswitch functionreferences}; FPC 3.2.2 rejects them. That
-// belongs to a later slice. The logic units below do not depend on Types.
+// Net.Types declares `reference to` (anonymous method) callback types; these
+// compile under FPC 3.3.1 with -Mfunctionreferences -Manonymousfunctions
+// (see build-fpc.ps1). RunCallbacks exercises one with a capturing closure.
 
 {$IFDEF FPC}
   {$MODE DELPHIUNICODE}
@@ -32,6 +31,7 @@ uses
   {$ENDIF}
   Poseidon.Status,
   Poseidon.Exception,
+  Poseidon.Net.Types,
   Poseidon.Net.Security,
   Poseidon.Net.HTTP1.Parser,
   Poseidon.Net.HTTP2.HPACK;
@@ -116,12 +116,45 @@ begin
   Check('  keep-alive detected', LKeepAlive);
 end;
 
+procedure RunCallbacks;
+var
+  LHandler: TOnNativeRequest;
+  LReq: TPoseidonNativeRequest;
+  LStatus: Integer;
+  LContentType: string;
+  LBody: TBytes;
+  LExtra: TArray<TPair<string, string>>;
+  LTag: Integer;
 begin
-  Writeln('=== Poseidon FPC/Win64 slice-1 smoke (issue #5) ===');
+  // Exercise a `reference to` callback with a capturing closure — the exact
+  // Delphi anonymous-method feature that FPC 3.3.1 unlocks.
+  LTag := 418;
+  LHandler :=
+    procedure(const AReq: TPoseidonNativeRequest;
+      out AStatus: Integer; out AContentType: string;
+      out ABody: TBytes; out AExtraHeaders: TArray<TPair<string, string>>)
+    begin
+      AStatus := LTag;                 // captured from the enclosing scope
+      AContentType := 'text/plain';
+      ABody := TEncoding.UTF8.GetBytes('hi ' + AReq.Path);
+      SetLength(AExtraHeaders, 0);
+    end;
+
+  LReq := Default(TPoseidonNativeRequest);
+  LReq.Path := '/teapot';
+  LHandler(LReq, LStatus, LContentType, LBody, LExtra);
+  Check('callback closure returns captured status', LStatus = 418);
+  Check('callback closure sets content-type', LContentType = 'text/plain');
+  Check('callback closure body len > 0', Length(LBody) > 0);
+end;
+
+begin
+  Writeln('=== Poseidon FPC/Win64 smoke (issue #5) ===');
   RunStatus;
   RunSecurity;
   RunException;
   RunParser;
+  RunCallbacks;
   Writeln('---------------------------------------------------');
   Writeln(Format('DONE: %d ok, %d fail', [GOk, GFail]));
   if GFail > 0 then
