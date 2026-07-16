@@ -21,9 +21,18 @@ interface
 
 {$IFDEF FPC}
 uses
-  SysUtils;
+  SysUtils,
+  RegExpr;
 
 type
+  // Delphi's System.RegularExpressions.TRegEx exposes a static IsMatch; FPC ships
+  // RegExpr.TRegExpr (an instance API with different semantics). This record
+  // mirrors the tiny static slice Poseidon.Validation relies on. IsMatch is
+  // "matches anywhere in the input", matching Delphi's TRegEx.IsMatch.
+  TRegEx = record
+    class function IsMatch(const AInput, APattern: string): Boolean; static;
+  end;
+
   // Delphi's System.SysUtils.TProc (= reference to procedure). FPC 3.2.2 has no
   // anonymous methods; the HPACK decoder only ever invokes this callback with
   // no arguments and never captures state (`if Assigned(cb) then cb;`), so a
@@ -42,12 +51,49 @@ type
     // Splits on any of ASeparators, keeping empty segments (N separators yield
     // N+1 parts). Matches Delphi's TStringHelper.Split(array of Char) default.
     function Split(const ASeparators: array of Char): TArray<string>; overload;
+    // True when the string has zero length. Matches Delphi's TStringHelper.IsEmpty.
+    function IsEmpty: Boolean;
+    // Concatenates AValues separated by ASeparator. Matches Delphi's static
+    // TStringHelper.Join (invoked as `string.Join(...)`).
+    class function Join(const ASeparator: string; const AValues: array of string): string; static;
   end;
 {$ENDIF}
 
 implementation
 
 {$IFDEF FPC}
+
+function TPoseidonStringHelper.IsEmpty: Boolean;
+begin
+  Result := Length(Self) = 0;
+end;
+
+class function TPoseidonStringHelper.Join(const ASeparator: string;
+  const AValues: array of string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := Low(AValues) to High(AValues) do
+  begin
+    if I > Low(AValues) then
+      Result := Result + ASeparator;
+    Result := Result + AValues[I];
+  end;
+end;
+
+class function TRegEx.IsMatch(const AInput, APattern: string): Boolean;
+var
+  LRe: TRegExpr;
+begin
+  LRe := TRegExpr.Create;
+  try
+    LRe.Expression := APattern;
+    Result := LRe.Exec(AInput);
+  finally
+    LRe.Free;
+  end;
+end;
 
 function TPoseidonStringHelper.LastDelimiter(const ADelimiters: string): Integer;
 var

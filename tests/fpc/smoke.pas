@@ -24,10 +24,12 @@ uses
   SysUtils,
   Classes,
   Generics.Collections,
+  Rtti,
   {$ELSE}
   System.SysUtils,
   System.Classes,
   System.Generics.Collections,
+  System.Rtti,
   {$ENDIF}
   Poseidon.Status,
   Poseidon.Exception,
@@ -35,7 +37,8 @@ uses
   Poseidon.Net.Security,
   Poseidon.Net.HTTP1.Parser,
   Poseidon.Net.HTTP2.HPACK,
-  Poseidon.Net.ResponseBuilder;
+  Poseidon.Net.ResponseBuilder,
+  Poseidon.Validation;
 
 var
   GOk: Integer = 0;
@@ -174,6 +177,29 @@ begin
   Check('response carries body', Pos(AnsiString('{"ok":true}'), LText) > 0);
 end;
 
+procedure RunValidation;
+var
+  LReq: RequiredAttribute;
+  LEmail: EmailAttribute;
+  LErr: string;
+begin
+  LReq := RequiredAttribute.Create;
+  try
+    Check('Required rejects empty string', not LReq.Validate(TValue.From<string>(''), 'name', LErr));
+    Check('Required accepts non-empty string', LReq.Validate(TValue.From<string>('x'), 'name', LErr));
+  finally
+    LReq.Free;
+  end;
+  LEmail := EmailAttribute.Create;
+  try
+    // exercises the compat TRegEx (RegExpr-backed) IsMatch
+    Check('Email accepts a@b.com', LEmail.Validate(TValue.From<string>('a@b.com'), 'email', LErr));
+    Check('Email rejects bogus', not LEmail.Validate(TValue.From<string>('nope'), 'email', LErr));
+  finally
+    LEmail.Free;
+  end;
+end;
+
 begin
   Writeln('=== Poseidon FPC/Win64 smoke (issue #5) ===');
   RunStatus;
@@ -182,6 +208,7 @@ begin
   RunParser;
   RunCallbacks;
   RunResponseBuilder;
+  RunValidation;
   Writeln('---------------------------------------------------');
   Writeln(Format('DONE: %d ok, %d fail', [GOk, GFail]));
   if GFail > 0 then

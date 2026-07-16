@@ -3,10 +3,17 @@ unit Poseidon.Validation;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Rtti,
+  TypInfo,
+  Poseidon.Compat;
+  {$ELSE}
   System.SysUtils,
   System.RTTI,
   System.TypInfo,
   System.RegularExpressions;
+  {$ENDIF}
 
 type
   // Base attribute — all validation attributes extend this
