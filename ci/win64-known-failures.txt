@@ -2,13 +2,18 @@
 # failure fails the build.
 #
 # 2026-07-16: the Windows IOCP backend SERVES correctly and does not hang; in a
-# clean run the whole suite passes (470/470). These 2 remain INTERMITTENTLY flaky
-# (~1 in 4 runs) even after hardening the test clients (raw socket + complete-
-# response read; dropped WinHTTP). Root is a deeper server-side timing issue in
-# the IOCP recv/dispatch under the suite's rapid connection churn — needs a
-# dedicated race investigation (packet capture + logging under load).
-# NOTE: a "whole fixture" cascade seen when re-running the .exe back-to-back is a
-# TIME_WAIT + SO_EXCLUSIVEADDRUSE port-rebind artifact of rapid re-runs, not a
-# server bug (disappears with a few seconds between runs).
-KeepAlive_MultipleRequests_ReuseConnection
-Get_HandlerSetsStatus_ReturnsOverriddenStatus
+# clean run the whole suite passes (470/470).
+#
+# RESOLVED (#203, commit f390cae): the intermittent (~1 in 4) flake was ROOT-
+# CAUSED and fixed. A socket recycled via DisconnectEx(CTF_REUSE_SOCKET) stays
+# associated with the IOCP; RegisterConn re-called CreateIoCompletionPort, which
+# fails with ERROR_INVALID_PARAMETER, and that was treated as fatal -> the reused
+# connection was closed with a bare FIN and no response. Proven with a high-rate
+# reproducer (sandbox/iocp_stress.dpr): connection churn drove ~99.7% failure
+# pre-fix, 0% post-fix; the full DUnitX suite runs cleanly x5 with no server-side
+# flake. No tests are tolerated here anymore.
+#
+# NOTE: a "whole fixture" cascade (incl. "Could not connect to server") seen when
+# re-running the .exe back-to-back is a client-side TIME_WAIT / ephemeral-port
+# exhaustion artifact of rapid re-runs, NOT a server bug (disappears with a few
+# seconds between runs; does not occur in a single CI run).
