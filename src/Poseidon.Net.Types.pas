@@ -7,8 +7,13 @@ unit Poseidon.Net.Types;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Generics.Collections;
+  {$ELSE}
   System.SysUtils,
   System.Generics.Collections;
+  {$ENDIF}
 
 type
   // --------------------------------------------------------------------------

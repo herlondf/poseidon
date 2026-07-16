@@ -14,6 +14,11 @@
 *.obj
 *.res
 
+# ─── Free Pascal compiled output (issue #5 compat harness) ────────────────────
+*.ppu
+*.ppl
+tests/fpc/build/
+
 # ─── Delphi build output folders ──────────────────────────────────────────────
 bin/
 dcu/

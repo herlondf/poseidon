@@ -14,9 +14,15 @@ unit Poseidon.Net.HTTP1.Parser;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Classes,
+  Generics.Collections,
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.Generics.Collections,
+  {$ENDIF}
   Poseidon.Net.Security;
 
 // Parses one HTTP/1.1 request from ABuf[0..ABufLen-1].

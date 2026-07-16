@@ -12,7 +12,12 @@ unit Poseidon.Net.Security;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Poseidon.Compat;
+  {$ELSE}
   System.SysUtils;
+  {$ENDIF}
 
 // Returns True when AMethod is in AAllowed (case-insensitive).
 // When AAllowed is empty every method is accepted (backward-compatible default).

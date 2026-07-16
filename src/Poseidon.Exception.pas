@@ -3,7 +3,11 @@ unit Poseidon.Exception;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  {$ELSE}
   System.SysUtils,
+  {$ENDIF}
   Poseidon.Status;
 
 type
