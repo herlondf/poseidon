@@ -80,3 +80,6 @@ tests/h2spec/*.o
 
 # Checkpoint temporario de sessao (nao commitar)
 CHECKPOINT-SESSAO-*.md
+
+# ─── Generated API reference (PasDoc) ──────────────────────────────────────────
+docs/api/html/

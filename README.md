@@ -342,6 +342,9 @@ tests/
 
 ## Documentation
 
+- [API Reference](docs/API-REFERENCE.md) · [Referência de API (pt-BR)](docs/API-REFERENCE_pt-br.md)
+- [Migration guide v1 → v2](docs/MIGRATION_v1_to_v2.md) · [Guia de migração (pt-BR)](docs/MIGRATION_v1_to_v2_pt-br.md)
+- [Changelog](CHANGELOG.md)
 - [Playbook (English)](docs/playbook/README.md)
 - [Playbook (Portugues)](docs/playbook_pt-br/README.md)
 - [Contributing](docs/CONTRIBUTING.md)

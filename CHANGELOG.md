@@ -31,10 +31,17 @@ Security, correctness and conformance hardening toward the v2 maturity gate
   (CL.CL, CL+TE, obs-fold, whitespace-before-colon, oversized Content-Length).
 
 ### Fixed
-- **Windows: connections dropped before dispatch under EDR/AV.** IOCP is now the
-  default Windows backend; RIO is opt-in via `-DFORCE_RIO`. RIO silently dropped
-  every accepted connection when an LSP broke per-socket `RIOCreateRequestQueue`
-  ("socket hang up", handler never reached).
+- **Windows: connections dropped/hung before dispatch.** Two real code bugs, not
+  an environmental issue: (1) the RIO backend accepted with a plain `accept()`,
+  yielding sockets that are not RIO-capable, so `RIOCreateRequestQueue` had
+  nothing valid to register and every connection was dropped ("socket hang up",
+  handler never reached); (2) the IOCP backend obtained `AcceptEx` only via
+  `WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)`, which can fail with `WSAEINVAL`
+  on the listen socket, leaving `FAcceptEx = nil` and the server never ready.
+  Fixes: IOCP is now the default Windows backend (RIO opt-in via `-DFORCE_RIO`);
+  `AcceptEx`/`GetAcceptExSockaddrs` fall back to the static `mswsock.dll` exports
+  when `WSAIoctl` fails; the accepted socket is set non-blocking and the readiness
+  `recv` re-arms on `WSAEWOULDBLOCK` instead of blocking a worker thread.
 - **io_uring TLS record corruption under load**: one send in flight per
   connection + ordered backlog (unordered SEND SQEs interleaved TLS records).
 - **io_uring `SEND_ZC` `-EAGAIN`** on a full socket buffer no longer kills the
