@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poseidon — Live Metrics</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { color-scheme: light dark; --bg:#0f1115; --card:#171a21; --fg:#e6e9ef; --mut:#8b93a7; --acc:#4da3ff; --err:#ff5c5c; }
+  @media (prefers-color-scheme: light){ :root{ --bg:#f5f7fa; --card:#fff; --fg:#1a1d24; --mut:#5b6472; --acc:#0066cc; --err:#cc2b2b; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:baseline; gap:12px; padding:16px 20px; border-bottom:1px solid #8884; }
+  header h1 { font-size:18px; margin:0; }
+  header .meta { color:var(--mut); font-size:12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; padding:20px; }
+  .card { background:var(--card); border:1px solid #8882; border-radius:10px; padding:14px 16px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 10px; }
+  .kpis { display:flex; gap:24px; flex-wrap:wrap; }
+  .kpi .v { font-size:26px; font-weight:600; }
+  .kpi .l { font-size:11px; color:var(--mut); }
+  .kpi.err .v { color:var(--err); }
+  canvas { max-height:220px; }
+  .warn { color:var(--err); padding:0 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Poseidon — Live Metrics</h1>
+  <span class="meta">source <code id="src"></code> · refresh <span id="iv">2</span>s · <span id="ts">—</span></span>
+</header>
+<div id="warn" class="warn"></div>
+<div class="grid">
+  <div class="card">
+    <h2>Throughput</h2>
+    <div class="kpis">
+      <div class="kpi"><div class="v" id="k_rps">—</div><div class="l">requests/sec</div></div>
+      <div class="kpi err"><div class="v" id="k_eps">—</div><div class="l">errors/sec</div></div>
+      <div class="kpi"><div class="v" id="k_err">—</div><div class="l">error rate</div></div>
+      <div class="kpi"><div class="v" id="k_p95">—</div><div class="l">p95 latency (ms)</div></div>
+    </div>
+  </div>
+  <div class="card"><h2>Requests / sec</h2><canvas id="c_rps"></canvas></div>
+  <div class="card"><h2>Errors / sec</h2><canvas id="c_eps"></canvas></div>
+  <div class="card"><h2>Latency percentiles (ms)</h2><canvas id="c_lat"></canvas></div>
+</div>
+<script>
+// Config — the /metrics endpoint (same origin by default; override with ?src=URL).
+const params = new URLSearchParams(location.search);
+const SRC = params.get('src') || '/metrics';
+const INTERVAL = Number(params.get('iv') || 2) * 1000;
+document.getElementById('src').textContent = SRC;
+document.getElementById('iv').textContent = INTERVAL / 1000;
+
+// --- Prometheus text-format parser (the subset the Metrics middleware emits) ---
+// Returns { name -> [ {labels:{...}, value:Number}, ... ] }.
+function parseProm(text) {
+  const out = {};
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line || line[0] === '#') continue;
+    const m = line.match(/^([a-zA-Z_:][\w:]*)(\{[^}]*\})?\s+(-?[\d.eE+]+|[+-]?Inf|NaN)$/);
+    if (!m) continue;
+    const [, name, lbl, valStr] = m;
+    const labels = {};
+    if (lbl) for (const pair of lbl.slice(1, -1).split(',')) {
+      const km = pair.match(/^\s*([\w]+)="((?:[^"\\]|\\.)*)"\s*$/);
+      if (km) labels[km[1]] = km[2].replace(/\\(.)/g, '$1');
+    }
+    (out[name] = out[name] || []).push({ labels, value: Number(valStr) });
+  }
+  return out;
+}
+
+const sum = arr => (arr || []).reduce((a, s) => a + s.value, 0);
+
+// Estimate a percentile from cumulative histogram buckets (le labels).
+function percentile(buckets, total, q) {
+  if (!buckets.length || !total) return null;
+  const sorted = buckets
+    .map(b => ({ le: b.labels.le === '+Inf' ? Infinity : Number(b.labels.le), c: b.value }))
+    .sort((a, b) => a.le - b.le);
+  const target = q * total;
+  for (const b of sorted) if (b.c >= target) return b.le === Infinity ? sorted[sorted.length - 2]?.le ?? 0 : b.le;
+  return sorted[sorted.length - 1].le;
+}
+
+const MAX_PTS = 60;
+function mkChart(id, labels, colors) {
+  return new Chart(document.getElementById(id), {
+    type: 'line',
+    data: { labels: [], datasets: labels.map((l, i) => ({ label: l, data: [], borderColor: colors[i], backgroundColor: colors[i] + '22', tension: .25, pointRadius: 0, borderWidth: 2 })) },
+    options: { animation: false, responsive: true, scales: { x: { display: false }, y: { beginAtZero: true } }, plugins: { legend: { display: labels.length > 1 } } }
+  });
+}
+const cRps = mkChart('c_rps', ['req/s'], ['#4da3ff']);
+const cEps = mkChart('c_eps', ['err/s'], ['#ff5c5c']);
+const cLat = mkChart('c_lat', ['p50', 'p95', 'p99'], ['#4da3ff', '#ffb020', '#ff5c5c']);
+
+let prev = null, prevT = 0;
+function push(chart, vals) {
+  chart.data.labels.push('');
+  chart.data.datasets.forEach((d, i) => { d.data.push(vals[i]); if (d.data.length > MAX_PTS) d.data.shift(); });
+  if (chart.data.labels.length > MAX_PTS) chart.data.labels.shift();
+  chart.update();
+}
+
+async function tick() {
+  let text;
+  try {
+    const r = await fetch(SRC, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    text = await r.text();
+    document.getElementById('warn').textContent = '';
+  } catch (e) {
+    document.getElementById('warn').textContent = 'cannot reach ' + SRC + ' — ' + e.message +
+      ' (serve this page from the same origin as the server, or pass ?src=http://host:port/metrics + enable CORS)';
+    return;
+  }
+  const now = performance.now();
+  const p = parseProm(text);
+  const reqTotal = sum(p['poseidon_requests_total']);
+  const errTotal = sum(p['poseidon_errors_total']);
+  const durCount = sum(p['poseidon_request_duration_ms_count']);
+  const buckets = p['poseidon_request_duration_ms_bucket'] || [];
+  // aggregate buckets across paths by le
+  const byLe = {};
+  for (const b of buckets) { const le = b.labels.le; byLe[le] = (byLe[le] || 0) + b.value; }
+  const aggBuckets = Object.entries(byLe).map(([le, v]) => ({ labels: { le }, value: v }));
+
+  document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+
+  if (prev) {
+    const dt = (now - prevT) / 1000;
+    const rps = Math.max(0, (reqTotal - prev.req) / dt);
+    const eps = Math.max(0, (errTotal - prev.err) / dt);
+    const rate = reqTotal > 0 ? (errTotal / reqTotal) : 0;
+    const p50 = percentile(aggBuckets, durCount, .50);
+    const p95 = percentile(aggBuckets, durCount, .95);
+    const p99 = percentile(aggBuckets, durCount, .99);
+    document.getElementById('k_rps').textContent = rps.toFixed(0);
+    document.getElementById('k_eps').textContent = eps.toFixed(1);
+    document.getElementById('k_err').textContent = (rate * 100).toFixed(1) + '%';
+    document.getElementById('k_p95').textContent = p95 == null ? '—' : p95;
+    push(cRps, [rps]);
+    push(cEps, [eps]);
+    push(cLat, [p50 ?? 0, p95 ?? 0, p99 ?? 0]);
+  }
+  prev = { req: reqTotal, err: errTotal }; prevT = now;
+}
+tick();
+setInterval(tick, INTERVAL);
+</script>
+</body>
+</html>
