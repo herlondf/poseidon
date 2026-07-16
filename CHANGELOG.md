@@ -31,6 +31,14 @@ Security, correctness and conformance hardening toward the v2 maturity gate
   (CL.CL, CL+TE, obs-fold, whitespace-before-colon, oversized Content-Length).
 
 ### Fixed
+- **Windows: intermittent dropped connection under connection churn (#203).** A
+  socket recycled via `DisconnectEx(CTF_REUSE_SOCKET)` stays associated with the
+  IOCP; `RegisterConn` re-called `CreateIoCompletionPort`, which fails with
+  `ERROR_INVALID_PARAMETER`, and that was treated as fatal — the reused
+  connection was closed with a bare FIN and no response. Now tolerated (the
+  association is already in place). Was ~1 in 4 under the sequential test suite,
+  ~99.7% under churn; 0 after the fix. IOCP/`CTF_REUSE_SOCKET`-specific (Linux
+  io_uring/epoll unaffected).
 - **Windows: connections dropped/hung before dispatch.** Two real code bugs, not
   an environmental issue: (1) the RIO backend accepted with a plain `accept()`,
   yielding sockets that are not RIO-capable, so `RIOCreateRequestQueue` had
