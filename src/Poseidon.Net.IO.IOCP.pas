@@ -449,8 +449,17 @@ var
   LConn: TNativeConn absolute AConn;
   LMode: u_long;
 begin
+  // #203: a socket recycled via DisconnectEx(CTF_REUSE_SOCKET) is STILL
+  // associated with this IOCP from its previous connection — DisconnectEx does
+  // not undo the association. CreateIoCompletionPort then returns 0 with
+  // ERROR_INVALID_PARAMETER ("handle already has a completion port"). That is
+  // NOT a failure: the association we need is already in place. Re-raising it
+  // (as before) closed every reused connection with a bare FIN and no response,
+  // which the client saw as a dropped request — the Windows-only connection-
+  // churn flake. Only a genuinely different error is fatal here.
   if _IocpCreate(THandle(LConn.Socket), FIocp, 0, 0) = 0 then
-    raise Exception.Create('IOCP associate failed');
+    if GetLastError <> ERROR_INVALID_PARAMETER then
+      raise Exception.Create('IOCP associate failed: ' + IntToStr(GetLastError));
   // Non-blocking: the readiness recv in _OnRecvReady MUST NOT block a worker
   // thread if the zero-byte-recv readiness was spurious/raced (data already
   // consumed) — a blocking recv there would pin the worker and can hang the
