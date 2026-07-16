@@ -105,6 +105,20 @@ function _WsaBind(s: TSocket; addr: PSockAddrIn; addrlen: Integer): Integer; std
 function _WsaListen(s: TSocket; backlog: Integer): Integer; stdcall;
   external 'ws2_32.dll' name 'listen';
 
+// Static mswsock exports — fallback for when WSAIoctl(SIO_GET_EXTENSION_FUNCTION_
+// POINTER) is rejected (WSAEINVAL) by an intercepting Winsock provider/LSP
+// (some VPN/proxy/security software). AcceptEx and GetAcceptExSockaddrs are
+// exported by name from mswsock.dll, so we can bind them directly.
+function _mswAcceptEx(sListenSocket, sAcceptSocket: TSocket; lpOutputBuffer: Pointer;
+  dwReceiveDataLength: DWORD; dwLocalAddressLength, dwRemoteAddressLength: DWORD;
+  lpdwBytesReceived: PDWORD; lpOverlapped: PWSAOverlapped): BOOL; stdcall;
+  external 'mswsock.dll' name 'AcceptEx';
+procedure _mswGetAcceptExSockaddrs(lpOutputBuffer: Pointer; dwReceiveDataLength: DWORD;
+  dwLocalAddressLength, dwRemoteAddressLength: DWORD;
+  var LocalSockaddr: PSockAddr; var LocalSockaddrLength: Integer;
+  var RemoteSockaddr: PSockAddr; var RemoteSockaddrLength: Integer); stdcall;
+  external 'mswsock.dll' name 'GetAcceptExSockaddrs';
+
 const
   SIO_GET_EXTENSION_FUNCTION_POINTER = $C8000006;
   WSAID_ACCEPTEX: TGUID = '{B5367DF1-CBAC-11CF-95CA-00805F48A169}';
@@ -260,15 +274,15 @@ begin
   LGuid := WSAID_ACCEPTEX;
   LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FAcceptEx, SizeOf(FAcceptEx), LBytes, nil, nil);
-  if LRes <> 0 then
-    raise Exception.Create('WSAIoctl failed to load AcceptEx');
+  if (LRes <> 0) or (FAcceptEx = nil) then
+    FAcceptEx := @_mswAcceptEx;  // fallback: static mswsock export
 
   LGuid := WSAID_GETACCEPTEXSOCKADDRS;
   LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FGetAcceptExSockaddrs, SizeOf(FGetAcceptExSockaddrs),
     LBytes, nil, nil);
-  if LRes <> 0 then
-    raise Exception.Create('WSAIoctl failed to load GetAcceptExSockaddrs');
+  if (LRes <> 0) or (FGetAcceptExSockaddrs = nil) then
+    FGetAcceptExSockaddrs := @_mswGetAcceptExSockaddrs;  // fallback: static mswsock export
 
   LGuid := StringToGUID('{7FDA2E11-8630-436F-A031-F536A6EEC157}');
   LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,

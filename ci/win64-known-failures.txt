@@ -1,22 +1,13 @@
-# Baseline of known-environmental Win64 test failures (issue #203 — Winsock
-# AcceptEx/RIO WSAEINVAL on this host). CI tolerates exactly these; any NEW
-# failure fails the build. Regenerate when the environment legitimately changes.
+# Known-failing Win64 integration tests. CI tolerates exactly these; any NEW
+# failure fails the build.
+#
+# 2026-07-16: the Windows I/O backend now SERVES end-to-end (16 of the previous
+# 19 "socket hang up" failures fixed — IOCP is the default and loads AcceptEx via
+# a static mswsock fallback; see Poseidon.Net.IO.IOCP). These 3 remaining are
+# REAL behavioural bugs on the IOCP path (not environmental), tracked for fixing:
+#   - Get_HandlerSetsStatus_ReturnsOverriddenStatus  (invalid server response)
+#   - KeepAlive_MultipleRequests_ReuseConnection      (2nd keep-alive req no reply)
+#   - MaxRequestSize_OversizedBody_Returns413         (returns 400 instead of 413)
 Get_HandlerSetsStatus_ReturnsOverriddenStatus
-Get_RootPath_Returns200
-Get_RouteWithParam_ReturnsParamValue
-Get_UnknownRoute_Returns404
-H2CUpgrade_NoUpgradeHeader_ReturnsNormal200
-H2CUpgrade_ValidRequest_Returns101
-IdleTimeout_ActiveConnection_NotClosed
 KeepAlive_MultipleRequests_ReuseConnection
-MaxQueueDepth_QueueFull_Returns503
 MaxRequestSize_OversizedBody_Returns413
-MaxWSFrameSize_FrameWithinLimit_Accepted
-MaxWSFrameSize_OversizedFrame_ConnectionClosed
-Post_Echo_ReflectsBody
-Post_WithJsonBody_Returns201
-SecureHeaders_Disabled_ResponseLacksXContentTypeOptions
-SecureHeaders_Enabled_ResponseContainsXContentTypeOptions
-ServerBanner_Custom_AppearsInResponseHeader
-ServerBanner_Empty_ServerHeaderAbsent
-Stop_WithInFlightHandler_WaitsForCompletion

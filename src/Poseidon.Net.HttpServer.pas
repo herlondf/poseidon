@@ -963,19 +963,25 @@ begin
     procedure(AConn: Pointer) begin _PostRecv(AConn); end);
   FDispatcher := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self), FSyncDispatch);
   // Create platform IO backend — ONLY {$IFDEF} remaining in HttpServer.
-  // Windows: try RIO (Windows 8+) first; fall back to IOCP silently.
-  // Linux:   try io_uring (kernel 5.1+) first; fall back to epoll silently.
-  // Define FORCE_IOCP / FORCE_EPOLL to skip the modern backend.
+  // Windows: IOCP by default (AcceptEx + SO_UPDATE_ACCEPT_CONTEXT + WSARecv;
+  //   loads AcceptEx via WSAIoctl with a static mswsock fallback, so it works
+  //   even where a Winsock LSP rejects SIO_GET_EXTENSION_FUNCTION_POINTER). RIO
+  //   is opt-in via -DFORCE_RIO: it currently accepts with plain accept(), whose
+  //   sockets are NOT RIO-capable, so RIOCreateRequestQueue fails per connection
+  //   and every connection is dropped before dispatch (#214/#203). Do not enable
+  //   RIO until its accept path is reworked onto AcceptEx + WSA_FLAG_REGISTERED_IO.
+  // Linux: try io_uring (kernel 5.1+) first; fall back to epoll silently.
+  // Define FORCE_EPOLL to skip the modern backend.
 {$IFDEF MSWINDOWS}
-  {$IFDEF FORCE_IOCP}
-  FIOBackend := TIOCPBackend.Create;
-  {$ELSE}
+  {$IFDEF FORCE_RIO}
   try
     FIOBackend := TRIOBackend.Create;
   except
     on ENotSupportedException do
       FIOBackend := TIOCPBackend.Create;
   end;
+  {$ELSE}
+  FIOBackend := TIOCPBackend.Create;
   {$ENDIF}
 {$ELSE}
   {$IFDEF FORCE_EPOLL}
