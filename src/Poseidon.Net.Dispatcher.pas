@@ -277,6 +277,69 @@ end;
 // StepSizeCheck — reject oversized payloads with 413
 // ---------------------------------------------------------------------------
 
+// True when the request headers already in AccumBuf declare a Content-Length
+// greater than AMax. Lets StepSizeCheck answer 413 (Payload Too Large) from the
+// headers alone, BEFORE the parser's own over-limit guard rejects the same body
+// with a generic 400. Conservative: any ambiguity (headers incomplete, no CL,
+// unparseable value) returns False and the normal pipeline continues.
+function _DeclaredCLExceeds(const ABuf: TBytes; ALen, AMax: Integer): Boolean;
+const
+  CName: array[0..13] of Byte = (Ord('c'),Ord('o'),Ord('n'),Ord('t'),Ord('e'),
+    Ord('n'),Ord('t'),Ord('-'),Ord('l'),Ord('e'),Ord('n'),Ord('g'),Ord('t'),Ord('h'));
+var
+  LHdrEnd, I, J, LStart: Integer;
+  LMatch: Boolean;
+  LVal: Int64;
+begin
+  Result := False;
+  // Bound the scan to the header block (first CRLFCRLF); if absent, headers are
+  // still arriving — defer.
+  LHdrEnd := -1;
+  I := 0;
+  while I + 3 < ALen do
+  begin
+    if (ABuf[I] = 13) and (ABuf[I+1] = 10) and (ABuf[I+2] = 13) and (ABuf[I+3] = 10) then
+    begin LHdrEnd := I; Break; end;
+    Inc(I);
+  end;
+  if LHdrEnd < 0 then Exit;
+
+  I := 0;
+  while I < LHdrEnd do
+  begin
+    // At a line start, try to match "content-length" case-insensitively.
+    LMatch := True;
+    for J := 0 to High(CName) do
+      if (I + J >= LHdrEnd) or ((ABuf[I + J] or $20) <> CName[J]) then
+      begin LMatch := False; Break; end;
+    if LMatch then
+    begin
+      J := I + Length(CName);
+      while (J < LHdrEnd) and ((ABuf[J] = 32) or (ABuf[J] = 9)) do Inc(J);
+      if (J < LHdrEnd) and (ABuf[J] = Ord(':')) then
+      begin
+        Inc(J);
+        while (J < LHdrEnd) and ((ABuf[J] = 32) or (ABuf[J] = 9)) do Inc(J);
+        LStart := J;
+        LVal := 0;
+        while (J < LHdrEnd) and (ABuf[J] >= Ord('0')) and (ABuf[J] <= Ord('9')) do
+        begin
+          LVal := LVal * 10 + (ABuf[J] - Ord('0'));
+          if LVal > AMax then Exit(True);  // already over — short-circuit
+          Inc(J);
+        end;
+        if J > LStart then
+          Exit(LVal > AMax);
+        Exit;  // present but empty/unparseable — defer to the parser
+      end;
+    end;
+    // Advance to the next header line.
+    while (I < LHdrEnd) and not ((ABuf[I] = 13) and (I + 1 < ALen) and (ABuf[I+1] = 10)) do
+      Inc(I);
+    Inc(I, 2);
+  end;
+end;
+
 procedure TProtocolDispatcher.StepSizeCheck(var ACtx: TDispatchContext);
 var
   LConn: TNativeConn;
@@ -292,7 +355,11 @@ begin
   if LConn.WSMode = CCMWebSocket then
     Exit;
 
-  if LConn.AccumLen <= ACtx.Config^.MaxRequestSize then
+  // 413 when EITHER the accumulated bytes exceed the limit, OR the request
+  // already declares a Content-Length over it (so an oversized POST gets a
+  // proper 413 instead of the parser's generic 400 for the over-limit body).
+  if (LConn.AccumLen <= ACtx.Config^.MaxRequestSize) and
+     not _DeclaredCLExceeds(LConn.AccumBuf, LConn.AccumLen, ACtx.Config^.MaxRequestSize) then
     Exit;
 
   LResp := BuildHTTPResponse(413, 'text/plain',
