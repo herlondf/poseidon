@@ -189,6 +189,13 @@ uses
 function OpenTCPSocket(APort: Word): TSocket; forward;
 function SendAll(ASocket: TSocket; const ABuf: TBytes): Boolean; forward;
 function RecvSome(ASocket: TSocket; out AOut: TBytes; AMax: Integer = 4096): Integer; forward;
+// Robust: reads a COMPLETE HTTP/1.1 response (status line + headers + the
+// Content-Length body), looping recv() until the whole message arrives or the
+// total deadline elapses. Returns the status code (0 on timeout/error) and the
+// full response text in AResp. Avoids the single-recv flakiness that made
+// keep-alive / status tests intermittently see a partial or delayed response.
+function RecvHTTPResponse(ASocket: TSocket; out AResp: string;
+  ATimeoutMs: Integer = 4000): Integer; forward;
 
 const
   INTEST_PORT = 19001;
@@ -339,17 +346,28 @@ begin
 end;
 
 procedure TPoseidonHttpServerTests.Get_HandlerSetsStatus_ReturnsOverriddenStatus;
+// Raw socket instead of THTTPClient: WinHTTP's connection pool intermittently
+// raised 12030/12152 ("invalid server response") on this fixture's rapid
+// requests. A raw request + complete-response read is deterministic.
 var
-  LClient:   THTTPClient;
-  LResponse: IHTTPResponse;
+  LSock:    TSocket;
+  LReq:     TBytes;
+  LRespStr: string;
+  LStatus:  Integer;
 begin
-  LClient := THTTPClient.Create;
+  LSock := OpenTCPSocket(INTEST_PORT);
   try
-    LClient.HandleRedirects := False;
-    LResponse := LClient.Get(BASE_URL + '/teapot');
-    Assert.AreEqual(418, LResponse.StatusCode);
+    Assert.IsTrue(LSock <> INVALID_SOCKET, 'Could not connect to server');
+    LReq := TEncoding.ASCII.GetBytes(
+      'GET /teapot HTTP/1.1'#13#10 +
+      'Host: 127.0.0.1'#13#10 +
+      'Connection: close'#13#10#13#10);
+    Assert.IsTrue(SendAll(LSock, LReq), 'send failed');
+    LStatus := RecvHTTPResponse(LSock, LRespStr, 4000);
+    Assert.AreEqual(418, LStatus,
+      Format('handler status override must reach the client (got %d)', [LStatus]));
   finally
-    LClient.Free;
+    closesocket(LSock);
   end;
 end;
 
@@ -386,18 +404,13 @@ procedure TPoseidonHttpServerTests.KeepAlive_MultipleRequests_ReuseConnection;
 var
   LSock:    TSocket;
   LReq:     TBytes;
-  LResp:    TBytes;
   LRespStr: string;
-  LRecv:    Integer;
-  LTimeout: Integer;
+  LStatus:  Integer;
   I:        Integer;
 begin
   LSock := OpenTCPSocket(INTEST_PORT);
   try
     Assert.IsTrue(LSock <> INVALID_SOCKET, 'Could not connect to server');
-    LTimeout := 2000;
-    setsockopt(LSock, SOL_SOCKET, SO_RCVTIMEO,
-      PAnsiChar(@LTimeout), SizeOf(LTimeout));
 
     LReq := TEncoding.ASCII.GetBytes(
       'GET / HTTP/1.1'#13#10 +
@@ -408,12 +421,12 @@ begin
     begin
       Assert.IsTrue(SendAll(LSock, LReq),
         Format('Request %d: send failed on keep-alive connection', [I]));
-      LRecv := RecvSome(LSock, LResp, 4096);
-      Assert.IsTrue(LRecv > 0,
-        Format('Request %d: no response on keep-alive connection', [I]));
-      LRespStr := TEncoding.ASCII.GetString(LResp);
-      Assert.IsTrue(Pos('200 OK', LRespStr) > 0,
-        Format('Request %d on keep-alive must return 200', [I]));
+      // Read the COMPLETE response (loops recv until Content-Length body arrives)
+      // so segmented delivery on the persistent connection cannot desync reads.
+      LStatus := RecvHTTPResponse(LSock, LRespStr, 4000);
+      Assert.AreEqual(200, LStatus,
+        Format('Request %d on keep-alive must return 200 (got status %d)',
+          [I, LStatus]));
     end;
   finally
     closesocket(LSock);
@@ -910,6 +923,76 @@ begin
     SetLength(AOut, Result)
   else
     SetLength(AOut, 0);
+end;
+
+function RecvHTTPResponse(ASocket: TSocket; out AResp: string;
+  ATimeoutMs: Integer): Integer;
+var
+  LBuf:      TBytes;
+  LTotal:    Integer;
+  LRecvd:    Integer;
+  LHdrEnd:   Integer;
+  LBodyLen:  Integer;
+  LChunk:    array[0..4095] of Byte;
+  LDeadline: UInt64;
+  LTmo:      Integer;
+  LHdrs:     string;
+  LP, LE, I: Integer;
+begin
+  Result   := 0;
+  AResp    := '';
+  LTotal   := 0;
+  LHdrEnd  := -1;
+  LBodyLen := -1;
+  SetLength(LBuf, 0);
+
+  // Short per-recv timeout so the loop can re-check the total deadline even when
+  // the response is delayed or trickles in across TCP segments.
+  LTmo := 500;
+  setsockopt(ASocket, SOL_SOCKET, SO_RCVTIMEO, PAnsiChar(@LTmo), SizeOf(LTmo));
+  LDeadline := TThread.GetTickCount64 + UInt64(ATimeoutMs);
+
+  while TThread.GetTickCount64 < LDeadline do
+  begin
+    LRecvd := recv(ASocket, LChunk[0], SizeOf(LChunk), 0);
+    if LRecvd <= 0 then
+      Continue;  // timeout tick or transient — keep waiting until the deadline
+
+    SetLength(LBuf, LTotal + LRecvd);
+    Move(LChunk[0], LBuf[LTotal], LRecvd);
+    Inc(LTotal, LRecvd);
+
+    if LHdrEnd < 0 then
+      for I := 0 to LTotal - 4 do
+        if (LBuf[I] = 13) and (LBuf[I+1] = 10) and
+           (LBuf[I+2] = 13) and (LBuf[I+3] = 10) then
+        begin LHdrEnd := I; Break; end;
+
+    if (LHdrEnd >= 0) and (LBodyLen < 0) then
+    begin
+      LHdrs := LowerCase(TEncoding.ASCII.GetString(LBuf, 0, LHdrEnd));
+      LP := Pos('content-length:', LHdrs);
+      if LP > 0 then
+      begin
+        LP := LP + Length('content-length:');
+        while (LP <= Length(LHdrs)) and (LHdrs[LP] = ' ') do Inc(LP);
+        LE := LP;
+        while (LE <= Length(LHdrs)) and (LHdrs[LE] >= '0') and (LHdrs[LE] <= '9') do Inc(LE);
+        LBodyLen := StrToIntDef(Copy(LHdrs, LP, LE - LP), 0);
+      end
+      else
+        LBodyLen := 0;  // no body
+    end;
+
+    if (LHdrEnd >= 0) and (LTotal >= LHdrEnd + 4 + LBodyLen) then
+      Break;  // complete response received
+  end;
+
+  if LTotal = 0 then Exit;
+  AResp := TEncoding.ASCII.GetString(LBuf, 0, LTotal);
+  LP := Pos('HTTP/1.', AResp);
+  if LP > 0 then
+    Result := StrToIntDef(Copy(AResp, LP + 9, 3), 0);
 end;
 
 // Perform HTTP/1.1 WebSocket upgrade handshake on ASocket.
