@@ -12,9 +12,15 @@ unit Poseidon.Net.ResponseBuilder;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Classes,
+  Generics.Collections;
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.Generics.Collections;
+  {$ENDIF}
 
 // Assembles a complete HTTP/1.1 response into a single TBytes:
 //   Status-Line CRLF
@@ -70,7 +76,11 @@ function DefaultErrorBody: TBytes;
 implementation
 
 uses
+  {$IFDEF FPC}
+  DateUtils,
+  {$ELSE}
   System.DateUtils,
+  {$ENDIF}
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.Pool.Arena;
 

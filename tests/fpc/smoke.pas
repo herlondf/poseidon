@@ -34,7 +34,8 @@ uses
   Poseidon.Net.Types,
   Poseidon.Net.Security,
   Poseidon.Net.HTTP1.Parser,
-  Poseidon.Net.HTTP2.HPACK;
+  Poseidon.Net.HTTP2.HPACK,
+  Poseidon.Net.ResponseBuilder;
 
 var
   GOk: Integer = 0;
@@ -148,6 +149,31 @@ begin
   Check('callback closure body len > 0', Length(LBody) > 0);
 end;
 
+function BytesToStr(const AData: TBytes): AnsiString;
+var
+  I: Integer;
+begin
+  SetLength(Result, Length(AData));
+  for I := 0 to High(AData) do
+    Result[I + 1] := AnsiChar(AData[I]);
+end;
+
+procedure RunResponseBuilder;
+var
+  LResp: TBytes;
+  LText: AnsiString;
+  LNoExtra: TArray<TPair<string, string>>;
+begin
+  SetLength(LNoExtra, 0);
+  LResp := BuildHTTPResponse(200, 'application/json',
+    TEncoding.UTF8.GetBytes('{"ok":true}'), True, LNoExtra, False, 'Poseidon');
+  LText := BytesToStr(LResp);
+  Check('response starts with HTTP/1.1 200', Pos(AnsiString('HTTP/1.1 200'), LText) = 1);
+  Check('response has Content-Type', Pos(AnsiString('application/json'), LText) > 0);
+  Check('response has keep-alive', Pos(AnsiString('keep-alive'), LText) > 0);
+  Check('response carries body', Pos(AnsiString('{"ok":true}'), LText) > 0);
+end;
+
 begin
   Writeln('=== Poseidon FPC/Win64 smoke (issue #5) ===');
   RunStatus;
@@ -155,6 +181,7 @@ begin
   RunException;
   RunParser;
   RunCallbacks;
+  RunResponseBuilder;
   Writeln('---------------------------------------------------');
   Writeln(Format('DONE: %d ok, %d fail', [GOk, GFail]));
   if GFail > 0 then

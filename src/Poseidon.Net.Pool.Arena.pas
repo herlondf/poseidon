@@ -13,7 +13,11 @@ unit Poseidon.Net.Pool.Arena;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils;
+  {$ELSE}
   System.SysUtils;
+  {$ENDIF}
 
 type
   THeaderArena = class

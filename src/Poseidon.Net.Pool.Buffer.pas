@@ -19,7 +19,11 @@ unit Poseidon.Net.Pool.Buffer;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils;
+  {$ELSE}
   System.SysUtils;
+  {$ENDIF}
 
 const
   POOL_TIER0_SIZE  =    8192;  //   8 KB
@@ -54,8 +58,13 @@ type
 implementation
 
 uses
+  {$IFDEF FPC}
+  syncobjs,
+  Generics.Collections;
+  {$ELSE}
   System.SyncObjs,
   System.Generics.Collections;
+  {$ENDIF}
 
 {$IFNDEF MSWINDOWS}
 const
