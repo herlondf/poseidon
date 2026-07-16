@@ -447,9 +447,17 @@ end;
 procedure TIOCPBackend.RegisterConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
+  LMode: u_long;
 begin
   if _IocpCreate(THandle(LConn.Socket), FIocp, 0, 0) = 0 then
     raise Exception.Create('IOCP associate failed');
+  // Non-blocking: the readiness recv in _OnRecvReady MUST NOT block a worker
+  // thread if the zero-byte-recv readiness was spurious/raced (data already
+  // consumed) — a blocking recv there would pin the worker and can hang the
+  // whole pool. Non-blocking makes it return WSAEWOULDBLOCK, which _OnRecvReady
+  // handles by re-arming instead of blocking.
+  LMode := 1;
+  ioctlsocket(LConn.Socket, Integer(FIONBIO), LMode);
   // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS — synchronous completion
   // is inline on the calling thread, avoids kernel-to-user transition
   _SetFileCompletionNotificationModes(THandle(LConn.Socket),
@@ -500,6 +508,11 @@ begin
   LRecved := recv(LConn.Socket, LBuf[0], CRecvBufSize, 0);
   if LRecved > 0 then
     FCallbacks.OnRecv(LConn, @LBuf[0], Cardinal(LRecved))
+  else if (LRecved = SOCKET_ERROR) and (WSAGetLastError = WSAEWOULDBLOCK) then
+    // Spurious/raced readiness — no data yet. Re-arm the zero-byte recv instead
+    // of treating it as an error (which would drop a live keep-alive connection).
+    // The socket is non-blocking (RegisterConn), so recv never blocks here.
+    PostRecv(AConn)
   else
     FCallbacks.OnConnError(AConn);
 end;
