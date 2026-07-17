@@ -13,6 +13,12 @@ unit Poseidon.Net.IO.Epoll;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Classes,
+  syncobjs,
+  Poseidon.Compat.Posix,
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
@@ -23,17 +29,23 @@ uses
   Posix.Unistd,
   Posix.Errno,
   Posix.Signal,
+  {$ENDIF}
   Poseidon.Net.IO,
   Poseidon.Net.Connection,
   Poseidon.Net.Pool.Buffer;
 
 type
+  // Named element type for the shutdown-pipe array: FPC rejects an inline
+  // `array[0..1] of Integer` as a generic argument (`TArray<array...>`); the
+  // named type compiles on both and is layout-identical.
+  TShutdownPipe = array[0..1] of Integer;
+
   TEpollBackend = class(TInterfacedObject, IIOBackend)
   private
     FWorkers: TArray<TThread>;
     FListenSockets: TArray<Integer>;
     FEpollFds: TArray<Integer>;
-    FShutdownPipes: TArray<array[0..1] of Integer>;
+    FShutdownPipes: TArray<TShutdownPipe>;
     FCallbacks: IIOCallbacks;
     FShutdown: Int64;  // 0=running, 1=shutdown; atomic via TInterlocked (Read requires Int64)
     procedure _CoreWorkerLoop(ACoreIdx: Integer);

@@ -27,6 +27,25 @@ function LoadLibrary(AName: PChar): NativeUInt;
 function GetProcAddress(ALib: NativeUInt; AName: PChar): Pointer;
 function FreeLibrary(ALib: NativeUInt): Boolean;
 
+{$ELSE}
+
+// POSIX: the SSL unit's Linux branch calls dlopen/dlsym/dlclose with the Delphi
+// Posix.Dlfcn shapes (MarshaledAString args, RTLD_* flags). FPC has no Posix.*
+// units — this mirrors that slice over FPC's `dl` unit so the SSL body compiles
+// unchanged. Handles are NativeUInt (TPoseidonLibHandle).
+type
+  MarshaledAString = PAnsiChar;
+
+const
+  RTLD_LAZY   = 1;
+  RTLD_NOW    = 2;
+  RTLD_GLOBAL = 256;
+  RTLD_LOCAL  = 0;
+
+function dlopen(AName: MarshaledAString; AFlag: LongInt): NativeUInt;
+function dlsym(ALib: NativeUInt; AName: MarshaledAString): Pointer;
+function dlclose(ALib: NativeUInt): LongInt;
+
 {$ENDIF}
 {$ENDIF}
 
@@ -54,6 +73,26 @@ end;
 function FreeLibrary(ALib: NativeUInt): Boolean;
 begin
   Result := Windows.FreeLibrary(Windows.HMODULE(ALib));
+end;
+
+{$ELSE}
+
+uses
+  dl;
+
+function dlopen(AName: MarshaledAString; AFlag: LongInt): NativeUInt;
+begin
+  Result := NativeUInt(dl.dlopen(AName, AFlag));
+end;
+
+function dlsym(ALib: NativeUInt; AName: MarshaledAString): Pointer;
+begin
+  Result := dl.dlsym(Pointer(ALib), AName);
+end;
+
+function dlclose(ALib: NativeUInt): LongInt;
+begin
+  Result := dl.dlclose(Pointer(ALib));
 end;
 
 {$ENDIF}

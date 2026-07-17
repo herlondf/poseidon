@@ -199,7 +199,11 @@ uses
   Winapi.Windows;
   {$ENDIF}
 {$ELSE}
+  {$IFDEF FPC}
+  Poseidon.Compat.DynLib;
+  {$ELSE}
   Posix.Dlfcn;
+  {$ENDIF}
 {$ENDIF}
 
 class constructor TPoseidonSSL.Create;

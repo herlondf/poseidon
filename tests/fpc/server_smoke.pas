@@ -17,6 +17,7 @@ program server_smoke;
 {$ENDIF}
 
 uses
+  {$IFDEF FPC}{$IFDEF UNIX}cthreads,{$ENDIF}{$ENDIF}  // threaded RTL on Unix
   Poseidon;
 
 var
@@ -27,5 +28,5 @@ begin
   GServer := nil;
   if GServer <> nil then
     GServer.Free;
-  Writeln('OK: Poseidon server closure compiles + links under FPC/Win64');
+  Writeln('OK: Poseidon server closure compiles + links under FPC');
 end.

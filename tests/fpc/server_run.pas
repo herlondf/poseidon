@@ -14,6 +14,7 @@ program server_run;
 
 uses
   {$IFDEF FPC}
+  {$IFDEF UNIX}cthreads,{$ENDIF}  // MUST be first: enables threaded RTL on Unix
   Classes,
   SysUtils,
   fphttpclient,
@@ -116,7 +117,7 @@ var
   GStatus: Integer;
   GClient: TFPHTTPClient;
 begin
-  Writeln('=== Poseidon FPC/Win64 server RUNTIME smoke (issue #5) ===');
+  Writeln('=== Poseidon FPC server RUNTIME smoke (issue #5) ===');
 
   GHandlers := THandlers.Create;
   GApp := TPoseidonServer.Create;

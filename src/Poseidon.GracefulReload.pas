@@ -60,9 +60,14 @@ uses
   {$ENDIF}
 {$ELSE}
 uses
+  {$IFDEF FPC}
+  syncobjs,
+  Poseidon.Compat.Posix;
+  {$ELSE}
   System.SyncObjs,
   Posix.Signal,
   Posix.Unistd;
+  {$ENDIF}
 {$ENDIF}
 
 procedure WritePIDFile(const APath: string);

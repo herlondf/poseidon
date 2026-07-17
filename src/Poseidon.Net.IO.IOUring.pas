@@ -30,6 +30,12 @@ unit Poseidon.Net.IO.IOUring;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Classes,
+  syncobjs,
+  Poseidon.Compat.Posix,
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
@@ -40,6 +46,7 @@ uses
   Posix.Unistd,
   Posix.Errno,
   Posix.SysMman,
+  {$ENDIF}
   Poseidon.Net.IO,
   Poseidon.Net.Connection,
   Poseidon.Net.Pool.Buffer;
