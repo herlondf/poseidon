@@ -38,7 +38,10 @@ uses
   Poseidon.Net.HTTP1.Parser,
   Poseidon.Net.HTTP2.HPACK,
   Poseidon.Net.ResponseBuilder,
-  Poseidon.Validation;
+  Poseidon.Validation,
+  Poseidon.Native.Types,
+  Poseidon.Native.Router,
+  Poseidon.Native.Group;
 
 type
   // DTO exercising attribute-driven validation. The {$RTTI EXPLICIT FIELDS}
@@ -234,6 +237,33 @@ begin
   end;
 end;
 
+procedure RunRouter;
+var
+  LRouter: TNativeRouter;
+  LEntry: TNativeRouteEntry;
+  LCtx: TNativeRequestContext;
+  LMatch: PNativeRouteEntry;
+begin
+  LRouter := TNativeRouter.Create;
+  try
+    LEntry := Default(TNativeRouteEntry);
+    LEntry.HandlerFunc :=
+      procedure(var ACtx: TNativeRequestContext)
+      begin
+        ACtx.Status := 200;
+      end;
+    LRouter.AddRoute('GET', '/users/:id', LEntry);
+
+    LCtx := Default(TNativeRequestContext);
+    LMatch := LRouter.Lookup('GET', '/users/42', LCtx);
+    Check('router matches /users/:id', LMatch <> nil);
+    Check('router captures :id = 42', LCtx.Param('id') = '42');
+    Check('router misses unknown path', LRouter.Lookup('GET', '/nope', LCtx) = nil);
+  finally
+    LRouter.Free;
+  end;
+end;
+
 begin
   Writeln('=== Poseidon FPC/Win64 smoke (issue #5) ===');
   RunStatus;
@@ -244,6 +274,7 @@ begin
   RunResponseBuilder;
   RunValidation;
   RunValidatorRTTI;
+  RunRouter;
   Writeln('---------------------------------------------------');
   Writeln(Format('DONE: %d ok, %d fail', [GOk, GFail]));
   if GFail > 0 then

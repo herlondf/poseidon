@@ -11,9 +11,15 @@ unit Poseidon.Native.Router;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Generics.Collections,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
   System.NetEncoding,
   System.Generics.Collections,
+  {$ENDIF}
   Poseidon.Native.Types;
 
 type

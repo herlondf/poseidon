@@ -9,9 +9,15 @@ unit Poseidon.Native.Types;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Generics.Collections,
+  Poseidon.Compat;
+  {$ELSE}
   System.SysUtils,
   System.NetEncoding,
   System.Generics.Collections;
+  {$ENDIF}
 
 type
   PNativeRequestContext = ^TNativeRequestContext;
