@@ -9,8 +9,14 @@ unit Poseidon.Net.SSL.Manager;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Generics.Collections,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
   System.Generics.Collections,
+  {$ENDIF}
   Poseidon.Net.Interfaces;
 
 const

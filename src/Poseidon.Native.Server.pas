@@ -13,10 +13,18 @@ unit Poseidon.Native.Server;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Classes,
+  syncobjs,
+  Generics.Collections,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
   System.Generics.Collections,
+  {$ENDIF}
   Poseidon.Native.Types,
   Poseidon.Native.Router,
   Poseidon.Native.Group,
@@ -148,7 +156,9 @@ type
 implementation
 
 uses
+  {$IFNDEF FPC}
   System.JSON,
+  {$ENDIF}
   Poseidon.Problem,
   Poseidon.Exception,
   Poseidon.GracefulReload;

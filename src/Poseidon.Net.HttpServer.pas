@@ -14,6 +14,15 @@ unit Poseidon.Net.HttpServer;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Classes,
+  syncobjs,
+  Math,
+  DateUtils,
+  Generics.Collections,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
@@ -21,6 +30,7 @@ uses
   System.DateUtils,
   System.ZLib,
   System.Generics.Collections,
+  {$ENDIF}
   Poseidon.Net.Types,
   Poseidon.Net.Connection,
   Poseidon.Net.Connection.Manager,

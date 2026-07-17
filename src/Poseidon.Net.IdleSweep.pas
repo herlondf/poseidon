@@ -9,9 +9,16 @@ unit Poseidon.Net.IdleSweep;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  syncobjs,
+  Classes,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
   System.SyncObjs,
   System.Classes,
+  {$ENDIF}
   Poseidon.Net.Types,
   Poseidon.Net.Connection,
   Poseidon.Net.Connection.Manager,

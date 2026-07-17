@@ -24,11 +24,20 @@ unit Poseidon.Net.Dispatcher;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Classes,
+  Generics.Collections,
+  syncobjs,
+  Math,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.Generics.Collections,
   System.SyncObjs,
   System.Math,
+  {$ENDIF}
   Poseidon.Net.Types,
   Poseidon.Net.Connection,
   Poseidon.Net.HTTP2,

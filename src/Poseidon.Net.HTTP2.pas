@@ -15,11 +15,19 @@ unit Poseidon.Net.HTTP2;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Classes,
+  syncobjs,
+  Generics.Collections,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
   System.Diagnostics,
   System.Generics.Collections,
+  {$ENDIF}
   Poseidon.Net.HTTP2.HPACK,
   Poseidon.Net.Types;
 

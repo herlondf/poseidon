@@ -17,8 +17,14 @@ unit Poseidon.Net.ProxyProtocol;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Math,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
   System.Math,
+  {$ENDIF}
   Poseidon.Net.Security;
 
 type

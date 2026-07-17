@@ -8,10 +8,18 @@ unit Poseidon.Net.Connection.Manager;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  syncobjs,
+  Generics.Collections,
+  Classes,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
   System.SyncObjs,
   System.Generics.Collections,
   System.Classes,
+  {$ENDIF}
   Poseidon.Net.Connection;
 
 type

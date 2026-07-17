@@ -15,8 +15,13 @@
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  syncobjs;
+  {$ELSE}
   System.SysUtils,
   System.SyncObjs;
+  {$ENDIF}
 
 const
   OPCODE_CONTINUATION = $0;
@@ -161,10 +166,16 @@ type
 implementation
 
 uses
+  {$IFDEF FPC}
+  Classes,
+  Poseidon.Compat,
+  Poseidon.Compat.ZLib;
+  {$ELSE}
   System.Classes,
   System.NetEncoding,
   System.Hash,
   System.ZLib;
+  {$ENDIF}
 
 { TPoseidonWSConn }
 

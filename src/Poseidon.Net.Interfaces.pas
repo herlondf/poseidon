@@ -17,7 +17,12 @@ unit Poseidon.Net.Interfaces;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
+  {$ENDIF}
   Poseidon.Net.Types;
 
 type
@@ -93,7 +98,12 @@ function DefaultSSLProvider: ISSLProvider;
 implementation
 
 uses
+  {$IFDEF FPC}
+  Classes,
+  Poseidon.Compat,
+  {$ELSE}
   System.Classes,
+  {$ENDIF}
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.SSL;
 

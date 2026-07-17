@@ -45,10 +45,18 @@ unit Poseidon.Net.Pool.Workers;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Classes,
+  syncobjs,
+  Generics.Collections,
+  Poseidon.Compat;
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
   System.Generics.Collections;
+  {$ENDIF}
 
 type
   TElasticWorkItem = reference to procedure;

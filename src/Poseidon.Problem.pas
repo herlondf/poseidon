@@ -3,8 +3,13 @@ unit Poseidon.Problem;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Poseidon.Compat,
+  {$ELSE}
   System.SysUtils,
   System.JSON,
+  {$ENDIF}
   Poseidon.Exception;
 
 type
