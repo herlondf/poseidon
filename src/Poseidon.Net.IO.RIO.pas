@@ -25,11 +25,21 @@ unit Poseidon.Net.IO.RIO;
 interface
 
 uses
+  {$IFDEF FPC}
+  // Windows/WinSock2 first, RTL last: later units win name clashes, so the RTL
+  // TCriticalSection/TBytes/TThread beat the Win32 look-alikes.
+  Windows,
+  WinSock2,
+  SysUtils,
+  Classes,
+  syncobjs,
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
   Winapi.Windows,
   Winapi.Winsock2,
+  {$ENDIF}
   Poseidon.Net.IO,
   Poseidon.Net.Connection,
   Poseidon.Net.Pool.Buffer;
@@ -351,7 +361,7 @@ begin
 
   if WSAIoctl(LSocket, SIO_GET_MULTIPLE_EXTENSION_FUNCTION_POINTER,
     @WSAID_MULTIPLE_RIO, SizeOf(WSAID_MULTIPLE_RIO),
-    @FRio, SizeOf(FRio), LBytes, nil, nil) <> 0 then
+    @FRio, SizeOf(FRio), {$IFDEF FPC}@LBytes{$ELSE}LBytes{$ENDIF}, nil, nil) <> 0 then
   begin
     closesocket(LSocket);
     raise ENotSupportedException.Create(

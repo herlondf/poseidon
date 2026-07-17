@@ -100,7 +100,6 @@ implementation
 uses
   {$IFDEF FPC}
   Classes,
-  Poseidon.Compat,
   {$ELSE}
   System.Classes,
   {$ENDIF}

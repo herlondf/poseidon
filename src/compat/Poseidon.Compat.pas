@@ -37,8 +37,16 @@ type
     function Decode(const AInput: string): string;
   end;
 
+  // Mirrors System.NetEncoding.TBase64Encoding.EncodeBytesToString — used by the
+  // WebSocket handshake (Sec-WebSocket-Accept = base64(SHA1(...))). Standard
+  // RFC 4648 base64 with '=' padding.
+  TPoseidonBase64Encoding = record
+    function EncodeBytesToString(const AInput: TBytes): string;
+  end;
+
   TNetEncoding = record
     class function URL: TPoseidonURLEncoding; static;
+    class function Base64: TPoseidonBase64Encoding; static;
   end;
 
   // Delphi's System.RegularExpressions.TRegEx exposes a static IsMatch; FPC ships
@@ -54,6 +62,7 @@ type
   // closures — e.g. the Listen `AOnListen` continuation in Native.Server — work
   // exactly as in Delphi.
   TProc = reference to procedure;
+  TProc<T> = reference to procedure(Arg1: T);
 
   {$SCOPEDENUMS ON}
   // Mirrors System.SysUtils.TStringSplitOptions (scoped: TStringSplitOptions.X).
@@ -286,6 +295,51 @@ end;
 class function TNetEncoding.URL: TPoseidonURLEncoding;
 begin
   Result := Default(TPoseidonURLEncoding);
+end;
+
+class function TNetEncoding.Base64: TPoseidonBase64Encoding;
+begin
+  Result := Default(TPoseidonBase64Encoding);
+end;
+
+function TPoseidonBase64Encoding.EncodeBytesToString(const AInput: TBytes): string;
+const
+  CB64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+var
+  I: Integer;
+  LN: Integer;
+  LB0, LB1, LB2: Byte;
+begin
+  Result := '';
+  LN := Length(AInput);
+  I := 0;
+  while I < LN do
+  begin
+    LB0 := AInput[I];
+    Result := Result + CB64[(LB0 shr 2) + 1];
+    if I + 1 < LN then
+    begin
+      LB1 := AInput[I + 1];
+      Result := Result + CB64[(((LB0 and 3) shl 4) or (LB1 shr 4)) + 1];
+      if I + 2 < LN then
+      begin
+        LB2 := AInput[I + 2];
+        Result := Result + CB64[(((LB1 and 15) shl 2) or (LB2 shr 6)) + 1];
+        Result := Result + CB64[(LB2 and 63) + 1];
+      end
+      else
+      begin
+        Result := Result + CB64[((LB1 and 15) shl 2) + 1];
+        Result := Result + '=';
+      end;
+    end
+    else
+    begin
+      Result := Result + CB64[((LB0 and 3) shl 4) + 1];
+      Result := Result + '==';
+    end;
+    Inc(I, 3);
+  end;
 end;
 
 class function TRegEx.IsMatch(const AInput, APattern: string): Boolean;

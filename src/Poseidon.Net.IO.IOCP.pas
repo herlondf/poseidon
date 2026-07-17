@@ -10,11 +10,21 @@ unit Poseidon.Net.IO.IOCP;
 interface
 
 uses
+  {$IFDEF FPC}
+  // Windows/WinSock2 first, RTL last: later units win name clashes, so the RTL
+  // TCriticalSection/TBytes/TThread beat the Win32 look-alikes.
+  Windows,
+  WinSock2,
+  SysUtils,
+  Classes,
+  syncobjs,
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
   Winapi.Windows,
   Winapi.Winsock2,
+  {$ENDIF}
   Poseidon.Net.IO,
   Poseidon.Net.Connection,
   Poseidon.Net.Pool.Buffer,
@@ -157,6 +167,11 @@ const
   CKeepAliveInterval = 5000;
 
 type
+  {$IFDEF FPC}
+  // FPC's WinSock2 exposes WSABUF but not the Delphi TWsaBuf alias.
+  TWsaBuf = WSABUF;
+  {$ENDIF}
+
   TKeepAliveVals = record
     OnOff: Cardinal;
     KeepAliveTime: Cardinal;
@@ -273,21 +288,21 @@ begin
   LBytes := 0;
   LGuid := WSAID_ACCEPTEX;
   LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
-    @LGuid, SizeOf(LGuid), @FAcceptEx, SizeOf(FAcceptEx), LBytes, nil, nil);
+    @LGuid, SizeOf(LGuid), @FAcceptEx, SizeOf(FAcceptEx), {$IFDEF FPC}@LBytes{$ELSE}LBytes{$ENDIF}, nil, nil);
   if (LRes <> 0) or (FAcceptEx = nil) then
     FAcceptEx := @_mswAcceptEx;  // fallback: static mswsock export
 
   LGuid := WSAID_GETACCEPTEXSOCKADDRS;
   LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FGetAcceptExSockaddrs, SizeOf(FGetAcceptExSockaddrs),
-    LBytes, nil, nil);
+    {$IFDEF FPC}@LBytes{$ELSE}LBytes{$ENDIF}, nil, nil);
   if (LRes <> 0) or (FGetAcceptExSockaddrs = nil) then
     FGetAcceptExSockaddrs := @_mswGetAcceptExSockaddrs;  // fallback: static mswsock export
 
   LGuid := StringToGUID('{7FDA2E11-8630-436F-A031-F536A6EEC157}');
   LRes := WSAIoctl(FListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FDisconnectEx, SizeOf(FDisconnectEx),
-    LBytes, nil, nil);
+    {$IFDEF FPC}@LBytes{$ELSE}LBytes{$ENDIF}, nil, nil);
   if LRes <> 0 then
     FDisconnectEx := nil;  // DisconnectEx is optional; fallback to closesocket
 end;
@@ -781,7 +796,7 @@ begin
           LKA.KeepAliveInterval := CKeepAliveInterval;
           LBytesRet := 0;
           WSAIoctl(LAcceptCtx^.AcceptSocket, CSIO_KEEPALIVE_VALS,
-            @LKA, SizeOf(LKA), nil, 0, LBytesRet, nil, nil);
+            @LKA, SizeOf(LKA), nil, 0, {$IFDEF FPC}@LBytesRet{$ELSE}LBytesRet{$ENDIF}, nil, nil);
 
           LLocalAddr := nil;
           LRemoteAddr := nil;

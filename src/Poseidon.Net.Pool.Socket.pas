@@ -16,14 +16,21 @@ unit Poseidon.Net.Pool.Socket;
 interface
 
 uses
+  {$IFDEF FPC}
+  WinSock2,
+  syncobjs;
+  {$ELSE}
   Winapi.Winsock2;
+  {$ENDIF}
 
 type
   TSocketPool = class
   private class var
     FPool: array of TSocket;
     FCount: Integer;
-    FLock: TObject;
+    // FPC's TMonitor is non-functional (TMonitor.Enter AVs), so under FPC this
+    // dedicated lock is a real critical section. Delphi keeps TObject+TMonitor.
+    {$IFDEF FPC}FLock: TCriticalSection;{$ELSE}FLock: TObject;{$ENDIF}
     FDisconnectEx: Pointer;
     FLoaded: Boolean;
   public
@@ -50,9 +57,14 @@ type
 implementation
 
 uses
+  {$IFDEF FPC}
+  Windows,
+  SysUtils;
+  {$ELSE}
   System.SysUtils,
   System.SyncObjs,
   Winapi.Windows;
+  {$ENDIF}
 
 const
   CMaxPoolSize = 2048;
@@ -66,7 +78,7 @@ type
 
 class procedure TSocketPool.Initialize;
 begin
-  FLock := TObject.Create;
+  {$IFDEF FPC}FLock := syncobjs.TCriticalSection.Create;{$ELSE}FLock := TObject.Create;{$ENDIF}
   SetLength(FPool, CMaxPoolSize);
   FCount := 0;
   FDisconnectEx := nil;
@@ -77,13 +89,13 @@ class procedure TSocketPool.Finalize;
 var
   I: Integer;
 begin
-  TMonitor.Enter(FLock);
+  {$IFDEF FPC}FLock.Enter;{$ELSE}TMonitor.Enter(FLock);{$ENDIF}
   try
     for I := 0 to FCount - 1 do
       closesocket(FPool[I]);
     FCount := 0;
   finally
-    TMonitor.Exit(FLock);
+    {$IFDEF FPC}FLock.Leave;{$ELSE}TMonitor.Exit(FLock);{$ENDIF}
   end;
   FreeAndNil(FLock);
 end;
@@ -98,7 +110,7 @@ begin
   LBytes := 0;
   if WSAIoctl(ASocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
     @LGuid, SizeOf(LGuid), @FDisconnectEx, SizeOf(FDisconnectEx),
-    LBytes, nil, nil) = 0 then
+    {$IFDEF FPC}@LBytes{$ELSE}LBytes{$ENDIF}, nil, nil) = 0 then
     FLoaded := True;
 end;
 
@@ -115,7 +127,7 @@ begin
     Exit;
   end;
 
-  TMonitor.Enter(FLock);
+  {$IFDEF FPC}FLock.Enter;{$ELSE}TMonitor.Enter(FLock);{$ENDIF}
   try
     if FCount < CMaxPoolSize then
     begin
@@ -126,14 +138,14 @@ begin
     else
       closesocket(ASocket); // Pool full — close normally
   finally
-    TMonitor.Exit(FLock);
+    {$IFDEF FPC}FLock.Leave;{$ELSE}TMonitor.Exit(FLock);{$ENDIF}
   end;
 end;
 
 class function TSocketPool.Acquire: TSocket;
 begin
   Result := INVALID_SOCKET;
-  TMonitor.Enter(FLock);
+  {$IFDEF FPC}FLock.Enter;{$ELSE}TMonitor.Enter(FLock);{$ENDIF}
   try
     if FCount > 0 then
     begin
@@ -141,14 +153,14 @@ begin
       Result := FPool[FCount];
     end;
   finally
-    TMonitor.Exit(FLock);
+    {$IFDEF FPC}FLock.Leave;{$ELSE}TMonitor.Exit(FLock);{$ENDIF}
   end;
 end;
 
 class function TSocketPool.AddRecycled(ASocket: TSocket): Boolean;
 begin
   Result := False;
-  TMonitor.Enter(FLock);
+  {$IFDEF FPC}FLock.Enter;{$ELSE}TMonitor.Enter(FLock);{$ENDIF}
   try
     if FCount < CMaxPoolSize then
     begin
@@ -157,7 +169,7 @@ begin
       Result := True;
     end;
   finally
-    TMonitor.Exit(FLock);
+    {$IFDEF FPC}FLock.Leave;{$ELSE}TMonitor.Exit(FLock);{$ENDIF}
   end;
 end;
 

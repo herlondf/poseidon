@@ -26,7 +26,12 @@ unit Poseidon.GracefulReload;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Poseidon.Compat;
+  {$ELSE}
   System.SysUtils;
+  {$ENDIF}
 
 // Write the current process PID to the specified file.
 procedure WritePIDFile(const APath: string);
@@ -48,7 +53,11 @@ implementation
 
 {$IFDEF MSWINDOWS}
 uses
+  {$IFDEF FPC}
+  Windows;
+  {$ELSE}
   Winapi.Windows;
+  {$ENDIF}
 {$ELSE}
 uses
   System.SyncObjs,
@@ -79,9 +88,13 @@ procedure RemovePIDFile(const APath: string);
 begin
   if (APath <> '') and FileExists(APath) then
     try
-      // Qualify to the RTL string overload: on Windows the bare DeleteFile
-      // resolves to the Winapi.Windows PWideChar version.
+      // Qualify to the RTL string overload: with the Windows unit in scope the
+      // bare DeleteFile resolves to the Win32 PWideChar version.
+      {$IFDEF FPC}
+      SysUtils.DeleteFile(APath);
+      {$ELSE}
       System.SysUtils.DeleteFile(APath);
+      {$ENDIF}
     except
       on E: Exception do;
     end;

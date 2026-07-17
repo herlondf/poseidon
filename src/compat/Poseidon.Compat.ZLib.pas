@@ -25,6 +25,7 @@ interface
 
 {$IFDEF FPC}
 uses
+  SysUtils,
   Classes,
   zbase,
   zdeflate,

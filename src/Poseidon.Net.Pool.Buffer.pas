@@ -117,6 +117,13 @@ var
   GTier0: TStack<TBytes>;
   GTier1: TStack<TBytes>;
   GTier2: TStack<TBytes>;
+{$IFDEF FPC}
+  // FPC's TMonitor is non-functional (TMonitor.Enter AVs), so the global-pool
+  // fallback path uses an explicit critical section instead. One lock for all
+  // three tiers is fine here: this is the slow path (the thread-local cache
+  // serves the hot path). Delphi keeps its per-stack TMonitor.
+  GPoolLock: TCriticalSection;
+{$ENDIF}
 
 // ---------------------------------------------------------------------------
 // Acquire — thread-local first, then global, then heap
@@ -127,12 +134,12 @@ var
   LHave: Boolean;
 begin
   Result := nil;
-  TMonitor.Enter(AStack);
+  {$IFDEF FPC}GPoolLock.Enter;{$ELSE}TMonitor.Enter(AStack);{$ENDIF}
   try
     LHave := AStack.Count > 0;
     if LHave then Result := AStack.Pop;
   finally
-    TMonitor.Exit(AStack);
+    {$IFDEF FPC}GPoolLock.Leave;{$ELSE}TMonitor.Exit(AStack);{$ENDIF}
   end;
   if not LHave then
   begin
@@ -190,11 +197,11 @@ end;
 
 procedure _GlobalPushIfRoom(AStack: TStack<TBytes>; AMax: Integer; const ABuf: TBytes);
 begin
-  TMonitor.Enter(AStack);
+  {$IFDEF FPC}GPoolLock.Enter;{$ELSE}TMonitor.Enter(AStack);{$ENDIF}
   try
     if AStack.Count < AMax then AStack.Push(ABuf);
   finally
-    TMonitor.Exit(AStack);
+    {$IFDEF FPC}GPoolLock.Leave;{$ELSE}TMonitor.Exit(AStack);{$ENDIF}
   end;
 end;
 
@@ -267,6 +274,9 @@ initialization
   GTier0 := TStack<TBytes>.Create;
   GTier1 := TStack<TBytes>.Create;
   GTier2 := TStack<TBytes>.Create;
+{$IFDEF FPC}
+  GPoolLock := TCriticalSection.Create;
+{$ENDIF}
 
 finalization
   while GTier0.Count > 0 do GTier0.Pop;
@@ -275,5 +285,8 @@ finalization
   FreeAndNil(GTier0);
   FreeAndNil(GTier1);
   FreeAndNil(GTier2);
+{$IFDEF FPC}
+  FreeAndNil(GPoolLock);
+{$ENDIF}
 
 end.

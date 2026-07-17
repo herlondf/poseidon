@@ -16,12 +16,21 @@ unit Poseidon.Net.Connection;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  Classes,
+  syncobjs,
+    {$IFDEF MSWINDOWS}
+  WinSock2,
+    {$ENDIF}
+  {$ELSE}
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
-{$IFDEF MSWINDOWS}
+    {$IFDEF MSWINDOWS}
   Winapi.Winsock2,
-{$ENDIF}
+    {$ENDIF}
+  {$ENDIF}
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.HTTP2,
   Poseidon.Net.WebSocket;

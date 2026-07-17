@@ -8,7 +8,11 @@ unit Poseidon.Net.IO;
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils;
+  {$ELSE}
   System.SysUtils;
+  {$ENDIF}
 
 type
   // Callbacks: IO backend → server

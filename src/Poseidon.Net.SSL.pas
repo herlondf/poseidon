@@ -7,8 +7,13 @@
 interface
 
 uses
+  {$IFDEF FPC}
+  SysUtils,
+  syncobjs;
+  {$ELSE}
   System.SysUtils,
   System.SyncObjs;
+  {$ENDIF}
 
 const
   SSL_ERROR_NONE        = 0;
@@ -188,7 +193,11 @@ implementation
 
 uses
 {$IFDEF MSWINDOWS}
+  {$IFDEF FPC}
+  Poseidon.Compat.DynLib;
+  {$ELSE}
   Winapi.Windows;
+  {$ENDIF}
 {$ELSE}
   Posix.Dlfcn;
 {$ENDIF}
