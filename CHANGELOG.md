@@ -65,6 +65,16 @@ Security, correctness and conformance hardening toward the v2 maturity gate
   use-after-free at teardown (deferred close). h2spec 1/146 → 145/146.
 
 ### Added
+- **Free Pascal (FPC 3.3.1) support** — the server compiles, links and **serves
+  HTTP** under FPC on Win64 (IOCP) and Linux-x86_64 (io_uring/epoll), alongside
+  Delphi, via conditional `{$IFDEF FPC}` `uses` guards and an FPC-only
+  compatibility layer (`src/compat/`: string/JSON/RegEx/Hash/Stopwatch/ZLib
+  shims, DynLib and POSIX bindings). FPC defaults to SyncDispatch. Gates:
+  `tests/fpc/build-server-fpc.ps1` (Windows) and `tests/fpc/build-linux-fpc.sh`
+  (Linux) — each builds the full closure and runs a real HTTP serve smoke.
+- **Endurance validated**: 5.4 h sustained soak (5.4 M requests, 0 failures,
+  flat anon memory at 0.000 MiB/h, 0 crashes) on the Linux io_uring backend —
+  see `SOAK-205-2026-07-17.md`.
 - **Two-face CI harness** (`ci/run-ci.ps1`): compile gate + socket-free fuzz
   runner + Win64 suite (env failures tolerated via a baseline) + optional Linux
   conformance (h2spec + Autobahn, reusing a provisioned WSL distro, CI-safe).
