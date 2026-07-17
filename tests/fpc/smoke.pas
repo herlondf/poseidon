@@ -40,6 +40,20 @@ uses
   Poseidon.Net.ResponseBuilder,
   Poseidon.Validation;
 
+type
+  // DTO exercising attribute-driven validation. The {$RTTI EXPLICIT FIELDS}
+  // directive is required under FPC (it does not emit private-field RTTI by
+  // default); it is valid — and harmless — in Delphi too.
+  {$RTTI EXPLICIT FIELDS([vcPrivate, vcProtected, vcPublic, vcPublished])}
+  TUserDTO = class
+  private
+    [RequiredAttribute] FName: string;
+    [EmailAttribute] FEmail: string;
+  public
+    property Name: string read FName write FName;
+    property Email: string read FEmail write FEmail;
+  end;
+
 var
   GOk: Integer = 0;
   GFail: Integer = 0;
@@ -200,6 +214,26 @@ begin
   end;
 end;
 
+procedure RunValidatorRTTI;
+var
+  LUser: TUserDTO;
+  LErrors: TArray<TPoseidonValidationError>;
+  LValid: Boolean;
+begin
+  // End-to-end: the validator walks the DTO fields via RTTI and reads the
+  // [Required]/[Email] attributes — the reflection path, not a direct call.
+  LUser := TUserDTO.Create;
+  try
+    LUser.Name := '';            // trips [Required]
+    LUser.Email := 'not-email';  // trips [Email]
+    LValid := TPoseidonValidator.Validate(LUser, LErrors);
+    Check('RTTI validator flags invalid DTO', not LValid);
+    Check('RTTI validator finds 2 violations', Length(LErrors) = 2);
+  finally
+    LUser.Free;
+  end;
+end;
+
 begin
   Writeln('=== Poseidon FPC/Win64 smoke (issue #5) ===');
   RunStatus;
@@ -209,6 +243,7 @@ begin
   RunCallbacks;
   RunResponseBuilder;
   RunValidation;
+  RunValidatorRTTI;
   Writeln('---------------------------------------------------');
   Writeln(Format('DONE: %d ok, %d fail', [GOk, GFail]));
   if GFail > 0 then

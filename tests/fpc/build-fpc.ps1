@@ -44,6 +44,7 @@ Write-Host "out:    $outDir`n"
   -MDELPHIUNICODE `
   -Mfunctionreferences `
   -Manonymousfunctions `
+  -Mprefixedattributes `
   -Fu"$srcDir" `
   -Fu"$compatDir" `
   -FU"$outDir" `

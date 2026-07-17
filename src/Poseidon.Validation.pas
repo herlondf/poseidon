@@ -25,6 +25,9 @@ type
   // Field is mandatory — string non-empty, object non-nil
   RequiredAttribute = class(PoseidonValidationAttribute)
   public
+    // Explicit ctor: FPC requires an attribute class to declare its own
+    // constructor for `[Required]` application (an inherited one is not enough).
+    constructor Create;
     function Validate(const AValue: TValue; const AFieldName: string; out AError: string): Boolean; override;
   end;
 
@@ -49,6 +52,8 @@ type
   // String must match a basic email pattern
   EmailAttribute = class(PoseidonValidationAttribute)
   public
+    // Explicit ctor: see RequiredAttribute — needed for `[Email]` under FPC.
+    constructor Create;
     function Validate(const AValue: TValue; const AFieldName: string; out AError: string): Boolean; override;
   end;
 
@@ -92,6 +97,11 @@ uses
   Poseidon.Exception;
 
 { RequiredAttribute }
+
+constructor RequiredAttribute.Create;
+begin
+  inherited Create;
+end;
 
 function RequiredAttribute.Validate(const AValue: TValue; const AFieldName: string; out AError: string): Boolean;
 begin
@@ -156,6 +166,11 @@ begin
 end;
 
 { EmailAttribute }
+
+constructor EmailAttribute.Create;
+begin
+  inherited Create;
+end;
 
 function EmailAttribute.Validate(const AValue: TValue; const AFieldName: string; out AError: string): Boolean;
 const
