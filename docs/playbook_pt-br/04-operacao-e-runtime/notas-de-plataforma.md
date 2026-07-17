@@ -1,45 +1,37 @@
 # Notas de Plataforma & Limitações Conhecidas
 
-O Poseidon é dual-face: Windows (IOCP / RIO) e Linux (epoll / io_uring). O
-backend é escolhido em tempo de compilação.
+O Poseidon é dual-face: Windows (IOCP / RIO) e Linux (io_uring / epoll), e
+compila sob **Delphi e Free Pascal**. O backend é escolhido uma vez na
+construção (defines de compilação sobrepõem o padrão).
 
-| Plataforma | Backend padrão | Fallback | Define para forçar |
+| Plataforma | Backend padrão | Alternativo | Define para forçar |
 |---|---|---|---|
-| Windows 64-bit | RIO (Registered I/O) | IOCP | `FORCE_IOCP` |
+| Windows 64-bit | IOCP | RIO (Registered I/O) | `FORCE_RIO` |
 | Linux 64-bit | io_uring | epoll | `FORCE_EPOLL` |
 
 ## Windows: I/O de extensão sobreposto do Winsock
 
-Os backends Windows dependem das funções de extensão sobreposta carregadas via
-`WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER, …)` (`AcceptEx`) e do Registered
-I/O (RIO). Num Windows saudável isso está sempre disponível.
+O backend IOCP carrega `AcceptEx` / `GetAcceptExSockaddrs` via
+`WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER, …)`. Alguns ambientes — certos
+builds Windows Insider, ou hosts com um produto de segurança que faz hook do
+catálogo Winsock — rejeitam essa chamada com `WSAEINVAL (10022)`. O Poseidon
+trata isso **caindo para os exports estáticos do `mswsock.dll`** para o
+`AcceptEx`, então o servidor continua funcional nesses hosts.
 
-Alguns ambientes — certos builds Windows Insider, ou hosts com um produto de
-segurança que faz hook do catálogo Winsock — **rejeitam essas chamadas com
-`WSAEINVAL (10022)`** enquanto o `accept()` básico ainda funciona. Nesse host o
-servidor aceita conexões TCP mas não consegue completar o recv sobreposto, então
-fecha a conexão sem responder, e os testes de integração via socket falham.
+Um bug real (já corrigido) derrubava ~1-em-4 conexões sob churn: um socket
+reciclado via `DisconnectEx(TF_REUSE_SOCKET)` permanece associado ao IOCP, e
+re-chamar `CreateIoCompletionPort` retornava `ERROR_INVALID_PARAMETER`, tratado
+como fatal. Isso agora é tolerado. A suíte de integração via socket passa limpa
+(0 falhas ambientais toleradas).
 
-Isso é uma **limitação ambiental, não um defeito de código** (reproduzível com
-poucas linhas de Winsock puro, sem nenhum código Poseidon). Se você bater nisso:
+## Linux: TLS
 
-- Rode os testes de integração / suítes de conformidade num host Windows limpo
-  ou no **Linux** (ver [Testes & Conformidade](testes-e-conformidade.md)).
-- Os testes puros/de lógica e de fuzz não são afetados e validam a lógica de
-  parsing e protocolo sem sockets.
-
-## Linux: TLS ainda não está production-ready
-
-O build Linux (epoll / io_uring) serve HTTP puro corretamente e completa o
-handshake TLS, mas **HTTPS e HTTP/2-over-TLS têm hoje um crash no Linux** no
-caminho de recv/dispatch pós-handshake (uma corrida / use-after-free sensível a
-timing na fronteira SSL + worker assíncrono). Reproduz nos dois backends e
-bloqueia a rodada de conformidade HTTP/2.
-
-**Recomendação:** até isso ser corrigido, faça a terminação TLS na frente do
-Poseidon no Linux (ex.: um reverse proxy / load balancer fazendo TLS, com o
-Poseidon servindo HTTP puro atrás dele). HTTP puro no Linux não é afetado.
-Acompanhe a correção nas issues do projeto.
+O build Linux (io_uring / epoll) serve tráfego HTTP puro **e** TLS. A corrida /
+use-after-free de SSL pós-handshake que derrubava HTTPS/HTTP2-over-TLS foi
+resolvida (todo acesso por conexão a SSL / `H2Conn` / accum-buffer agora é
+serializado sob o lock da conexão; SIGPIPE ignorado). Evidência: h2spec **145/146
+sobre TLS/ALPN** e Autobahn **247/247** verdes contra o backend io_uring do
+Linux, e um soak de 5,4 h no io_uring sem leak/crash.
 
 ## OpenSSL
 
@@ -49,3 +41,24 @@ sem dependência em tempo de compilação:
 - Windows: `libssl-3-x64.dll` / `libssl-1_1-x64.dll` (e `libcrypto`) no `PATH`.
 - Linux: `libssl.so.3` / `libssl.so.1.1` (e `libcrypto`) — ex.:
   `apt install openssl` / `libssl3`.
+
+## Free Pascal / Lazarus
+
+O Poseidon compila e serve HTTP sob **FPC 3.3.1** (trunk) no Win64 (IOCP) e Linux
+(io_uring / epoll), além do Delphi. O build Delphi é byte-idêntico (todo o
+suporte a FPC fica atrás de `{$IFDEF FPC}` + a camada só-FPC `src/compat/`).
+
+- **Compilador:** exige FPC **3.3.1** (trunk) — `reference to` / métodos anônimos
+  e RTTI de atributos não existem no release 3.2.2. Flags:
+  `-MDELPHIUNICODE -Mfunctionreferences -Manonymousfunctions -Mprefixedattributes`.
+- **Threading no Linux:** `cthreads` deve ser a **primeira** unit do programa
+  (`{$IFDEF UNIX}`) ou `TEvent` / `TThread` falham em runtime.
+- **Modo de dispatch:** sob FPC o servidor usa **SyncDispatch** por padrão
+  (dispatch inline na IO thread). O caminho async (worker pool) é best-effort — o
+  trunk atual do FPC tem problemas de codegen de closure / startup de thread que
+  o SyncDispatch evita. O Delphi mantém async por padrão.
+- **`TMonitor`** é não-funcional no FPC; os pools usam `TCriticalSection` no ramo
+  FPC.
+- **Gates:** `tests/fpc/build-server-fpc.ps1` (Windows) e
+  `tests/fpc/build-linux-fpc.sh` (Linux) buildam a clausura completa e rodam um
+  smoke de serve HTTP real.

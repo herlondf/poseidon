@@ -71,12 +71,12 @@ uma distro WSL Ubuntu, provisiona (OpenSSL + h2spec), roda a suíte e imprime o
 sumário. Precisa dos stubs de linker Linux do repo Benchmark (ver o cabeçalho do
 script para o caminho esperado).
 
-> **Status atual:** bloqueado por um crash de TLS no Linux — ver
-> [Notas de plataforma](notas-de-plataforma.md) e a issue de rastreamento. O
-> harness já está pronto e dá o número real de conformidade assim que o crash
-> for corrigido.
+> **Status atual:** **h2spec 145/146** sobre TLS/ALPN contra o backend io_uring
+> do Linux (0 falhas, 1 skip). A corrida de TLS pós-handshake que bloqueava isso
+> foi resolvida (ver [Notas de plataforma](notas-de-plataforma.md)).
 
 ## Conformidade WebSocket (Autobahn)
 
-Planejado na mesma infra WSL (Autobahn TestSuite contra um build Linux).
-Rastreado nas issues do projeto.
+Roda a Autobahn TestSuite contra um build Linux (`tests/autobahn/`). Atual:
+**247/247** core (suites 1–8, 10, 11) + **42/42** nos casos 9.\* de payload
+grande, 0 falhas.

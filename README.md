@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  High-performance HTTP framework for Delphi — RIO/IOCP on Windows, io_uring/epoll on Linux.<br/>
+  High-performance HTTP framework for Delphi and Free Pascal — IOCP/RIO on Windows, io_uring/epoll on Linux.<br/>
   128k RPS shared-nothing architecture. Zero errors under 500 concurrent connections.
 </p>
 
@@ -98,13 +98,13 @@ Each core does everything: accept, recv, parse, execute handler, send response. 
 
 Backend is selected **once** at server startup, with automatic fallback:
 
-| Platform | Primary | Fallback | Force Fallback |
-|----------|---------|----------|----------------|
-| **Windows** | RIO (Registered I/O) | IOCP | `{$DEFINE FORCE_IOCP}` |
-| **Linux** | io_uring (≥ 5.6) | epoll | `{$DEFINE FORCE_EPOLL}` |
+| Platform | Default | Alternative | Force Alternative |
+|----------|---------|-------------|-------------------|
+| **Windows** | IOCP | RIO (Registered I/O) | `{$DEFINE FORCE_RIO}` |
+| **Linux** | io_uring (≥ 5.1) | epoll | `{$DEFINE FORCE_EPOLL}` |
 
-- **RIO**: Shared-memory completion queues, zero-syscall polling, pre-registered buffers
-- **IOCP**: Standard Windows async I/O with completion ports
+- **IOCP**: Standard Windows async I/O with completion ports (default)
+- **RIO**: Shared-memory completion queues, zero-syscall polling, pre-registered buffers (opt-in via `FORCE_RIO`)
 - **io_uring**: Linux async I/O with registered files (`IORING_REGISTER_FILES`)
 - **epoll**: Shared-nothing per-core with `SO_REUSEPORT`
 
@@ -134,8 +134,10 @@ Backend is selected **once** at server startup, with automatic fallback:
 | gzip + Brotli compression | ✅ |
 | Proxy Protocol v1/v2 | ✅ |
 | Graceful reload (PID file, SIGTERM, zero-downtime) | ✅ |
-| Windows 64-bit (RIO / IOCP) | ✅ |
+| Windows 64-bit (IOCP / RIO) | ✅ |
 | Linux 64-bit (io_uring / epoll) | ✅ |
+| Delphi 11+ compiler | ✅ |
+| Free Pascal (FPC 3.3.1) / Lazarus — Win64 + Linux | ✅ |
 
 ### Performance Engineering
 | Feature | Status |
@@ -177,18 +179,34 @@ Backend is selected **once** at server startup, with automatic fallback:
 
 ## Requirements
 
-- Delphi 11 Alexandria or later
+- **Delphi 11 Alexandria or later**, or **Free Pascal 3.3.1** (trunk)
 - Windows 64-bit or Linux 64-bit
 - OpenSSL in PATH (only for HTTPS/HTTP2)
 
 ## Installation
 
-Add `src/` and `middlewares/` to your project search path:
+Add `src/`, `src/compat/` and `middlewares/` to your project search path:
 
 ```
 <poseidon>\src
+<poseidon>\src\compat
 <poseidon>\middlewares
 ```
+
+### Free Pascal / Lazarus
+
+Poseidon compiles and serves under FPC 3.3.1 on Win64 (IOCP) and Linux
+(io_uring/epoll) in addition to Delphi. Notes:
+
+- Requires **FPC 3.3.1** (trunk) — `reference to` / anonymous methods and
+  attribute RTTI are not in the 3.2.2 release. Compile with
+  `-MDELPHIUNICODE -Mfunctionreferences -Manonymousfunctions -Mprefixedattributes`.
+- On Linux, make `cthreads` the **first** unit of your program (`{$IFDEF UNIX}`)
+  so the threaded RTL is active.
+- Under FPC the server defaults to **SyncDispatch** (inline dispatch); the async
+  worker-pool mode is best-effort on the current FPC trunk.
+- Reference build/run gates: `tests/fpc/build-server-fpc.ps1` (Windows),
+  `tests/fpc/build-linux-fpc.sh` (Linux).
 
 ## Usage Examples
 
@@ -336,8 +354,10 @@ samples/
   07-http2-server-push/               ← HTTP/2 server push
   08-benchmark/                       ← benchmark setup
   09-graceful-reload/                 ← zero-downtime restart
+  10-metrics-dashboard/               ← Prometheus /metrics + dashboard
 tests/
   DUnitX tests                        ← engine + framework + 20 middleware tests
+  fpc/                                ← Free Pascal build + serve gates (Win + Linux)
 ```
 
 ## Documentation

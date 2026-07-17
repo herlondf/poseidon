@@ -47,25 +47,24 @@ disponíveis e rearma o fd com `EPOLL_CTL_MOD`.
 
 ### Backends disponíveis
 
-**RIO — Registered I/O (Windows, preferido)**
+**IOCP — I/O Completion Ports (Windows, padrão)**
 
-Mecanismo de alta performance introduzido no Windows 8 / Server 2012.
-Difere do IOCP porque usa polling direto sobre um buffer de conclusão
-compartilhado com o kernel — sem syscall `GetQueuedCompletionStatus` por
-evento. Buffers são pré-registrados via `RIORegisterBuffer`, eliminando
-cópias de kernel para userspace.
+Backend **padrão e validado** do Windows. Usa a API clássica de completion
+ports (`AcceptEx` + `WSARecv`/`WSASend` com `OVERLAPPED`; sockets reciclados via
+`DisconnectEx`). Totalmente suportado a partir do Windows XP.
+
+**RIO — Registered I/O (Windows, opt-in via FORCE_RIO)**
+
+Mecanismo de menor overhead introduzido no Windows 8 / Server 2012, porém
+**opt-in** (`{$DEFINE FORCE_RIO}`) e ainda não validado ponta-a-ponta (hoje
+aceita com `accept()` simples, cujos sockets não são RIO-capable). Usa polling
+direto sobre um buffer de conclusão compartilhado com o kernel; buffers
+pré-registrados via `RIORegisterBuffer`.
 
 Características:
 - Uma CQ dedicada por worker thread — sem contenção cross-thread
 - Buffers de send/recv pré-registrados (512 × 32 KB cada) — zero-copy de userspace para kernel
 - Batch dequeue de até 256 completions por chamada
-- Latência p99 inferior ao IOCP em cargas de alta conexão simultânea
-
-**IOCP — I/O Completion Ports (Windows, fallback)**
-
-Backend padrão do Windows quando RIO não está disponível (ex.: VM sem suporte
-ao recurso). Usa a API clássica de completion ports. Totalmente suportado em
-todas as versões do Windows a partir do XP.
 
 **io_uring (Linux, preferido, kernel ≥ 5.1)**
 
@@ -96,9 +95,7 @@ para garantir processamento exclusivo por um único worker.
 A seleção ocorre uma única vez na inicialização, no constructor de
 `TPoseidonNativeServer`. Não há decisão de backend por requisição.
 
-Ordem de preferência no Windows:
-1. RIO (se disponível no SO)
-2. IOCP (fallback)
+No Windows: **IOCP por padrão**; RIO é opt-in via `FORCE_RIO`.
 
 Ordem de preferência no Linux:
 1. io_uring (se `io_uring_setup` syscall 425 retornar sucesso)
@@ -108,7 +105,7 @@ Para forçar um backend específico, use as defines de compilação:
 
 | Define | Efeito |
 |--------|--------|
-| `FORCE_IOCP` | Pula RIO e usa IOCP diretamente (Windows) |
+| `FORCE_RIO` | Opta pelo RIO no Windows (senão, IOCP é o padrão) |
 | `FORCE_EPOLL` | Pula io_uring e usa epoll diretamente (Linux) |
 
 Exemplo no `.dproj` ou linha de compilação:
@@ -117,15 +114,9 @@ Exemplo no `.dproj` ou linha de compilação:
 dcc64 MeuApp.dpr -dFORCE_EPOLL
 ```
 
-Ou via `Project > Options > Delphi Compiler > Conditional defines`:
-
-```
-FORCE_IOCP
-```
-
 Use `FORCE_EPOLL` em ambientes Linux onde io_uring está disponível mas restrito
-por seccomp (ex.: alguns runtimes de container). Use `FORCE_IOCP` para
-reproduzir comportamento de VM sem suporte a RIO.
+por seccomp (ex.: alguns runtimes de container). Use `FORCE_RIO` apenas onde o
+RIO estiver validado ponta-a-ponta.
 
 ## Veja também
 

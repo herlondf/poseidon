@@ -4,8 +4,8 @@ Poseidon uses native async I/O on all supported platforms:
 
 | Platform | Mechanism | Selection |
 |----------|-----------|-----------|
-| Windows 64-bit (primary) | **RIO** (Registered I/O) | automatic (preferred) |
-| Windows 64-bit (fallback) | IOCP (I/O Completion Ports) | automatic or `FORCE_IOCP` |
+| Windows 64-bit (default) | **IOCP** (I/O Completion Ports) | automatic |
+| Windows 64-bit (opt-in) | RIO (Registered I/O) | `FORCE_RIO` |
 | Linux 64-bit — kernel >= 5.1 | **io_uring** | automatic (preferred) |
 | Linux 64-bit — kernel < 5.1 | epoll(7) + `EPOLLONESHOT` | automatic fallback or `FORCE_EPOLL` |
 
@@ -23,10 +23,23 @@ from the selection.
 
 ---
 
-## Windows: RIO (primary)
+## Windows: IOCP (default)
 
-Registered I/O (`mswsock.h`, available since Windows 8 / Server 2012) provides
-the lowest-overhead path on Windows:
+IOCP is the **default and validated** Windows backend.
+
+`WSARecv` and `WSASend` are posted with an `OVERLAPPED` structure. When the OS
+completes the operation it posts a completion packet to the IOCP handle. Worker
+threads call `GetQueuedCompletionStatus` in a loop and dispatch accordingly.
+Accept uses `AcceptEx` (with a `mswsock.dll` static fallback when
+`WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)` is refused by an intercepting
+Winsock provider), and recycled sockets are reused via `DisconnectEx`.
+
+## Windows: RIO (opt-in via FORCE_RIO)
+
+Registered I/O (`mswsock.h`, available since Windows 8 / Server 2012) is a
+lower-overhead path, but it is **opt-in** (`{$DEFINE FORCE_RIO}`) and not yet
+validated end-to-end (it currently accepts with a plain `accept()`, whose
+sockets are not RIO-capable). It provides:
 
 - **Pre-registered buffers** — receive and send buffers are registered with the
   kernel once at startup (`RIORegisterBuffer`). The kernel reads and writes
@@ -43,19 +56,10 @@ Poseidon creates one RIO completion queue and one IOCP per worker thread.
 `PostRecv` submits a `RIO_BUF` pointing into the pre-registered buffer pool;
 `PostSend` does the same for the outgoing side.
 
-## Windows: IOCP (fallback)
-
-Used automatically when RIO is unavailable, or when the `FORCE_IOCP` define is
-set at compile time.
-
-`WSARecv` and `WSASend` are posted with an `OVERLAPPED` structure. When the OS
-completes the operation it posts a completion packet to the IOCP handle.
-Worker threads call `GetQueuedCompletionStatus` in a loop and dispatch accordingly.
-
-To force IOCP and skip RIO:
+To opt into RIO (only where it is validated to serve end-to-end):
 
 ```pascal
-{$DEFINE FORCE_IOCP}
+{$DEFINE FORCE_RIO}
 ```
 
 ---
@@ -109,8 +113,8 @@ Used automatically when `io_uring_setup` (syscall 425) returns `ENOSYS` or
 
 | Compile-time define | Windows result | Linux result |
 |---------------------|---------------|--------------|
-| (none) | RIO if available, else IOCP | io_uring if available, else epoll |
-| `FORCE_IOCP` | IOCP | (no effect) |
+| (none) | IOCP | io_uring if available, else epoll |
+| `FORCE_RIO` | RIO if available, else IOCP | (no effect) |
 | `FORCE_EPOLL` | (no effect) | epoll |
 
 Selection happens once at construction. Changing the define requires
