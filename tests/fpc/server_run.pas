@@ -125,17 +125,13 @@ begin
     // procedure-of-object overload (not the reference-to one).
     GHandler := GHandlers.Ping;
     GApp.Get('/ping', GHandler);
-    // FPC/Win64 runs in SyncDispatch mode (inline dispatch on the IO thread).
-    // The async worker-pool path posts a capturing anonymous method per request;
-    // FPC 3.3.1 (trunk) AVs constructing the FIRST such closure (a compiler
-    // codegen bug, not a Poseidon bug), though every subsequent one works.
-    // SyncDispatch — the v2 high-performance mode — uses no closures and is
-    // clean under FPC. See docs playbook FPC notes.
-    GApp.SyncDispatch := True;
+    // No dispatch mode set here: under FPC the server defaults to SyncDispatch
+    // (inline dispatch), which is clean. The async worker-pool path is
+    // best-effort under FPC (compiler closure/threading bugs).
 
     GThread := TListenThread.Create(GApp);
     try
-      // 404 path FIRST (warmup) — a route that was never registered.
+      // 404 path FIRST — a route that was never registered.
       GStatus := 0;
       GClient := TFPHTTPClient.Create(nil);
       try

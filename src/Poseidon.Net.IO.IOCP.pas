@@ -244,6 +244,25 @@ type
 // TIOCPBackend
 // ---------------------------------------------------------------------------
 
+{$IFDEF FPC}
+// FPC: IOCP workers are TThread subclasses, not CreateAnonymousThread. Threads
+// created via CreateAnonymousThread under FPC 3.3.1 have an incomplete RTL
+// context: the FIRST object/closure CONSTRUCTED on such a thread (e.g. the
+// per-request dispatch job) access-violates. A real TThread subclass gets full
+// per-thread init, so constructions on it work. Delphi keeps the anonymous form.
+type
+  TFPCIocpWorker = class(TThread)
+  public
+    Backend: TIOCPBackend;
+    procedure Execute; override;
+  end;
+
+procedure TFPCIocpWorker.Execute;
+begin
+  Backend._WorkerLoop;
+end;
+{$ENDIF}
+
 constructor TIOCPBackend.Create;
 begin
   inherited Create;
@@ -395,7 +414,14 @@ begin
 
   SetLength(FWorkers, AWorkerCount);
   for I := 0 to AWorkerCount - 1 do
+  {$IFDEF FPC}
+  begin
+    FWorkers[I] := TFPCIocpWorker.Create(True);  // suspended; started below
+    TFPCIocpWorker(FWorkers[I]).Backend := Self;
+  end;
+  {$ELSE}
     FWorkers[I] := TThread.CreateAnonymousThread(procedure begin _WorkerLoop; end);
+  {$ENDIF}
   for I := 0 to AWorkerCount - 1 do
   begin
     FWorkers[I].FreeOnTerminate := False;

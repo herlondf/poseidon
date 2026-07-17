@@ -59,7 +59,17 @@ uses
   {$ENDIF}
 
 type
+  {$IFDEF FPC}
+  // FPC: a plain method pointer (procedure of object), NOT a function reference.
+  // Callers post `SomeObject.Method`, which binds the object BY VALUE — no
+  // capture frame. FPC 3.3.1's function-reference adaptation of a method AVs
+  // when built on an IOCP worker thread and, worse, captures the caller's local
+  // variable by reference (garbage after it returns). A method pointer sidesteps
+  // both. Delphi keeps `reference to procedure` (it posts anonymous methods).
+  TElasticWorkItem = procedure of object;
+  {$ELSE}
   TElasticWorkItem = reference to procedure;
+  {$ENDIF}
 
   TElasticWorkerPool = class
   private type
@@ -157,7 +167,36 @@ begin
   inherited Destroy;
 end;
 
+{$IFDEF FPC}
+// FPC: a TThread subclass instead of CreateAnonymousThread(closure). _SpawnWorker
+// runs from Post on an IOCP worker thread; FPC 3.3.1 AVs constructing a capturing
+// closure there. A subclass carries the deque index in a field — no closure.
+type
+  TFPCPoolWorker = class(TThread)
+  public
+    Pool: TElasticWorkerPool;
+    DequeIdx: Integer;
+    procedure Execute; override;
+  end;
+
+procedure TFPCPoolWorker.Execute;
+begin
+  Pool._WorkerLoop(DequeIdx);
+end;
+{$ENDIF}
+
 procedure TElasticWorkerPool._SpawnWorker(ADequeIdx: Integer);
+{$IFDEF FPC}
+var
+  LWorker: TFPCPoolWorker;
+begin
+  LWorker := TFPCPoolWorker.Create(True);  // suspended: set fields before running
+  LWorker.Pool := Self;
+  LWorker.DequeIdx := ADequeIdx;
+  LWorker.FreeOnTerminate := True;
+  LWorker.Start;
+end;
+{$ELSE}
 var
   LIdx: Integer;
   LThread: TThread;
@@ -168,6 +207,7 @@ begin
   LThread.FreeOnTerminate := True;
   LThread.Start;
 end;
+{$ENDIF}
 
 function TElasticWorkerPool._TrySteal(AMyIdx: Integer; out AWrapper: TWorkWrapper): Boolean;
 var

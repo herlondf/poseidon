@@ -723,6 +723,40 @@ begin
   Inc(LConn.AccumLen, ALen);
 end;
 
+{$IFDEF FPC}
+// FPC async dispatch job. The Delphi build posts a capturing anonymous method
+// to the worker pool; FPC 3.3.1 (trunk) AVs when that closure is constructed on
+// an IOCP worker thread (a compiler codegen bug). This heap job carries the
+// same state in explicit fields and is posted as a plain method reference —
+// no capture — sidestepping the bug. It frees itself when the work completes.
+type
+  TFPCDispatchJob = class
+  public
+    Server: TPoseidonNativeServer;
+    Conn:   Pointer;
+    Cfg:    TDispatchConfig;
+    procedure Execute;
+  end;
+
+procedure TFPCDispatchJob.Execute;
+begin
+  try
+    TNativeConn(Conn).LastActivityTick := TThread.GetTickCount64;
+    TNativeConn(Conn).Lock.Enter;
+    try
+      Server.FDispatcher.Dispatch(Conn, Cfg);
+    finally
+      TNativeConn(Conn).Lock.Leave;
+    end;
+  finally
+    TInterlocked.Decrement(Server.FInFlightCount);
+    TInterlocked.Decrement(TNativeConn(Conn).InFlightPool);
+    TNativeConn(Conn).Release;
+    Free;
+  end;
+end;
+{$ENDIF}
+
 procedure TPoseidonNativeServer._DispatchAccumBuf(AConn: Pointer);
 // Builds a TDispatchConfig snapshot and posts request handling to the elastic
 // worker pool. IO workers return immediately to process more I/O events.
@@ -736,6 +770,9 @@ procedure TPoseidonNativeServer._DispatchAccumBuf(AConn: Pointer);
 var
   LCfg:  TDispatchConfig;
   LResp: TBytes;
+{$IFDEF FPC}
+  LJob:  TFPCDispatchJob;
+{$ENDIF}
 begin
   // R-5: pre-queue backpressure — reject with 503 before queuing when the
   // number of in-flight (queued + executing) tasks reaches MaxQueueDepth.
@@ -785,6 +822,16 @@ begin
   // starts — prevents queue-wait time from counting toward the idle timeout.
   TInterlocked.Increment(TNativeConn(AConn).InFlightPool);
   TNativeConn(AConn).AddRef;
+{$IFDEF FPC}
+  // FPC: post a non-capturing method (heap job) — see TFPCDispatchJob. The job
+  // owns the same teardown (Decrement FInFlightCount/InFlightPool, Release) and
+  // frees itself. AddRef above keeps LConn alive until the job's Release.
+  LJob := TFPCDispatchJob.Create;
+  LJob.Server := Self;
+  LJob.Conn   := AConn;
+  LJob.Cfg    := LCfg;
+  FRequestPool.Post(LJob.Execute);
+{$ELSE}
   FRequestPool.Post(
     procedure
     begin
@@ -806,6 +853,7 @@ begin
         TNativeConn(AConn).Release;
       end;
     end);
+{$ENDIF}
 end;
 
 procedure TPoseidonNativeServer._ProcessRecv(AConn: Pointer;
@@ -958,7 +1006,17 @@ begin
   FServerBanner := 'Poseidon/1.0';
   FTCPFastOpen := False;
   FPerCoreAccept := False;
+  // FPC defaults to SyncDispatch (inline dispatch on the IO thread). The async
+  // worker-pool path relies on FPC 3.3.1 (trunk) function-reference/anonymous-
+  // method machinery whose closure codegen and thread-startup ordering are
+  // buggy under FPC; SyncDispatch — the v2 high-performance mode — uses neither
+  // and runs clean. Delphi keeps async by default. FPC callers can still opt
+  // into async via SyncDispatch := False (best-effort under current FPC).
+  {$IFDEF FPC}
+  FSyncDispatch := True;
+  {$ELSE}
   FSyncDispatch := False;
+  {$ENDIF}
   FProxyProtocol := ppDisabled;
   FWSManager := TWebSocketManager.Create(
     procedure(AConn: Pointer; const AData: TBytes) begin _EncryptAndSend(AConn, AData); end,
@@ -1336,7 +1394,5 @@ begin
   // R-1: wake the drain event so Stop() can proceed without polling
   if Assigned(FDrainEvent) then FDrainEvent.SetEvent;
 end;
-
-
 
 end.
