@@ -80,6 +80,7 @@ type
     FTCPFastOpen: Boolean;
     FPerCoreAccept: Boolean;
     FSyncDispatch: Boolean;
+    FFastPath: Boolean;
     FProxyProtocol: TProxyProtocolMode;
     FTrustedProxies: TArray<string>;
     FIOBackend: IIOBackend;
@@ -88,6 +89,7 @@ type
     FSSLProvider: ISSLProvider;
 
     procedure SetSyncDispatch(AValue: Boolean);
+    procedure SetFastPath(AValue: Boolean);
     function  GetMaxConnections: Integer;
     procedure SetMaxConnections(AValue: Integer);
     function  GetMaxConnectionsPerIP: Integer;
@@ -210,16 +212,24 @@ type
     // across sockets via source IP/port hash. Default False (single accept).
     // On Windows: ignored (IOCP handles distribution internally).
     property PerCoreAccept: Boolean read FPerCoreAccept write FPerCoreAccept;
-    // SyncDispatch: execute request handlers directly on IO threads instead of
-    // posting to the elastic worker pool. Eliminates thread-transition overhead
-    // (~50-100us per request) but BLOCKS the IO thread during handler execution.
-    // Only enable when handlers are non-blocking (no DB, no file I/O, no Sleep).
-    // Default False (async worker pool).
-    // NOTE: the SyncDispatch pipeline is the lightweight parser path, which does
-    // NOT perform WebSocket / HTTP-2 (h2c) upgrade detection. Enable SyncDispatch
-    // only for plain HTTP/1.1 request-response workloads; leave it False when the
-    // server must accept WebSocket or h2c upgrades (issue #165).
+    // SyncDispatch: execute request handlers directly on the IO/completion thread
+    // instead of posting to the elastic worker pool. Eliminates the
+    // completion<->pool hand-off (~2x throughput on the multi-ring io_uring
+    // backend) but BLOCKS that thread during handler execution — enable ONLY when
+    // handlers are non-blocking (no DB, no file I/O, no Sleep). Default False
+    // (async worker pool; safe for blocking handlers).
+    // Orthogonal to FastPath: SyncDispatch chooses WHERE the pipeline runs
+    // (inline vs pool); FastPath chooses WHICH pipeline (full vs lightweight).
+    // With FastPath=False (default) the FULL pipeline runs, so WebSocket / h2c
+    // upgrades, access logging and security headers all work under SyncDispatch.
     property SyncDispatch: Boolean read FSyncDispatch write SetSyncDispatch;
+    // FastPath: use the lightweight dispatch pipeline (minimal parse, no header
+    // materialization, no logging/security headers, NO WebSocket/h2c upgrade
+    // detection). Squeezes out the last ~10-20% for pure HTTP/1.1
+    // request-response workloads that never upgrade. Default False (full
+    // pipeline). Must be set before Listen(). Combine with SyncDispatch for the
+    // maximum-throughput plain-HTTP path.
+    property FastPath: Boolean read FFastPath write SetFastPath;
     // Proxy Protocol: ppDisabled (default) disables PP processing.
     // ppV1/ppV2: enforce a specific version. ppAuto: detect by signature.
     // Enable only when the server receives connections exclusively from a
@@ -969,19 +979,31 @@ procedure TPoseidonNativeServer.SetSyncDispatch(AValue: Boolean);
 begin
   if FSyncDispatch = AValue then
     Exit;
-  // Guard: swapping FDispatcher under traffic is a UAF — a worker may still
-  // be dereferencing the old dispatcher. Deny the change once the server is
-  // active; caller must set SyncDispatch before Listen().
+  // SyncDispatch only chooses inline vs pool at dispatch time; it does not change
+  // the pipeline object, so no rebuild is needed. Still deny the change under
+  // traffic — a request may be mid-dispatch on the old routing.
   if FActive then
     raise Exception.Create(
       'TPoseidonNativeServer: SyncDispatch cannot be changed while active');
   FSyncDispatch := AValue;
-  // Rebuild pipeline — lightweight vs full is baked into the step array
+end;
+
+procedure TPoseidonNativeServer.SetFastPath(AValue: Boolean);
+begin
+  if FFastPath = AValue then
+    Exit;
+  // FastPath selects the pipeline (lightweight vs full), baked into the step
+  // array at construction — rebuild the dispatcher. Swapping FDispatcher under
+  // traffic is a UAF (a worker may still deref the old one), so deny while active.
+  if FActive then
+    raise Exception.Create(
+      'TPoseidonNativeServer: FastPath cannot be changed while active');
+  FFastPath := AValue;
   if FDispatcher <> nil then
   begin
     FreeAndNil(FDispatcher);
     FDispatcher := TProtocolDispatcher.Create(
-      TServerDispatchAdapter.Create(Self), FSyncDispatch);
+      TServerDispatchAdapter.Create(Self), FFastPath);
   end;
 end;
 
@@ -1017,6 +1039,7 @@ begin
   {$ELSE}
   FSyncDispatch := False;
   {$ENDIF}
+  FFastPath := False;  // full pipeline by default (upgrades/logging/security)
   FProxyProtocol := ppDisabled;
   FWSManager := TWebSocketManager.Create(
     procedure(AConn: Pointer; const AData: TBytes) begin _EncryptAndSend(AConn, AData); end,
@@ -1029,7 +1052,7 @@ begin
     procedure(AConn: Pointer; const AData: TBytes) begin _EncryptAndSend(AConn, AData); end,
     procedure(AConn: Pointer) begin _CloseConn(AConn); end,
     procedure(AConn: Pointer) begin _PostRecv(AConn); end);
-  FDispatcher := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self), FSyncDispatch);
+  FDispatcher := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self), FFastPath);
   // Create platform IO backend — ONLY {$IFDEF} remaining in HttpServer.
   // Windows: IOCP by default (AcceptEx + SO_UPDATE_ACCEPT_CONTEXT + WSARecv;
   //   loads AcceptEx via WSAIoctl with a static mswsock fallback, so it works
@@ -1168,6 +1191,8 @@ begin
     LAcceptN := TThread.ProcessorCount
   else
     LAcceptN := 1;
+  // Inline dispatch (SyncDispatch) lets the io_uring backend batch SQE submits.
+  FIOBackend.SetInlineDispatch(FSyncDispatch);
   FIOBackend.StartListening(AHost, APort, LIOWorkers, FTCPFastOpen,
     TServerIOAdapter.Create(Self), LAcceptN);
 

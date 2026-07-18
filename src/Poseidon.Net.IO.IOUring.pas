@@ -136,6 +136,7 @@ type
     FCallbacks: IIOCallbacks;
     FShutdown: Int64;  // 0=running, 1=shutdown; atomic via TInterlocked (Read requires Int64)
     FSendZC: Boolean;
+    FBatchSubmit: Boolean;  // batch SQE submits on the completion thread (SyncDispatch)
     FHost: string;
     FPort: Integer;
     FFastOpen: Boolean;
@@ -154,6 +155,7 @@ type
     constructor Create;
     destructor Destroy; override;
     // IIOBackend
+    procedure SetInlineDispatch(AEnabled: Boolean);
     procedure StartListening(const AHost: string; APort: Integer;
       AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
       AAcceptThreads: Integer = 1);
@@ -241,6 +243,11 @@ const
   CRecvBufSize = 32768;
   CRingEntries = 512;
   CCQEntries = 2048;
+  // Zero-copy SEND (IORING_OP_SEND_ZC) only pays off above this payload size:
+  // it costs a page-pin + TWO CQEs (result + notification) per send, so for the
+  // small plaintext/json responses a plain IORING_OP_SEND (one CQE, kernel copy)
+  // is cheaper. Below the threshold we use the regular send path.
+  CSendZCThreshold = 16384;
   // Log once when a ring's multishot accept has failed this many times in a row
   // (e.g. sustained EMFILE / fd exhaustion) — surfaces the condition without
   // spamming stderr on every re-arm.
@@ -368,6 +375,14 @@ threadvar
   // TIOUringBackend.RegisterConn to pin the new connection to that ring.
   // Mirrors TEpollBackend's GCurrentEpollFd.
   GCurrentRingIdx: Integer;
+
+  // Non-nil while THIS thread is inside its own ring's _CompletionLoop drain.
+  // _NotifyKernel then DEFERS the io_uring_enter: the queued SQEs ride the next
+  // io_uring_enter(GETEVENTS) at the top of the loop, so one syscall both submits
+  // the batch and waits for completions — instead of one enter per PostSend/
+  // PostRecv. Submissions from other threads (async worker pool) see nil here and
+  // submit immediately, as before.
+  GDrainRing: TUringRing;
 
 // ---------------------------------------------------------------------------
 // Syscall wrappers
@@ -700,7 +715,10 @@ begin
   FSQLock.Acquire;
   try
     _SubmitSQE(IORING_OP_NOP, -1, nil, 0, CUdShutdown);
-    _io_uring_enter(FRingFd, 1, 0, 0);
+    // Submit ALL queued SQEs (the batched completion loop may have deferred some)
+    // so the shutdown NOP is guaranteed to reach the kernel and wake the thread.
+    _io_uring_enter(FRingFd, UInt32(FPendingSQEs), 0, 0);
+    FPendingSQEs := 0;
   finally
     FSQLock.Release;
   end;
@@ -849,6 +867,11 @@ procedure TUringRing._NotifyKernel;
 var
   LPending: Integer;
 begin
+  // Batched path: called on this ring's completion thread mid-drain — leave the
+  // SQEs queued; the loop's next io_uring_enter(GETEVENTS) submits them in one
+  // syscall together with the wait. (FPendingSQEs stays as-is.)
+  if GDrainRing = Self then
+    Exit;
   LPending := FPendingSQEs;
   if LPending <= 0 then
     LPending := 1;
@@ -909,32 +932,49 @@ procedure TUringRing._CompletionLoop;
 var
   LHead, LTail, LMask: UInt32;
   LCQE: PIOUringCQE;
+  LToSubmit: Integer;
 begin
   // Stamp this thread's ring index so RegisterConn (invoked from OnNewConn while
   // this thread processes a multishot-accept CQE) pins the connection here.
   GCurrentRingIdx := FIdx;
-  while TInterlocked.Read(FBackend.FShutdown) = 0 do
-  begin
-    _io_uring_enter(FRingFd, 0, 1, IORING_ENTER_GETEVENTS);
-
-    LMask := FPCQMask^;
-    LHead := FPCQHead^;
-    LTail := FPCQTail^;
-
-    // Batch CQ head update — process all CQEs, then advance head once.
-    while LHead <> LTail do
+  // Mark this thread as its ring's drain thread so _NotifyKernel defers submits
+  // into the batched io_uring_enter below — only under inline dispatch (see
+  // SetInlineDispatch). Under the async pool GDrainRing stays nil (no batching).
+  if FBackend.FBatchSubmit then
+    GDrainRing := Self;
+  try
+    while TInterlocked.Read(FBackend.FShutdown) = 0 do
     begin
-      LCQE := PIOUringCQE(PByte(FPCQEs) +
-        NativeUInt(LHead and LMask) * SizeOf(TIOUringCQE));
-      try
-        FBackend._ProcessCQE(Self, LCQE^.user_data, LCQE^.res, LCQE^.flags);
-      except
-        on E: Exception do
-          Writeln(ErrOutput, '[io_uring] CQE_EX [', E.ClassName, ']: ', E.Message);
+      // One syscall: submit SQEs queued by the previous drain AND wait for the
+      // next batch of completions. Read+clear FPendingSQEs under the lock (fast),
+      // then enter WITHOUT the lock so the blocking wait never holds it.
+      FSQLock.Acquire;
+      LToSubmit := FPendingSQEs;
+      FPendingSQEs := 0;
+      FSQLock.Release;
+      _io_uring_enter(FRingFd, UInt32(LToSubmit), 1, IORING_ENTER_GETEVENTS);
+
+      LMask := FPCQMask^;
+      LHead := FPCQHead^;
+      LTail := FPCQTail^;
+
+      // Batch CQ head update — process all CQEs, then advance head once.
+      while LHead <> LTail do
+      begin
+        LCQE := PIOUringCQE(PByte(FPCQEs) +
+          NativeUInt(LHead and LMask) * SizeOf(TIOUringCQE));
+        try
+          FBackend._ProcessCQE(Self, LCQE^.user_data, LCQE^.res, LCQE^.flags);
+        except
+          on E: Exception do
+            Writeln(ErrOutput, '[io_uring] CQE_EX [', E.ClassName, ']: ', E.Message);
+        end;
+        Inc(LHead);
       end;
-      Inc(LHead);
+      FPCQHead^ := LHead;
     end;
-    FPCQHead^ := LHead;
+  finally
+    GDrainRing := nil;
   end;
 end;
 
@@ -1103,6 +1143,17 @@ end;
 // IIOBackend — lifecycle
 // ---------------------------------------------------------------------------
 
+procedure TIOUringBackend.SetInlineDispatch(AEnabled: Boolean);
+begin
+  // Submission batching is only correct when the thread that submits SQEs (via
+  // PostSend/PostRecv during dispatch) IS the completion thread — i.e. inline
+  // SyncDispatch. Under the async worker pool, sends are submitted from pool
+  // threads and only the completion thread's own re-arms/resubmits would be
+  // batched; that path interacts badly with large fragmented WebSocket sends
+  // (Autobahn 9.5/9.6), so keep batching off unless dispatch is inline.
+  FBatchSubmit := AEnabled;
+end;
+
 procedure TIOUringBackend.StartListening(const AHost: string; APort: Integer;
   AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
   AAcceptThreads: Integer);
@@ -1269,7 +1320,7 @@ begin
     Exit;
   end;
 
-  if FSendZC then
+  if FSendZC and (LSendLen >= CSendZCThreshold) then
   begin
     // Zero-copy send: kernel DMAs directly from user buffer.
     // Two CQEs per op: result (proceed) + notification (buffer safe to free).
@@ -1332,6 +1383,21 @@ begin
     Exit;
   end;
 
+  // Fast path: the headers buffer is a pooled tier buffer (typically 8 KB) with
+  // only ~100 bytes used, so a small body fits after it. Append it in place and
+  // send the SAME buffer — no extra Acquire, no copy of the header bytes. This is
+  // the common plaintext/json case. (io_uring SEND takes one contiguous buffer,
+  // so we can't scatter-gather like epoll's writev.)
+  if (LHLen + LBLen <= Length(AHeaders)) then
+  begin
+    if LBLen > 0 then Move(ABody[0], AHeaders[LHLen], LBLen);
+    LTmpB := ABody; TBufferPool.Release(LTmpB);  // body copied out; headers buffer is handed to PostSend
+    PostSend(AConn, AHeaders, LHLen + LBLen);
+    Exit;
+  end;
+
+  // Slow path: body too big to append (e.g. json-large) — concatenate into a
+  // fresh buffer sized for the total.
   LConcat := TBufferPool.Acquire(LHLen + LBLen);
   if LHLen > 0 then Move(AHeaders[0], LConcat[0], LHLen);
   if LBLen > 0 then Move(ABody[0], LConcat[LHLen], LBLen);
@@ -1345,12 +1411,37 @@ end;
 procedure TIOUringBackend.SocketClose(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
+  LRing: TUringRing;
   LSock: Integer;
 begin
   // #173: invalidate the conn's fd copy before closing (kernel reuses fds).
   LSock := LConn.Socket;
   LConn.Socket := -1;
-  FRings[LConn.OwnerRingIdx]._UnregisterFd(LSock);
+  LRing := FRings[LConn.OwnerRingIdx];
+
+  // Batching + close ordering: if we are on this ring's completion thread with
+  // SQEs still queued (e.g. an h2 error path just deferred a GOAWAY send and now
+  // closes the connection in the same drain), flush them to the kernel BEFORE
+  // closing the fd. Otherwise the deferred send would target an already-closed
+  // socket and the final frame (GOAWAY / RST_STREAM) would be lost — h2spec
+  // 6.9.1 "WINDOW_UPDATE above 2^31-1". The kernel copies the small control
+  // frame into the socket send buffer at submit time, so the subsequent
+  // shutdown(SHUT_WR) still flushes it out ahead of the FIN.
+  if GDrainRing = LRing then
+  begin
+    LRing.FSQLock.Acquire;
+    try
+      if LRing.FPendingSQEs > 0 then
+      begin
+        _io_uring_enter(LRing.FRingFd, UInt32(LRing.FPendingSQEs), 0, 0);
+        LRing.FPendingSQEs := 0;
+      end;
+    finally
+      LRing.FSQLock.Release;
+    end;
+  end;
+
+  LRing._UnregisterFd(LSock);
   // TCP half-close — FIN before full teardown so the client reads pending bytes
   shutdown(LSock, SHUT_WR);
   _LinuxClose(LSock);
