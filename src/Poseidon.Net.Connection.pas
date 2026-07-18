@@ -79,6 +79,13 @@ type
     PendingSendActual: Integer;
     SentBytes: Integer;
     OwnerEpollFd: Integer;
+    // io_uring multi-ring: index of the ring (completion thread + SQ) this
+    // connection is pinned to. Set in TIOUringBackend.RegisterConn from the
+    // GCurrentRingIdx threadvar (stamped by the accepting ring's accept thread),
+    // then read by every PostRecv/PostSend/_ResubmitSend/SocketClose so a
+    // connection's SQEs always go to the ring whose completion thread owns it —
+    // the epoll OwnerEpollFd model. Unused by the epoll backend.
+    OwnerRingIdx: Integer;
     // #11: io_uring send serialization. TLS requires strict byte ordering, but
     // io_uring does NOT order independent SEND SQEs — several frames in one
     // dispatch would submit concurrent sends that interleave on the wire ->
@@ -142,6 +149,7 @@ begin
   PPParsed := False;
 {$IFNDEF MSWINDOWS}
   OwnerEpollFd := -1;
+  OwnerRingIdx := 0;  // valid default ring; overwritten by RegisterConn
 {$ENDIF}
 end;
 

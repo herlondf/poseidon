@@ -1,6 +1,6 @@
 unit Poseidon.Net.IO.IOUring;
 
-// TIOUringBackend — Linux io_uring backend.
+// TIOUringBackend — Linux io_uring backend (shared-nothing, N rings).
 //
 // Requires Linux kernel 5.1+ (io_uring_setup / syscall 425).
 // Constructor raises ENotSupportedException if the syscall is unavailable
@@ -8,22 +8,37 @@ unit Poseidon.Net.IO.IOUring;
 // TPoseidonNativeServer falls back to TEpollBackend at runtime with zero
 // per-request overhead (the FIOBackend vtable pointer is set once at Create).
 //
-// Architecture:
-//   Accept thread     — plain accept4() loop, identical to TEpollBackend.
-//   Completion thread — single thread: io_uring_enter(IORING_ENTER_GETEVENTS)
-//                       then drains all available CQEs and dispatches
-//                       OnRecv / OnSendComplete / OnConnError directly.
-//   Submission        — PostRecv / PostSend write SQEs under FSQLock then
-//                       notify the kernel via io_uring_enter(to_submit=1).
+// Architecture (shared-nothing per core — mirrors TEpollBackend):
+//   The backend owns N TUringRing objects (N = AWorkerCount, one per core).
+//   Each ring has:
+//     - its OWN io_uring instance (ring fd + SQ/CQ mmaps + SQE array),
+//     - its OWN listen socket (SO_REUSEPORT — kernel hashes new connections
+//       across the N sockets, spreading load with zero userspace coordination),
+//     - one accept thread (accept4() loop) that stamps GCurrentRingIdx = ring
+//       index before OnNewConn, so RegisterConn pins the connection to it,
+//     - one completion thread that drains that ring's CQEs and dispatches
+//       OnRecv / OnSendComplete / OnConnError.
+//   A connection is pinned to a ring for life (TNativeConn.OwnerRingIdx); every
+//   PostRecv / PostSend / _ResubmitSend / SocketClose submits SQEs to THAT
+//   ring's SQ. Recv, handler (SyncDispatch), and send-submit for a given
+//   connection therefore all run on that ring's single completion thread — no
+//   cross-ring locking, and N rings drive N cores in parallel. This replaces
+//   the previous single-ring / single-completion-thread design, whose one
+//   thread serialized every connection and capped throughput at ~2 cores.
+//
+//   SQPOLL is intentionally NOT used: one kernel poller thread per ring would
+//   compete with the completion threads for the same cores. Submission uses a
+//   plain io_uring_enter(to_submit=N) per batch.
 //
 // user_data encoding in SQEs / CQEs:
 //   Recv:     UInt64(PRecvCtx)              — bit 0 = 0 (pool-allocated, 8-byte aligned)
 //   Send:     UInt64(TNativeConn) or $1     — bit 0 = 1
+//   SendZC:   UInt64(PSendZCRef) or $3      — bits 0+1 = 1
 //   Shutdown: CUdShutdown = $FFFFFFFFFFFFFFFF
 //
-// v2 (#56): Recv contexts are pre-allocated in a contiguous pool (CRecvPoolSize
-// entries) at Create time, eliminating New/Dispose per recv operation.  Pool
-// exhaustion (should not happen — sized to CRingEntries) falls back to heap.
+// Recv contexts are pre-allocated per ring in a contiguous pool (CRecvPoolSize
+// entries) at StartListening time, eliminating New/Dispose per recv operation.
+// Pool exhaustion falls back to heap.
 
 {$IFNDEF MSWINDOWS}
 
@@ -52,8 +67,15 @@ uses
   Poseidon.Net.Pool.Buffer;
 
 type
-  TIOUringBackend = class(TInterfacedObject, IIOBackend)
-  private
+  TIOUringBackend = class;  // forward — TUringRing holds a back-pointer
+
+  // Per-ring state. One io_uring instance + one listen socket + one accept
+  // thread + one completion thread. See the unit header for the shared-nothing
+  // rationale. Same-unit code (TIOUringBackend) accesses these members directly.
+  TUringRing = class
+  public
+    FBackend: TIOUringBackend;
+    FIdx: Integer;
     FRingFd: Integer;
     FSQRing: Pointer;
     FCQRing: Pointer;
@@ -68,39 +90,57 @@ type
     FPCQTail: PUInt32;
     FPCQMask: PUInt32;
     FPCQEs: Pointer;
-    FAcceptThreads: TArray<TThread>;
-    FCompThread: TThread;
-    FCallbacks: IIOCallbacks;
-    FListenSockets: TArray<Integer>;
     FSQLock: TCriticalSection;
-    FShutdown: Int64;  // 0=running, 1=shutdown; atomic via TInterlocked (Read requires Int64)
-    FSQPoll: Boolean;
-    FPSQFlags: PUInt32;
-    FRecvCtxPool: Pointer;
-    FRecvFreeIdx: array of UInt16;
-    FRecvFreeTop: Integer;
-    FRecvPoolLock: TCriticalSection;
-    FRecvPoolBase: PByte;
-    FMultishotAccept: Boolean;
     FPendingSQEs: Integer;
+    FCompThread: TThread;
+    FListenSocket: Integer;
+    FAcceptThread: TThread;   // fallback only (kernel without multishot accept)
+    FMultishotAccept: Boolean; // True once this ring accepts via io_uring itself
+    FAcceptErrStreak: Integer; // consecutive multishot-accept errors (fd exhaustion watch)
+    // Registered files — per ring (io_uring registered fds are ring-local).
     FRegFiles: Boolean;
     FRegFds: array of Int32;
     FRegCount: Integer;
     FRegFreeStack: array of Integer;
     FRegFreeTop: Integer;
     FRegLock: TCriticalSection;
-    FSendZC: Boolean;
-    function _RegFileIndex(AFd: Integer): Integer;
-    function _RegisterFd(AFd: Integer): Integer;
+    // Pre-allocated recv-context pool — per ring.
+    FRecvCtxPool: Pointer;
+    FRecvFreeIdx: array of UInt16;
+    FRecvFreeTop: Integer;
+    FRecvPoolLock: TCriticalSection;
+    FRecvPoolBase: PByte;
+    constructor Create(ABackend: TIOUringBackend; AIdx: Integer);
+    destructor Destroy; override;
+    procedure SetupRing;       // io_uring_setup + mmap + reg-files init
+    procedure StartThreads;    // completion thread, then accept thread
+    procedure TeardownMaps;    // munmap rings + close ring fd (idempotent)
+    procedure SignalShutdown;  // post one NOP to wake the completion thread
+    function  _RegFileIndex(AFd: Integer): Integer;
+    function  _RegisterFd(AFd: Integer): Integer;
     procedure _UnregisterFd(AFd: Integer);
-    // helpers
-    procedure _AcceptOn(AListenFd: Integer);
-    function _MakeAcceptThread(AListenFd: Integer): TThread;
-    procedure _CompletionLoop;
+    function  _RecvPoolAcquire: Pointer;
+    procedure _RecvPoolRelease(ACtx: Pointer);
+    procedure _NotifyKernel;
     function  _SubmitSQE(AOpcode: Byte; AFd: Integer; ABuf: Pointer;
       ALen: UInt32; AUserData: UInt64; AFlags: Byte = 0): Boolean;
-    function  _SubmitAcceptMultishot(AListenFd: Integer): Boolean;
-    procedure _ProcessCQE(AUserData: UInt64; ARes: Int32; AFlags: UInt32);
+    function  _SubmitAcceptMultishot: Boolean;  // one SQE arms all future accepts
+    procedure _CompletionLoop;
+    procedure _AcceptLoop;
+  end;
+
+  TIOUringBackend = class(TInterfacedObject, IIOBackend)
+  private
+    FRings: TArray<TUringRing>;
+    FRingCount: Integer;
+    FCallbacks: IIOCallbacks;
+    FShutdown: Int64;  // 0=running, 1=shutdown; atomic via TInterlocked (Read requires Int64)
+    FSendZC: Boolean;
+    FHost: string;
+    FPort: Integer;
+    FFastOpen: Boolean;
+    function  _RingOf(AConn: TNativeConn): TUringRing; inline;
+    function  _CreateListenSocket: Integer;
     procedure _ResubmitSend(AConn: TNativeConn; AAsync: Boolean = False);
     // #11: per-connection send serialization (see TNativeConn.SendInFlight).
     // _BeginSend returns True if the caller should submit AData now, False if it
@@ -108,9 +148,8 @@ type
     // the next queued chunk and returns True, or marks the conn idle -> False.
     function  _BeginSend(AConn: TNativeConn; const AData: TBytes; ALen: Integer): Boolean;
     function  _KickNextSend(AConn: TNativeConn): Boolean;
-    function  _RecvPoolAcquire: Pointer;
-    procedure _RecvPoolRelease(ACtx: Pointer);
-    procedure _NotifyKernel;
+    procedure _ProcessCQE(ARing: TUringRing; AUserData: UInt64; ARes: Int32;
+      AFlags: UInt32);
   public
     constructor Create;
     destructor Destroy; override;
@@ -145,15 +184,9 @@ const
 
   // io_uring_enter flags
   IORING_ENTER_GETEVENTS = UInt32(1);
-  IORING_ENTER_SQ_WAKEUP = UInt32(2);
 
   // io_uring_setup flags
-  IORING_SETUP_SQPOLL = UInt32(2);
   IORING_SETUP_CQSIZE = UInt32($200);
-  IORING_SETUP_CLAMP = UInt32($10);
-
-  // SQ ring flags (read from sq_off.flags at runtime)
-  IORING_SQ_NEED_WAKEUP = UInt32(1);
 
   // io_uring feature flags (returned in params.features)
   IORING_FEAT_SINGLE_MMAP = UInt32($0001);
@@ -165,7 +198,7 @@ const
   IORING_OP_RECV = Byte(22);
   IORING_OP_SEND = Byte(23);
 
-  IOSQE_ACCEPT_MULTISHOT = UInt16(1 shl 0);
+  IOSQE_ACCEPT_MULTISHOT = UInt16(1 shl 0);  // ioprio flag: keep accepting
 
   // SQE flags
   IOSQE_FIXED_FILE = Byte(1 shl 0);
@@ -190,23 +223,12 @@ const
   IORING_CQE_F_NOTIF = UInt32(1 shl 2);
   CUdTagSendZC = UInt64(3);
 
-  // Provided buffer rings (kernel 5.19+) / multishot recv (kernel 6.0+)
-  IORING_REGISTER_PBUF_RING = UInt32(22);
-  IOSQE_BUFFER_SELECT = Byte(1 shl 3);
-  IORING_CQE_F_BUFFER = UInt32(1 shl 0);
-  IORING_RECV_MULTISHOT = UInt16(2);
-
-  CRecvBufSize = 32768;
-  CRingEntries = 512;
-  CCQEntries = 2048;
-  CRecvPoolSize = CRingEntries;
-
   // io_uring_register opcodes
   IORING_REGISTER_FILES = UInt32(2);
   IORING_REGISTER_FILES_UPDATE = UInt32(6);
   IORING_REGISTER_PROBE = UInt32(8);
 
-  CRegFilesMax = 4096;  // max registered fd slots
+  CRegFilesMax = 4096;  // max registered fd slots per ring
 
   // io_uring_probe_op flag — op is supported by this kernel
   IO_URING_OP_SUPPORTED = UInt16(1);
@@ -215,7 +237,19 @@ const
   SO_REUSEPORT = 15;
   CTCP_FASTOPEN = 23;
   CTCP_DEFER_ACCEPT = 9;
-  CSQPollIdleMs = 10000;
+
+  CRecvBufSize = 32768;
+  CRingEntries = 512;
+  CCQEntries = 2048;
+  // Log once when a ring's multishot accept has failed this many times in a row
+  // (e.g. sustained EMFILE / fd exhaustion) — surfaces the condition without
+  // spamming stderr on every re-arm.
+  CAcceptErrLogAt = 64;
+  // Recv contexts per ring. Smaller than CRingEntries because connections are
+  // now spread across N rings; on exhaustion _RecvPoolAcquire falls back to
+  // heap (correct, just slower). 256 * 32 KiB = 8 MiB per ring.
+  CRecvPoolSize = 256;
+
 type
   // io_uring_files_update struct for IORING_REGISTER_FILES_UPDATE
   TIOUringFilesUpdate = packed record
@@ -312,8 +346,7 @@ type
     ops:      array[0..63] of TIOUringProbeOp;
   end;
 
-  // Heap-allocated recv context: stable buffer for in-flight IORING_OP_RECV.
-  // Allocated in PostRecv; freed after the CQE is processed.
+  // Pre-allocated recv context: stable buffer for in-flight IORING_OP_RECV.
   PRecvCtx = ^TRecvCtx;
   TRecvCtx = record
     Conn: TNativeConn;
@@ -329,6 +362,12 @@ type
     TotalLen: Integer;
     SentBytes: Integer;
   end;
+
+threadvar
+  // Set by each ring's accept thread (_AcceptLoop) before OnNewConn; read by
+  // TIOUringBackend.RegisterConn to pin the new connection to that ring.
+  // Mirrors TEpollBackend's GCurrentEpollFd.
+  GCurrentRingIdx: Integer;
 
 // ---------------------------------------------------------------------------
 // Syscall wrappers
@@ -380,78 +419,51 @@ function _LinuxMmap(addr: Pointer; length: NativeUInt; prot, flags, fd: Integer;
 function _LinuxMunmap(addr: Pointer; length: NativeUInt): Integer; cdecl;
   external 'libc.so.6' name 'munmap';
 
-// ---------------------------------------------------------------------------
-// TIOUringBackend — constructor / destructor
-// ---------------------------------------------------------------------------
+// cpuset-aware CPU count (respects Docker --cpuset-cpus / taskset, unlike
+// TThread.ProcessorCount which returns the host's online CPUs).
+function _sched_getaffinity(pid: Integer; cpusetsize: NativeUInt;
+  mask: Pointer): Integer; cdecl; external 'libc.so.6' name 'sched_getaffinity';
 
-constructor TIOUringBackend.Create;
+// Number of CPUs this process may actually run on. One io_uring ring is created
+// per such CPU ("one completion thread per core"): more rings than cores leaves
+// each completion thread with too few connections to batch, so under async
+// dispatch the completion↔worker-pool hand-off cannot amortize and low-
+// concurrency latency collapses. Returns 0 on failure (caller falls back).
+function _AffinityCPUCount: Integer;
 var
-  LParams: TIOUringParams;
-  LFd: Integer;
-  LProbe: TIOUringProbe;
-  LI: Integer;
+  LMask: array[0..127] of Byte;  // 1024 CPUs worth of bitmask
+  LRet, I: Integer;
+  LB: Byte;
 begin
-  inherited Create;
-
-  // Phase 1: check io_uring_setup is available (kernel >= 5.1).
-  // Returns ring fd on success, or -ENOSYS / -EPERM on failure.
-  FillChar(LParams, SizeOf(LParams), 0);
-  LFd := _io_uring_setup(1, @LParams);
-  if LFd >= 0 then
-    _LinuxClose(LFd)
-  else
+  Result := 0;
+  FillChar(LMask, SizeOf(LMask), 0);
+  LRet := _sched_getaffinity(0, SizeOf(LMask), @LMask);
+  if LRet < 0 then Exit;
+  for I := 0 to High(LMask) do
   begin
-    case GetLastError of
-      ENOSYS: raise ENotSupportedException.Create(
-        'io_uring unavailable: kernel < 5.1 (ENOSYS)');
-      EPERM:  raise ENotSupportedException.Create(
-        'io_uring unavailable: blocked by seccomp/policy (EPERM)');
-    else
-      raise ENotSupportedException.CreateFmt(
-        'io_uring probe failed (errno %d)', [GetLastError]);
+    LB := LMask[I];
+    while LB <> 0 do
+    begin
+      Inc(Result, LB and 1);
+      LB := LB shr 1;
     end;
   end;
+end;
 
-  // Phase 2: verify IORING_OP_RECV (22) and IORING_OP_SEND (23) are supported.
-  // These opcodes require kernel >= 5.6.  IORING_REGISTER_PROBE itself was added
-  // in 5.6, so -EINVAL here means the kernel predates 5.6 and lacks RECV/SEND.
-  // We open a fresh 1-entry ring solely for the probe, then close it immediately.
-  FillChar(LParams, SizeOf(LParams), 0);
-  LFd := _io_uring_setup(1, @LParams);
-  if LFd >= 0 then
-  try
-    FillChar(LProbe, SizeOf(LProbe), 0);
-    if _io_uring_register(LFd, IORING_REGISTER_PROBE, @LProbe,
-         SizeOf(LProbe.ops) div SizeOf(TIOUringProbeOp)) < 0 then
-      raise ENotSupportedException.Create(
-        'io_uring unavailable: IORING_REGISTER_PROBE failed (kernel < 5.6)');
+// ===========================================================================
+// TUringRing
+// ===========================================================================
 
-    if (LProbe.last_op < IORING_OP_SEND) or
-       ((LProbe.ops[IORING_OP_RECV].flags and IO_URING_OP_SUPPORTED) = 0) or
-       ((LProbe.ops[IORING_OP_SEND].flags and IO_URING_OP_SUPPORTED) = 0) then
-      raise ENotSupportedException.Create(
-        'io_uring unavailable: IORING_OP_RECV/SEND not supported (kernel < 5.6)');
-  finally
-    _LinuxClose(LFd);
-  end;
-
-  // Detect SEND_ZC support (kernel 6.0+)
-  FSendZC := (LProbe.last_op >= IORING_OP_SEND_ZC) and
-    ((LProbe.ops[IORING_OP_SEND_ZC].flags and IO_URING_OP_SUPPORTED) <> 0);
-
+constructor TUringRing.Create(ABackend: TIOUringBackend; AIdx: Integer);
+begin
+  inherited Create;
+  FBackend := ABackend;
+  FIdx := AIdx;
   FRingFd := -1;
+  FListenSocket := -1;
+  FPendingSQEs := 0;
   FSQLock := TCriticalSection.Create;
   FRecvPoolLock := TCriticalSection.Create;
-  FShutdown := 0;
-  FPendingSQEs := 0;
-
-  FRecvCtxPool := AllocMem(CRecvPoolSize * SizeOf(TRecvCtx));
-  FRecvPoolBase := PByte(FRecvCtxPool);
-  SetLength(FRecvFreeIdx, CRecvPoolSize);
-  FRecvFreeTop := CRecvPoolSize;
-  for LI := 0 to CRecvPoolSize - 1 do
-    FRecvFreeIdx[LI] := UInt16(LI);
-
   FRegLock := TCriticalSection.Create;
   FRegFiles := False;
   FRegCount := 0;
@@ -459,55 +471,26 @@ begin
   FRegFreeTop := 0;
 end;
 
-destructor TIOUringBackend.Destroy;
-var
-  I: Integer;
+destructor TUringRing.Destroy;
 begin
-  // #P2: close listen sockets if StopAccept was never reached (exception during
-  // StartListening after the sockets were created). Idempotent — after a normal
-  // StopAccept they are already -1.
-  for I := 0 to High(FListenSockets) do
-    if FListenSockets[I] >= 0 then
-    begin
-      _LinuxClose(FListenSockets[I]);
-      FListenSockets[I] := -1;
-    end;
-
-  // #197: if the completion thread was started but never joined (exception in
-  // StartListening after FCompThread.Start, or Destroy without a clean Stop),
-  // signal it to exit and WAIT before unmapping the rings it reads — otherwise
-  // the munmaps below race a live thread (UAF). Safe when FCompThread<>nil: the
-  // ring fd and FSQLock always exist by the time the thread is started.
+  if FListenSocket >= 0 then
+  begin
+    _LinuxClose(FListenSocket);
+    FListenSocket := -1;
+  end;
+  // Threads must already be joined by the backend (StopAccept + JoinWorkers).
+  // Guarded WaitFor is a defensive net; in the normal flow both are nil here.
+  if FAcceptThread <> nil then
+  begin
+    FAcceptThread.WaitFor;
+    FreeAndNil(FAcceptThread);
+  end;
   if FCompThread <> nil then
   begin
-    SignalWorkers;
     FCompThread.WaitFor;
     FreeAndNil(FCompThread);
   end;
-
-  // Safety net: clean up mmaps and ring fd if JoinWorkers was never called
-  // (e.g. exception during StartListening after mmap succeeded).
-  if (FSQEs <> nil) and (FSQEs <> MAP_FAILED) then
-  begin
-    _LinuxMunmap(FSQEs, FSQEsSize);
-    FSQEs := nil;
-  end;
-  if (FCQRingSize > 0) and (FCQRing <> nil) and (FCQRing <> MAP_FAILED)
-     and (FCQRing <> FSQRing) then
-  begin
-    _LinuxMunmap(FCQRing, FCQRingSize);
-    FCQRing := nil;
-  end;
-  if (FSQRing <> nil) and (FSQRing <> MAP_FAILED) then
-  begin
-    _LinuxMunmap(FSQRing, FSQRingSize);
-    FSQRing := nil;
-  end;
-  if FRingFd >= 0 then
-  begin
-    _LinuxClose(FRingFd);
-    FRingFd := -1;
-  end;
+  TeardownMaps;
   if FRecvCtxPool <> nil then
   begin
     FreeMem(FRecvCtxPool);
@@ -519,84 +502,24 @@ begin
   inherited Destroy;
 end;
 
-// ---------------------------------------------------------------------------
-// IIOBackend — lifecycle
-// ---------------------------------------------------------------------------
-
-procedure TIOUringBackend.StartListening(const AHost: string; APort: Integer;
-  AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
-  AAcceptThreads: Integer);
-
-  function CreateListenSocket: Integer;
-  var
-    LAddr: sockaddr_in;
-    LOne: Integer;
-  begin
-    Result := _LinuxSocket(AF_INET, SOCK_STREAM or SOCK_CLOEXEC, 0);
-    if Result < 0 then
-      raise Exception.Create('socket() failed: ' + IntToStr(GetLastError));
-
-    LOne := 1;
-    _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEADDR, @LOne, SizeOf(LOne));
-    _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEPORT, @LOne, SizeOf(LOne));
-    if AFastOpen then
-      _LinuxSetsockopt(Result, IPPROTO_TCP, CTCP_FASTOPEN, @LOne, SizeOf(LOne));
-    // TCP_DEFER_ACCEPT — kernel waits for data before waking accept
-    _LinuxSetsockopt(Result, IPPROTO_TCP, CTCP_DEFER_ACCEPT, @LOne, SizeOf(LOne));
-
-    FillChar(LAddr, SizeOf(LAddr), 0);
-    LAddr.sin_family := AF_INET;
-    LAddr.sin_port := htons(APort);
-    if (AHost = '0.0.0.0') or (AHost = '') then
-      LAddr.sin_addr.s_addr := INADDR_ANY
-    else
-      LAddr.sin_addr.s_addr := inet_addr(MarshaledAString(AnsiString(AHost)));
-
-    if _LinuxBind(Result, @LAddr, SizeOf(LAddr)) < 0 then
-      raise Exception.Create('bind() failed: ' + IntToStr(GetLastError));
-    if _LinuxListen(Result, SOMAXCONN) < 0 then
-      raise Exception.Create('listen() failed: ' + IntToStr(GetLastError));
-  end;
-
+procedure TUringRing.SetupRing;
 var
   LParams: TIOUringParams;
-  LOne, I: Integer;
   LSQSize: NativeUInt;
   LCQSize: NativeUInt;
-  LAcceptN: Integer;
+  I: Integer;
   LInitFds: array of Int32;
 begin
-  FCallbacks := ACallbacks;
-  FShutdown := 0;
-  LAcceptN := AAcceptThreads;
-  if LAcceptN < 1 then LAcceptN := 1;
-
-  SetLength(FListenSockets, LAcceptN);
-  for I := 0 to LAcceptN - 1 do
-    FListenSockets[I] := CreateListenSocket;
-
-  // Try SQPOLL first (kernel 5.11+ or CAP_SYS_NICE); fall back silently
+  // Normal mode (no SQPOLL — see unit header). Try with a custom CQ size, then
+  // fall back to a plain ring if the kernel rejects IORING_SETUP_CQSIZE.
   FillChar(LParams, SizeOf(LParams), 0);
-  LParams.flags := IORING_SETUP_SQPOLL or IORING_SETUP_CQSIZE;
-  LParams.sq_thread_idle := CSQPollIdleMs;
+  LParams.flags := IORING_SETUP_CQSIZE;
   LParams.cq_entries := CCQEntries;
   FRingFd := _io_uring_setup(CRingEntries, @LParams);
-  if FRingFd >= 0 then
-    FSQPoll := True
-  else
+  if FRingFd < 0 then
   begin
-    // SQPOLL not available — try normal mode with custom CQ size
-    FSQPoll := False;
     FillChar(LParams, SizeOf(LParams), 0);
-    LParams.flags := IORING_SETUP_CQSIZE;
-    LParams.cq_entries := CCQEntries;
     FRingFd := _io_uring_setup(CRingEntries, @LParams);
-    if FRingFd < 0 then
-    begin
-      // CQSIZE not supported — plain setup
-      FillChar(LParams, SizeOf(LParams), 0);
-      FRingFd := _io_uring_setup(CRingEntries, @LParams);
-    end;
   end;
   if FRingFd < 0 then
     raise Exception.CreateFmt('io_uring_setup failed (errno %d)', [GetLastError]);
@@ -634,7 +557,6 @@ begin
   FPSQHead := PUInt32(PByte(FSQRing) + LParams.sq_off.head);
   FPSQTail := PUInt32(PByte(FSQRing) + LParams.sq_off.tail);
   FPSQMask := PUInt32(PByte(FSQRing) + LParams.sq_off.ring_mask);
-  FPSQFlags := PUInt32(PByte(FSQRing) + LParams.sq_off.flags);
 
   FPCQHead := PUInt32(PByte(FCQRing) + LParams.cq_off.head);
   FPCQTail := PUInt32(PByte(FCQRing) + LParams.cq_off.tail);
@@ -649,22 +571,33 @@ begin
     PUInt32(PByte(FSQRing) + LParams.sq_off.array_ + NativeUInt(I) * SizeOf(UInt32))^
       := UInt32(I);
 
-  begin
-    SetLength(LInitFds, CRegFilesMax);
-    for I := 0 to CRegFilesMax - 1 do
-      LInitFds[I] := -1; // sparse table — all slots empty
-    if _io_uring_register(FRingFd, IORING_REGISTER_FILES,
-      @LInitFds[0], CRegFilesMax) >= 0 then
-    begin
-      FRegFiles := True;
-      SetLength(FRegFds, 65536);
-      for I := 0 to High(FRegFds) do
-        FRegFds[I] := -1;
-      FRegCount := 0;
-    end;
-  end;
+  // Recv-context pool (per ring).
+  FRecvCtxPool := AllocMem(CRecvPoolSize * SizeOf(TRecvCtx));
+  FRecvPoolBase := PByte(FRecvCtxPool);
+  SetLength(FRecvFreeIdx, CRecvPoolSize);
+  FRecvFreeTop := CRecvPoolSize;
+  for I := 0 to CRecvPoolSize - 1 do
+    FRecvFreeIdx[I] := UInt16(I);
 
-  // L4: drenar TLC do worker no fim — evita vazamento em graceful reload
+  // Registered files (per ring) — eliminates fget/fput atomics per I/O op.
+  SetLength(LInitFds, CRegFilesMax);
+  for I := 0 to CRegFilesMax - 1 do
+    LInitFds[I] := -1; // sparse table — all slots empty
+  if _io_uring_register(FRingFd, IORING_REGISTER_FILES,
+    @LInitFds[0], CRegFilesMax) >= 0 then
+  begin
+    FRegFiles := True;
+    SetLength(FRegFds, 65536);
+    for I := 0 to High(FRegFds) do
+      FRegFds[I] := -1;
+    FRegCount := 0;
+  end;
+end;
+
+procedure TUringRing.StartThreads;
+begin
+  // Completion thread first — it must be draining before any accept can produce
+  // a connection whose recv submits to this ring.
   FCompThread := TThread.CreateAnonymousThread(
     procedure
     begin
@@ -677,89 +610,68 @@ begin
   FCompThread.FreeOnTerminate := False;
   FCompThread.Start;
 
-  // --- #73: Try multishot accept via io_uring ---
-  // Submit one IORING_OP_ACCEPT with multishot for each listen socket.
-  // If successful, no accept threads needed (kernel pushes CQEs directly).
-  FMultishotAccept := False;
-  if LAcceptN = 1 then
-  begin
-    FSQLock.Acquire;
-    try
-      FMultishotAccept := _SubmitAcceptMultishot(FListenSockets[0]);
-      if FMultishotAccept then
-        _NotifyKernel;
-    finally
-      FSQLock.Release;
-    end;
-  end;
-
-  // Fallback: per-core accept threads (when multishot not used or multiple listeners)
-  if not FMultishotAccept then
-  begin
-    SetLength(FAcceptThreads, LAcceptN);
-    for I := 0 to LAcceptN - 1 do
-    begin
-      // Fix: captura por VALOR via parâmetro de função. Assignment em variável
-      // local (LFd := FListenSockets[I]) seria capturada por REFERÊNCIA pela
-      // anonymous method — todas as threads leriam o mesmo LFd (última
-      // iteração), colapsando accepts em um único listen socket.
-      FAcceptThreads[I] := _MakeAcceptThread(FListenSockets[I]);
-      FAcceptThreads[I].FreeOnTerminate := False;
-      FAcceptThreads[I].Start;
-    end;
-  end;
-end;
-
-procedure TIOUringBackend.StopAccept;
-var
-  I: Integer;
-begin
-  for I := 0 to High(FListenSockets) do
-  begin
-    if FListenSockets[I] >= 0 then
-      _LinuxClose(FListenSockets[I]);
-    FListenSockets[I] := -1;
-  end;
-  for I := 0 to High(FAcceptThreads) do
-  begin
-    if FAcceptThreads[I] <> nil then
-    begin
-      FAcceptThreads[I].WaitFor;
-      FreeAndNil(FAcceptThreads[I]);
-    end;
-  end;
-  SetLength(FAcceptThreads, 0);
-end;
-
-procedure TIOUringBackend.ShutdownConn(AConn: Pointer);
-var
-  LConn: TNativeConn absolute AConn;
-  LSock: Integer;
-begin
-  // #173: skip if SocketClose already invalidated the fd (kernel reuse).
-  LSock := LConn.Socket;
-  if LSock <> -1 then
-    shutdown(LSock, SHUT_RDWR);
-end;
-
-procedure TIOUringBackend.SignalWorkers;
-begin
+  // Accept via io_uring multishot (kernel 5.19+) so THIS ring's completion
+  // thread also does the accepting — no dedicated accept thread. That keeps the
+  // total IO thread count at N (one per ring), matching TEpollBackend, instead
+  // of 2N (a separate accept thread per ring oversubscribes the cores and, under
+  // sustained load, starves/wedges connections). Fall back to a per-ring accept
+  // thread only if the kernel rejects the multishot accept SQE.
   FSQLock.Acquire;
   try
-    _SubmitSQE(IORING_OP_NOP, -1, nil, 0, CUdShutdown);
-    _io_uring_enter(FRingFd, 1, 0, 0);
+    FMultishotAccept := _SubmitAcceptMultishot;
+    if FMultishotAccept then
+      _NotifyKernel;
   finally
     FSQLock.Release;
   end;
+
+  if not FMultishotAccept then
+  begin
+    FAcceptThread := TThread.CreateAnonymousThread(
+      procedure
+      begin
+        try
+          _AcceptLoop;
+        finally
+          TBufferPool.FlushThreadCache;
+        end;
+      end);
+    FAcceptThread.FreeOnTerminate := False;
+    FAcceptThread.Start;
+  end;
 end;
 
-procedure TIOUringBackend.JoinWorkers;
+// Submit ONE multishot IORING_OP_ACCEPT on this ring's listen socket. The kernel
+// keeps generating accept CQEs (each with IORING_CQE_F_MORE) until cancelled;
+// _ProcessCQE re-arms if F_MORE ever clears. MUST be called under FSQLock.
+function TUringRing._SubmitAcceptMultishot: Boolean;
+var
+  LTail, LIdx: UInt32;
+  LSQE: PIOUringSQE;
 begin
-  if FCompThread <> nil then
+  LTail := FPSQTail^;
+  if LTail - FPSQHead^ >= FPSQMask^ + 1 then
   begin
-    FCompThread.WaitFor;
-    FreeAndNil(FCompThread);
+    Result := False;
+    Exit;
   end;
+
+  LIdx := LTail and FPSQMask^;
+  LSQE := PIOUringSQE(PByte(FSQEs) + NativeUInt(LIdx) * SizeOf(TIOUringSQE));
+  FillChar(LSQE^, SizeOf(TIOUringSQE), 0);
+  LSQE^.opcode := IORING_OP_ACCEPT;
+  LSQE^.fd := FListenSocket;
+  LSQE^.ioprio := IOSQE_ACCEPT_MULTISHOT;
+  LSQE^.op_flags := UInt32(SOCK_NONBLOCK or SOCK_CLOEXEC);
+  LSQE^.user_data := CUdTagAccept;
+
+  FPSQTail^ := LTail + 1;
+  Inc(FPendingSQEs);
+  Result := True;
+end;
+
+procedure TUringRing.TeardownMaps;
+begin
   if (FSQEs <> nil) and (FSQEs <> MAP_FAILED) then
   begin
     _LinuxMunmap(FSQEs, FSQEsSize);
@@ -783,6 +695,512 @@ begin
   end;
 end;
 
+procedure TUringRing.SignalShutdown;
+begin
+  FSQLock.Acquire;
+  try
+    _SubmitSQE(IORING_OP_NOP, -1, nil, 0, CUdShutdown);
+    _io_uring_enter(FRingFd, 1, 0, 0);
+  finally
+    FSQLock.Release;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+// Registered files — eliminates fget/fput atomic refcount per I/O op
+// ---------------------------------------------------------------------------
+
+function TUringRing._RegFileIndex(AFd: Integer): Integer;
+begin
+  Result := -1;
+  if not FRegFiles then Exit;
+  FRegLock.Acquire;
+  try
+    if (AFd >= 0) and (AFd < Length(FRegFds)) and (FRegFds[AFd] >= 0) then
+      Result := FRegFds[AFd];
+  finally
+    FRegLock.Release;
+  end;
+end;
+
+function TUringRing._RegisterFd(AFd: Integer): Integer;
+var
+  LUpdate: TIOUringFilesUpdate;
+  LSlot: Integer;
+  LFdVal: Int32;
+begin
+  Result := -1;
+  if not FRegFiles then Exit;
+  FRegLock.Acquire;
+  try
+    if AFd >= Length(FRegFds) then
+      SetLength(FRegFds, AFd + 256); // grow mapping table
+
+    // Recycle freed slots instead of monotonic FRegCount
+    LSlot := -1;
+    if FRegFreeTop > 0 then
+    begin
+      Dec(FRegFreeTop);
+      LSlot := FRegFreeStack[FRegFreeTop];
+    end
+    else if FRegCount < CRegFilesMax then
+    begin
+      LSlot := FRegCount;
+      Inc(FRegCount);
+    end;
+    if LSlot < 0 then Exit; // table full
+
+    LFdVal := AFd;
+    FillChar(LUpdate, SizeOf(LUpdate), 0);
+    LUpdate.offset := UInt32(LSlot);
+    LUpdate.fds := UInt64(@LFdVal);
+
+    if _io_uring_register(FRingFd, IORING_REGISTER_FILES_UPDATE,
+      @LUpdate, 1) >= 0 then
+    begin
+      FRegFds[AFd] := LSlot;
+      Result := LSlot;
+    end
+    else
+    begin
+      // return slot to free stack
+      FRegFreeStack[FRegFreeTop] := LSlot;
+      Inc(FRegFreeTop);
+    end;
+  finally
+    FRegLock.Release;
+  end;
+end;
+
+procedure TUringRing._UnregisterFd(AFd: Integer);
+var
+  LSlot: Integer;
+  LUpdate: TIOUringFilesUpdate;
+  LFdVal: Int32;
+begin
+  if not FRegFiles then Exit;
+  FRegLock.Acquire;
+  try
+    if (AFd < 0) or (AFd >= Length(FRegFds)) then Exit;
+    LSlot := FRegFds[AFd];
+    if LSlot < 0 then Exit;
+    LFdVal := -1;
+    FillChar(LUpdate, SizeOf(LUpdate), 0);
+    LUpdate.offset := UInt32(LSlot);
+    LUpdate.fds := UInt64(@LFdVal);
+    _io_uring_register(FRingFd, IORING_REGISTER_FILES_UPDATE, @LUpdate, 1);
+    FRegFds[AFd] := -1;
+    FRegFreeStack[FRegFreeTop] := LSlot;
+    Inc(FRegFreeTop);
+  finally
+    FRegLock.Release;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+// Pre-allocated recv context pool (per ring)
+// ---------------------------------------------------------------------------
+
+function TUringRing._RecvPoolAcquire: Pointer;
+var
+  LIdx: Integer;
+begin
+  FRecvPoolLock.Acquire;
+  try
+    if FRecvFreeTop > 0 then
+    begin
+      Dec(FRecvFreeTop);
+      LIdx := FRecvFreeIdx[FRecvFreeTop];
+      Result := PRecvCtx(FRecvPoolBase + NativeUInt(LIdx) * SizeOf(TRecvCtx));
+      Exit;
+    end;
+  finally
+    FRecvPoolLock.Release;
+  end;
+  New(Result);
+end;
+
+procedure TUringRing._RecvPoolRelease(ACtx: Pointer);
+var
+  LOffset: NativeUInt;
+  LIdx: Integer;
+begin
+  LOffset := NativeUInt(PByte(ACtx)) - NativeUInt(FRecvPoolBase);
+  if LOffset < NativeUInt(CRecvPoolSize) * SizeOf(TRecvCtx) then
+  begin
+    LIdx := Integer(LOffset div SizeOf(TRecvCtx));
+    FRecvPoolLock.Acquire;
+    try
+      FRecvFreeIdx[FRecvFreeTop] := UInt16(LIdx);
+      Inc(FRecvFreeTop);
+    finally
+      FRecvPoolLock.Release;
+    end;
+  end
+  else
+    Dispose(ACtx);
+end;
+
+// ---------------------------------------------------------------------------
+// Notify kernel about new SQEs (normal mode — no SQPOLL).
+// ---------------------------------------------------------------------------
+
+procedure TUringRing._NotifyKernel;
+var
+  LPending: Integer;
+begin
+  LPending := FPendingSQEs;
+  if LPending <= 0 then
+    LPending := 1;
+  FPendingSQEs := 0;
+  _io_uring_enter(FRingFd, LPending, 0, 0);
+end;
+
+// ---------------------------------------------------------------------------
+// SQE submission — MUST be called under FSQLock
+// ---------------------------------------------------------------------------
+
+function TUringRing._SubmitSQE(AOpcode: Byte; AFd: Integer;
+  ABuf: Pointer; ALen: UInt32; AUserData: UInt64; AFlags: Byte): Boolean;
+var
+  LTail, LIdx: UInt32;
+  LSQE: PIOUringSQE;
+  LRegIdx: Integer;
+begin
+  LTail := FPSQTail^;
+
+  if LTail - FPSQHead^ >= FPSQMask^ + 1 then
+  begin
+    Result := False;
+    Exit;
+  end;
+
+  LIdx := LTail and FPSQMask^;
+  LSQE := PIOUringSQE(PByte(FSQEs) + NativeUInt(LIdx) * SizeOf(TIOUringSQE));
+  FillChar(LSQE^, SizeOf(TIOUringSQE), 0);
+  LSQE^.opcode := AOpcode;
+  LSQE^.addr := UInt64(ABuf);
+  LSQE^.len := ALen;
+  LSQE^.user_data := AUserData;
+
+  // Use registered file index when available (eliminates fget/fput atomics)
+  LRegIdx := _RegFileIndex(AFd);
+  if LRegIdx >= 0 then
+  begin
+    LSQE^.fd := LRegIdx;
+    LSQE^.flags := IOSQE_FIXED_FILE;
+  end
+  else
+    LSQE^.fd := AFd;
+  LSQE^.flags := LSQE^.flags or AFlags;  // #199: e.g. IOSQE_ASYNC on -EAGAIN retry
+
+  // x86-64 TSO: plain store sufficient; io_uring_enter acts as full barrier
+  FPSQTail^ := LTail + 1;
+  Inc(FPendingSQEs);
+
+  Result := True;
+end;
+
+// ---------------------------------------------------------------------------
+// Completion thread — one per ring; serial CQE drain after each wakeup
+// ---------------------------------------------------------------------------
+
+procedure TUringRing._CompletionLoop;
+var
+  LHead, LTail, LMask: UInt32;
+  LCQE: PIOUringCQE;
+begin
+  // Stamp this thread's ring index so RegisterConn (invoked from OnNewConn while
+  // this thread processes a multishot-accept CQE) pins the connection here.
+  GCurrentRingIdx := FIdx;
+  while TInterlocked.Read(FBackend.FShutdown) = 0 do
+  begin
+    _io_uring_enter(FRingFd, 0, 1, IORING_ENTER_GETEVENTS);
+
+    LMask := FPCQMask^;
+    LHead := FPCQHead^;
+    LTail := FPCQTail^;
+
+    // Batch CQ head update — process all CQEs, then advance head once.
+    while LHead <> LTail do
+    begin
+      LCQE := PIOUringCQE(PByte(FPCQEs) +
+        NativeUInt(LHead and LMask) * SizeOf(TIOUringCQE));
+      try
+        FBackend._ProcessCQE(Self, LCQE^.user_data, LCQE^.res, LCQE^.flags);
+      except
+        on E: Exception do
+          Writeln(ErrOutput, '[io_uring] CQE_EX [', E.ClassName, ']: ', E.Message);
+      end;
+      Inc(LHead);
+    end;
+    FPCQHead^ := LHead;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+// Accept thread — plain accept4() loop on this ring's listen socket.
+// Stamps GCurrentRingIdx so RegisterConn pins the connection to this ring.
+// ---------------------------------------------------------------------------
+
+procedure TUringRing._AcceptLoop;
+var
+  LFd: Integer;
+  LAddr: sockaddr_in;
+  LAddrLen: Cardinal;
+  LIP: AnsiString;
+  LOne: Integer;
+begin
+  GCurrentRingIdx := FIdx;
+  while True do
+  begin
+    FillChar(LAddr, SizeOf(LAddr), 0);
+    LAddrLen := SizeOf(LAddr);
+    LFd := _LinuxAccept4(FListenSocket, @LAddr, @LAddrLen,
+      SOCK_NONBLOCK or SOCK_CLOEXEC);
+    if LFd < 0 then
+    begin
+      if GetLastError = EINTR then Continue;
+      Break;  // listen socket closed by StopAccept
+    end;
+
+    LOne := 1;
+    _LinuxSetsockopt(LFd, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
+    _LinuxSetsockopt(LFd, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
+
+    LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
+    try
+      FBackend.FCallbacks.OnNewConn(NativeUInt(LFd),
+        string(LIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
+    except
+      _LinuxClose(LFd);
+    end;
+  end;
+end;
+
+// ===========================================================================
+// TIOUringBackend — constructor / destructor
+// ===========================================================================
+
+constructor TIOUringBackend.Create;
+var
+  LParams: TIOUringParams;
+  LFd: Integer;
+  LProbe: TIOUringProbe;
+begin
+  inherited Create;
+
+  // Phase 1: check io_uring_setup is available (kernel >= 5.1).
+  FillChar(LParams, SizeOf(LParams), 0);
+  LFd := _io_uring_setup(1, @LParams);
+  if LFd >= 0 then
+    _LinuxClose(LFd)
+  else
+  begin
+    case GetLastError of
+      ENOSYS: raise ENotSupportedException.Create(
+        'io_uring unavailable: kernel < 5.1 (ENOSYS)');
+      EPERM:  raise ENotSupportedException.Create(
+        'io_uring unavailable: blocked by seccomp/policy (EPERM)');
+    else
+      raise ENotSupportedException.CreateFmt(
+        'io_uring probe failed (errno %d)', [GetLastError]);
+    end;
+  end;
+
+  // Phase 2: verify IORING_OP_RECV (22) and IORING_OP_SEND (23) are supported.
+  FillChar(LParams, SizeOf(LParams), 0);
+  LFd := _io_uring_setup(1, @LParams);
+  if LFd >= 0 then
+  try
+    FillChar(LProbe, SizeOf(LProbe), 0);
+    if _io_uring_register(LFd, IORING_REGISTER_PROBE, @LProbe,
+         SizeOf(LProbe.ops) div SizeOf(TIOUringProbeOp)) < 0 then
+      raise ENotSupportedException.Create(
+        'io_uring unavailable: IORING_REGISTER_PROBE failed (kernel < 5.6)');
+
+    if (LProbe.last_op < IORING_OP_SEND) or
+       ((LProbe.ops[IORING_OP_RECV].flags and IO_URING_OP_SUPPORTED) = 0) or
+       ((LProbe.ops[IORING_OP_SEND].flags and IO_URING_OP_SUPPORTED) = 0) then
+      raise ENotSupportedException.Create(
+        'io_uring unavailable: IORING_OP_RECV/SEND not supported (kernel < 5.6)');
+  finally
+    _LinuxClose(LFd);
+  end;
+
+  // Detect SEND_ZC support (kernel 6.0+)
+  FSendZC := (LProbe.last_op >= IORING_OP_SEND_ZC) and
+    ((LProbe.ops[IORING_OP_SEND_ZC].flags and IO_URING_OP_SUPPORTED) <> 0);
+
+  FShutdown := 0;
+end;
+
+destructor TIOUringBackend.Destroy;
+var
+  I: Integer;
+  LAnyComp: Boolean;
+begin
+  // Safety net for the "Stop was never fully driven" path. Idempotent — after a
+  // normal Stop (StopAccept + SignalWorkers + JoinWorkers) the guards below are
+  // all no-ops.
+  StopAccept;
+
+  LAnyComp := False;
+  for I := 0 to High(FRings) do
+    if (FRings[I] <> nil) and (FRings[I].FCompThread <> nil) then
+      LAnyComp := True;
+  if LAnyComp then
+    SignalWorkers;
+  JoinWorkers;
+
+  for I := 0 to High(FRings) do
+    FRings[I].Free;
+  SetLength(FRings, 0);
+  inherited Destroy;
+end;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function TIOUringBackend._RingOf(AConn: TNativeConn): TUringRing;
+begin
+  Result := FRings[AConn.OwnerRingIdx];
+end;
+
+function TIOUringBackend._CreateListenSocket: Integer;
+var
+  LAddr: sockaddr_in;
+  LOne: Integer;
+begin
+  Result := _LinuxSocket(AF_INET, SOCK_STREAM or SOCK_CLOEXEC, 0);
+  if Result < 0 then
+    raise Exception.Create('socket() failed: ' + IntToStr(GetLastError));
+
+  LOne := 1;
+  _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEADDR, @LOne, SizeOf(LOne));
+  _LinuxSetsockopt(Result, SOL_SOCKET, SO_REUSEPORT, @LOne, SizeOf(LOne));
+  if FFastOpen then
+    _LinuxSetsockopt(Result, IPPROTO_TCP, CTCP_FASTOPEN, @LOne, SizeOf(LOne));
+  // TCP_DEFER_ACCEPT — kernel waits for data before waking accept
+  _LinuxSetsockopt(Result, IPPROTO_TCP, CTCP_DEFER_ACCEPT, @LOne, SizeOf(LOne));
+
+  FillChar(LAddr, SizeOf(LAddr), 0);
+  LAddr.sin_family := AF_INET;
+  LAddr.sin_port := htons(FPort);
+  if (FHost = '0.0.0.0') or (FHost = '') then
+    LAddr.sin_addr.s_addr := INADDR_ANY
+  else
+    LAddr.sin_addr.s_addr := inet_addr(MarshaledAString(AnsiString(FHost)));
+
+  if _LinuxBind(Result, @LAddr, SizeOf(LAddr)) < 0 then
+    raise Exception.Create('bind() failed: ' + IntToStr(GetLastError));
+  if _LinuxListen(Result, SOMAXCONN) < 0 then
+    raise Exception.Create('listen() failed: ' + IntToStr(GetLastError));
+end;
+
+// ---------------------------------------------------------------------------
+// IIOBackend — lifecycle
+// ---------------------------------------------------------------------------
+
+procedure TIOUringBackend.StartListening(const AHost: string; APort: Integer;
+  AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
+  AAcceptThreads: Integer);
+var
+  I: Integer;
+begin
+  FCallbacks := ACallbacks;
+  FShutdown := 0;
+  FHost := AHost;
+  FPort := APort;
+  FFastOpen := AFastOpen;
+
+  // One ring (completion thread) per USABLE core. Prefer the cpuset-aware count
+  // (sched_getaffinity) over AWorkerCount, which is derived from
+  // TThread.ProcessorCount = the host's online CPUs and ignores a Docker
+  // --cpuset / taskset restriction. Creating ProcessorCount*2 rings on 4 cores
+  // (the old behaviour) leaves ~1 connection per ring at low concurrency, and
+  // the async completion↔pool hand-off then pays an un-amortized wake-up per
+  // request. Cap at AWorkerCount so we never exceed the IO-worker budget.
+  FRingCount := _AffinityCPUCount;
+  if (FRingCount < 1) or (FRingCount > AWorkerCount) then
+    FRingCount := AWorkerCount;
+  if FRingCount < 1 then FRingCount := 1;
+
+  SetLength(FRings, FRingCount);
+  for I := 0 to FRingCount - 1 do
+    FRings[I] := TUringRing.Create(Self, I);
+
+  // Listen sockets first (SO_REUSEPORT), then set up each ring, then start
+  // threads — completion thread must be draining before its accept thread runs.
+  for I := 0 to FRingCount - 1 do
+    FRings[I].FListenSocket := _CreateListenSocket;
+  for I := 0 to FRingCount - 1 do
+    FRings[I].SetupRing;
+  for I := 0 to FRingCount - 1 do
+    FRings[I].StartThreads;
+end;
+
+procedure TIOUringBackend.StopAccept;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FRings) do
+    if (FRings[I] <> nil) and (FRings[I].FListenSocket >= 0) then
+    begin
+      // shutdown() BEFORE close(): on Linux a bare close() does NOT wake a
+      // thread blocked in accept4() on this fd, so the WaitFor below would hang.
+      // shutdown(SHUT_RDWR) forces the blocked accept4() to return EINVAL,
+      // breaking the accept loop cleanly.
+      shutdown(FRings[I].FListenSocket, SHUT_RDWR);
+      _LinuxClose(FRings[I].FListenSocket);
+      FRings[I].FListenSocket := -1;
+    end;
+  for I := 0 to High(FRings) do
+    if (FRings[I] <> nil) and (FRings[I].FAcceptThread <> nil) then
+    begin
+      FRings[I].FAcceptThread.WaitFor;
+      FreeAndNil(FRings[I].FAcceptThread);
+    end;
+end;
+
+procedure TIOUringBackend.ShutdownConn(AConn: Pointer);
+var
+  LConn: TNativeConn absolute AConn;
+  LSock: Integer;
+begin
+  // #173: skip if SocketClose already invalidated the fd (kernel reuse).
+  LSock := LConn.Socket;
+  if LSock <> -1 then
+    shutdown(LSock, SHUT_RDWR);
+end;
+
+procedure TIOUringBackend.SignalWorkers;
+var
+  I: Integer;
+begin
+  TInterlocked.Exchange(FShutdown, 1);
+  for I := 0 to High(FRings) do
+    if (FRings[I] <> nil) and (FRings[I].FRingFd >= 0) then
+      FRings[I].SignalShutdown;
+end;
+
+procedure TIOUringBackend.JoinWorkers;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FRings) do
+  begin
+    if FRings[I] = nil then Continue;
+    if FRings[I].FCompThread <> nil then
+    begin
+      FRings[I].FCompThread.WaitFor;
+      FreeAndNil(FRings[I].FCompThread);
+    end;
+    FRings[I].TeardownMaps;
+  end;
+end;
+
 // ---------------------------------------------------------------------------
 // IIOBackend — per-connection
 // ---------------------------------------------------------------------------
@@ -791,32 +1209,36 @@ procedure TIOUringBackend.RegisterConn(AConn: Pointer);
 var
   LConn: TNativeConn absolute AConn;
 begin
-  _RegisterFd(LConn.Socket);
+  // Pin the connection to the ring whose accept thread produced it.
+  LConn.OwnerRingIdx := GCurrentRingIdx;
+  FRings[LConn.OwnerRingIdx]._RegisterFd(LConn.Socket);
 end;
 
 procedure TIOUringBackend.PostRecv(AConn: Pointer);
 var
   LCtx: PRecvCtx;
   LConn: TNativeConn absolute AConn;
+  LRing: TUringRing;
 begin
-  LCtx := _RecvPoolAcquire;
+  LRing := _RingOf(LConn);
+  LCtx := LRing._RecvPoolAcquire;
   LCtx^.Conn := LConn;
   LConn.AddRef;
-  FSQLock.Acquire;
+  LRing.FSQLock.Acquire;
   try
-    if not _SubmitSQE(IORING_OP_RECV, LConn.Socket,
+    if not LRing._SubmitSQE(IORING_OP_RECV, LConn.Socket,
       @LCtx^.Buf[0], CRecvBufSize, UInt64(LCtx)) then
     begin
       // Ring full — cancel the ref we just took and signal an error so the
       // server closes the connection instead of leaving it orphaned forever.
       LConn.Release;
-      _RecvPoolRelease(LCtx);
+      LRing._RecvPoolRelease(LCtx);
       FCallbacks.OnConnError(AConn);
       Exit;
     end;
-    _NotifyKernel;
+    LRing._NotifyKernel;
   finally
-    FSQLock.Release;
+    LRing.FSQLock.Release;
   end;
 end;
 
@@ -824,6 +1246,7 @@ procedure TIOUringBackend.PostSend(AConn: Pointer; const AData: TBytes;
   AActualLen: Integer);
 var
   LConn: TNativeConn absolute AConn;
+  LRing: TUringRing;
   LSendLen: Integer;
   LZCRef: PSendZCRef;
   LTmp: TBytes;
@@ -850,6 +1273,7 @@ begin
   begin
     // Zero-copy send: kernel DMAs directly from user buffer.
     // Two CQEs per op: result (proceed) + notification (buffer safe to free).
+    LRing := _RingOf(LConn);
     New(LZCRef);
     LZCRef^.Conn := LConn;
     LZCRef^.SendBuf := AData;
@@ -858,9 +1282,9 @@ begin
 
     LConn.AddRef;  // result CQE
     LConn.AddRef;  // notification CQE
-    FSQLock.Acquire;
+    LRing.FSQLock.Acquire;
     try
-      if not _SubmitSQE(IORING_OP_SEND_ZC, LConn.Socket,
+      if not LRing._SubmitSQE(IORING_OP_SEND_ZC, LConn.Socket,
         @AData[0], UInt32(LSendLen),
         UInt64(LZCRef) or CUdTagSendZC) then
       begin
@@ -871,9 +1295,9 @@ begin
         FCallbacks.OnConnError(AConn);
         Exit;
       end;
-      _NotifyKernel;
+      LRing._NotifyKernel;
     finally
-      FSQLock.Release;
+      LRing.FSQLock.Release;
     end;
   end
   else
@@ -926,221 +1350,14 @@ begin
   // #173: invalidate the conn's fd copy before closing (kernel reuses fds).
   LSock := LConn.Socket;
   LConn.Socket := -1;
-  _UnregisterFd(LSock);
+  FRings[LConn.OwnerRingIdx]._UnregisterFd(LSock);
   // TCP half-close — FIN before full teardown so the client reads pending bytes
   shutdown(LSock, SHUT_WR);
   _LinuxClose(LSock);
 end;
 
 // ---------------------------------------------------------------------------
-// Pre-allocated recv context pool
-// ---------------------------------------------------------------------------
-
-function TIOUringBackend._RecvPoolAcquire: Pointer;
-var
-  LIdx: Integer;
-begin
-  FRecvPoolLock.Acquire;
-  try
-    if FRecvFreeTop > 0 then
-    begin
-      Dec(FRecvFreeTop);
-      LIdx := FRecvFreeIdx[FRecvFreeTop];
-      Result := PRecvCtx(FRecvPoolBase + NativeUInt(LIdx) * SizeOf(TRecvCtx));
-      Exit;
-    end;
-  finally
-    FRecvPoolLock.Release;
-  end;
-  New(Result);
-end;
-
-procedure TIOUringBackend._RecvPoolRelease(ACtx: Pointer);
-var
-  LOffset: NativeUInt;
-  LIdx: Integer;
-begin
-  LOffset := NativeUInt(PByte(ACtx)) - NativeUInt(FRecvPoolBase);
-  if LOffset < NativeUInt(CRecvPoolSize) * SizeOf(TRecvCtx) then
-  begin
-    LIdx := Integer(LOffset div SizeOf(TRecvCtx));
-    FRecvPoolLock.Acquire;
-    try
-      FRecvFreeIdx[FRecvFreeTop] := UInt16(LIdx);
-      Inc(FRecvFreeTop);
-    finally
-      FRecvPoolLock.Release;
-    end;
-  end
-  else
-    Dispose(ACtx);
-end;
-
-// ---------------------------------------------------------------------------
-// Registered files — eliminates fget/fput atomic refcount per I/O op
-// ---------------------------------------------------------------------------
-
-function TIOUringBackend._RegFileIndex(AFd: Integer): Integer;
-begin
-  // Linear scan — FRegCount is typically small relative to hot-path savings
-  Result := -1;
-  if not FRegFiles then Exit;
-  FRegLock.Acquire;
-  try
-    if (AFd >= 0) and (AFd < Length(FRegFds)) and (FRegFds[AFd] >= 0) then
-      Result := FRegFds[AFd];
-  finally
-    FRegLock.Release;
-  end;
-end;
-
-function TIOUringBackend._RegisterFd(AFd: Integer): Integer;
-var
-  LUpdate: TIOUringFilesUpdate;
-  LSlot: Integer;
-  LFdVal: Int32;
-begin
-  Result := -1;
-  if not FRegFiles then Exit;
-  FRegLock.Acquire;
-  try
-    if AFd >= Length(FRegFds) then
-      SetLength(FRegFds, AFd + 256); // grow mapping table
-
-    // Recycle freed slots instead of monotonic FRegCount
-    LSlot := -1;
-    if FRegFreeTop > 0 then
-    begin
-      Dec(FRegFreeTop);
-      LSlot := FRegFreeStack[FRegFreeTop];
-    end
-    else if FRegCount < CRegFilesMax then
-    begin
-      LSlot := FRegCount;
-      Inc(FRegCount);
-    end;
-    if LSlot < 0 then Exit; // table full
-
-    LFdVal := AFd;
-    FillChar(LUpdate, SizeOf(LUpdate), 0);
-    LUpdate.offset := UInt32(LSlot);
-    LUpdate.fds := UInt64(@LFdVal);
-
-    if _io_uring_register(FRingFd, IORING_REGISTER_FILES_UPDATE,
-      @LUpdate, 1) >= 0 then
-    begin
-      FRegFds[AFd] := LSlot;
-      Result := LSlot;
-    end
-    else
-    begin
-      // return slot to free stack
-      FRegFreeStack[FRegFreeTop] := LSlot;
-      Inc(FRegFreeTop);
-    end;
-  finally
-    FRegLock.Release;
-  end;
-end;
-
-procedure TIOUringBackend._UnregisterFd(AFd: Integer);
-var
-  LSlot: Integer;
-  LUpdate: TIOUringFilesUpdate;
-  LFdVal: Int32;
-begin
-  if not FRegFiles then Exit;
-  FRegLock.Acquire;
-  try
-    if (AFd < 0) or (AFd >= Length(FRegFds)) then Exit;
-    LSlot := FRegFds[AFd];
-    if LSlot < 0 then Exit;
-    LFdVal := -1;
-    FillChar(LUpdate, SizeOf(LUpdate), 0);
-    LUpdate.offset := UInt32(LSlot);
-    LUpdate.fds := UInt64(@LFdVal);
-    _io_uring_register(FRingFd, IORING_REGISTER_FILES_UPDATE, @LUpdate, 1);
-    FRegFds[AFd] := -1;
-    FRegFreeStack[FRegFreeTop] := LSlot;
-    Inc(FRegFreeTop);
-  finally
-    FRegLock.Release;
-  end;
-end;
-
-// ---------------------------------------------------------------------------
-// Notify kernel about new SQEs.  In normal mode, calls io_uring_enter
-// with to_submit=1.  In SQPOLL mode, the kernel poller picks up SQEs
-// automatically; we only call io_uring_enter if it went idle (NEED_WAKEUP).
-// ---------------------------------------------------------------------------
-
-procedure TIOUringBackend._NotifyKernel;
-var
-  LPending: Integer;
-begin
-  LPending := FPendingSQEs;
-  if LPending <= 0 then
-    LPending := 1;
-  FPendingSQEs := 0;
-
-  if FSQPoll then
-  begin
-    // Kernel poller is active — only wake it if it went idle
-    if (FPSQFlags <> nil) and
-       ((FPSQFlags^ and IORING_SQ_NEED_WAKEUP) <> 0) then
-      _io_uring_enter(FRingFd, 0, 0, IORING_ENTER_SQ_WAKEUP);
-  end
-  else
-    _io_uring_enter(FRingFd, LPending, 0, 0);
-end;
-
-// ---------------------------------------------------------------------------
-// Internal: SQE submission — MUST be called under FSQLock
-// ---------------------------------------------------------------------------
-
-function TIOUringBackend._SubmitSQE(AOpcode: Byte; AFd: Integer;
-  ABuf: Pointer; ALen: UInt32; AUserData: UInt64; AFlags: Byte): Boolean;
-var
-  LTail, LIdx: UInt32;
-  LSQE: PIOUringSQE;
-  LRegIdx: Integer;
-begin
-  LTail := FPSQTail^;
-
-  if LTail - FPSQHead^ >= FPSQMask^ + 1 then
-  begin
-    Result := False;
-    Exit;
-  end;
-
-  LIdx := LTail and FPSQMask^;
-  LSQE := PIOUringSQE(PByte(FSQEs) + NativeUInt(LIdx) * SizeOf(TIOUringSQE));
-  FillChar(LSQE^, SizeOf(TIOUringSQE), 0);
-  LSQE^.opcode := AOpcode;
-  LSQE^.addr := UInt64(ABuf);
-  LSQE^.len := ALen;
-  LSQE^.user_data := AUserData;
-
-  // Use registered file index when available (eliminates fget/fput atomics)
-  LRegIdx := _RegFileIndex(AFd);
-  if LRegIdx >= 0 then
-  begin
-    LSQE^.fd := LRegIdx;
-    LSQE^.flags := IOSQE_FIXED_FILE;
-  end
-  else
-    LSQE^.fd := AFd;
-  LSQE^.flags := LSQE^.flags or AFlags;  // #199: e.g. IOSQE_ASYNC on -EAGAIN retry
-
-  // x86-64 TSO: plain store sufficient; io_uring_enter acts as full barrier
-  FPSQTail^ := LTail + 1;
-  Inc(FPendingSQEs);
-
-  Result := True;
-end;
-
-// ---------------------------------------------------------------------------
-// Internal: send helper — submits a SEND SQE for the remaining bytes
+// Internal: send helpers
 // ---------------------------------------------------------------------------
 
 // #11 — serialization gate. Under LConn.Lock: if a send is already in flight,
@@ -1200,14 +1417,16 @@ begin
     AConn.Lock.Leave;
   end;
   if Result then
-    _ResubmitSend(AConn);  // acquires FSQLock; ordering LConn.Lock -> FSQLock ok
+    _ResubmitSend(AConn);  // acquires ring FSQLock; ordering LConn.Lock -> FSQLock ok
 end;
 
 procedure TIOUringBackend._ResubmitSend(AConn: TNativeConn; AAsync: Boolean);
 var
+  LRing: TUringRing;
   LTotal, LRemain: Integer;
   LFlags: Byte;
 begin
+  LRing := _RingOf(AConn);
   LTotal  := AConn.PendingSendActual;
   if LTotal = 0 then LTotal := Length(AConn.PendingSend);
   LRemain := LTotal - AConn.SentBytes;
@@ -1216,9 +1435,9 @@ begin
   if AAsync then LFlags := IOSQE_ASYNC;
 
   AConn.AddRef;
-  FSQLock.Acquire;
+  LRing.FSQLock.Acquire;
   try
-    if not _SubmitSQE(IORING_OP_SEND, AConn.Socket,
+    if not LRing._SubmitSQE(IORING_OP_SEND, AConn.Socket,
       @AConn.PendingSend[AConn.SentBytes], UInt32(LRemain),
       UInt64(AConn) or CUdTagSend, LFlags) then
     begin
@@ -1226,57 +1445,32 @@ begin
       FCallbacks.OnConnError(AConn);
       Exit;
     end;
-    _NotifyKernel;
+    LRing._NotifyKernel;
   finally
-    FSQLock.Release;
+    LRing.FSQLock.Release;
   end;
 end;
 
 // ---------------------------------------------------------------------------
-// Internal: CQE dispatch
+// CQE dispatch — runs on ARing's completion thread. The connection carried by
+// the CQE is pinned to ARing, so any resubmit routes back to ARing.
 // ---------------------------------------------------------------------------
 
-// Submit a multishot accept SQE — one submission handles all future accepts
-function TIOUringBackend._SubmitAcceptMultishot(AListenFd: Integer): Boolean;
-var
-  LTail, LIdx: UInt32;
-  LSQE: PIOUringSQE;
-begin
-  LTail := FPSQTail^;
-  if LTail - FPSQHead^ >= FPSQMask^ + 1 then
-  begin
-    Result := False;
-    Exit;
-  end;
-
-  LIdx := LTail and FPSQMask^;
-  LSQE := PIOUringSQE(PByte(FSQEs) + NativeUInt(LIdx) * SizeOf(TIOUringSQE));
-  FillChar(LSQE^, SizeOf(TIOUringSQE), 0);
-  LSQE^.opcode := IORING_OP_ACCEPT;
-  LSQE^.fd := AListenFd;
-  LSQE^.ioprio := IOSQE_ACCEPT_MULTISHOT;
-  LSQE^.op_flags := UInt32(SOCK_NONBLOCK or SOCK_CLOEXEC);
-  LSQE^.user_data := CUdTagAccept;
-
-  FPSQTail^ := LTail + 1;
-  Result := True;
-end;
-
-procedure TIOUringBackend._ProcessCQE(AUserData: UInt64; ARes: Int32;
-  AFlags: UInt32);
+procedure TIOUringBackend._ProcessCQE(ARing: TUringRing; AUserData: UInt64;
+  ARes: Int32; AFlags: UInt32);
 var
   LCtx: PRecvCtx;
   LConn: TNativeConn;
   LRecvConn: TNativeConn;
   LTotal: Integer;
-  LOne: Integer;
-  LAddr: sockaddr_in;
-  LAddrLen: Cardinal;
-  LIP: AnsiString;
   LZCRef: PSendZCRef;
   LHasNotif: Boolean;
   LRemainLen: Integer;
   LRemainBuf: TBytes;
+  LOne: Integer;
+  LAddr: sockaddr_in;
+  LAddrLen: Cardinal;
+  LIP: AnsiString;
 begin
   if AUserData = CUdShutdown then
   begin
@@ -1284,7 +1478,62 @@ begin
     Exit;
   end;
 
-  // Zero-copy send (CUdTagSendZC = 3, both bits 0+1 set) — must check before accept/send
+  // Multishot-accept CQE (CUdTagAccept = 2, an exact sentinel — no pool pointer
+  // or conn value equals 2). This ring's completion thread does the accepting,
+  // so GCurrentRingIdx (set at loop entry) pins the new connection to ARing.
+  if AUserData = CUdTagAccept then
+  begin
+    if ARes >= 0 then
+    begin
+      ARing.FAcceptErrStreak := 0;
+      LOne := 1;
+      _LinuxSetsockopt(ARes, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
+      _LinuxSetsockopt(ARes, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
+      FillChar(LAddr, SizeOf(LAddr), 0);
+      LAddrLen := SizeOf(LAddr);
+      getpeername(ARes, sockaddr(LAddr), LAddrLen);
+      LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
+      try
+        FCallbacks.OnNewConn(NativeUInt(ARes),
+          string(LIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
+      except
+        _LinuxClose(ARes);
+      end;
+    end
+    else if (TInterlocked.Read(FShutdown) = 0) and (ARing.FListenSocket >= 0) then
+    begin
+      // Genuine accept error (not teardown). We still re-arm below so the ring
+      // recovers once the transient condition (EMFILE/ENFILE — fd exhaustion)
+      // clears, but surface a sustained streak once so it is not silent.
+      Inc(ARing.FAcceptErrStreak);
+      if ARing.FAcceptErrStreak = CAcceptErrLogAt then
+        Writeln(ErrOutput, '[io_uring] ring ', ARing.FIdx,
+          ': ', CAcceptErrLogAt, ' consecutive accept errors (errno ',
+          -ARes, ') — fd exhaustion?');
+    end;
+    // F_MORE clear ⇒ kernel ended the multishot stream — re-arm it (unless we
+    // are shutting down or the listen socket was already closed by StopAccept).
+    if (AFlags and IORING_CQE_F_MORE) = 0 then
+    begin
+      ARing.FMultishotAccept := False;
+      if (TInterlocked.Read(FShutdown) = 0) and (ARing.FListenSocket >= 0) then
+      begin
+        ARing.FSQLock.Acquire;
+        try
+          if ARing._SubmitAcceptMultishot then
+          begin
+            ARing.FMultishotAccept := True;
+            ARing._NotifyKernel;
+          end;
+        finally
+          ARing.FSQLock.Release;
+        end;
+      end;
+    end;
+    Exit;
+  end;
+
+  // Zero-copy send (CUdTagSendZC = 3, both bits 0+1 set) — check before send.
   if (AUserData and 3) = CUdTagSendZC then
   begin
     LZCRef := PSendZCRef(Pointer(AUserData and not UInt64(3)));
@@ -1310,11 +1559,7 @@ begin
     // #207: a zero-copy SEND on an already-full socket buffer returns -EAGAIN
     // with NO buffer reference taken (F_MORE clear ⇒ no F_NOTIF will follow).
     // Like the regular SEND path (#199), this is NOT fatal — retry the whole
-    // buffer via a blocking regular SEND (io-wq). The #199 -EAGAIN fix only
-    // covered the regular completion; on kernel 6.0+ ZC is the DEFAULT send, so
-    // without this a large response to a slow peer whose socket buffer is full
-    // kills the connection. (Not hit by Autobahn's ping-pong echo, which drains
-    // the buffer between messages; hit under pipelined/streamed large sends.)
+    // buffer via a blocking regular SEND (io-wq).
     if (ARes = -CEAGAIN) and (not LHasNotif) then
     begin
       LConn.PendingSend       := LZCRef^.SendBuf;
@@ -1344,13 +1589,9 @@ begin
           // The kernel still references SendBuf[0..SentBytes) until the pending
           // F_NOTIF CQE. Copy the remainder into a FRESH buffer for the resubmit
           // so its completion cannot return the still-in-flight original to the
-          // pool (which would corrupt another request's data). The original is
-          // freed by the F_NOTIF path; do NOT nil it here.
+          // pool. The original is freed by the F_NOTIF path; do NOT nil it here.
           LRemainLen := LZCRef^.TotalLen - LZCRef^.SentBytes;
-          LRemainBuf := TBufferPool.Acquire(LRemainLen);  // #199: size for the
-          // REMAINDER — the no-arg Acquire returned an 8 KB tier buffer and the
-          // Move below overflowed it for any send >4 MB (socket buffer) that
-          // partial-completed, corrupting the heap and killing the connection.
+          LRemainBuf := TBufferPool.Acquire(LRemainLen);
           Move(LZCRef^.SendBuf[LZCRef^.SentBytes], LRemainBuf[0], LRemainLen);
           LConn.PendingSend       := LRemainBuf;
           LConn.PendingSendActual := LRemainLen;
@@ -1389,51 +1630,13 @@ begin
     Exit;
   end;
 
-  if AUserData = CUdTagAccept then
-  begin
-    if ARes >= 0 then
-    begin
-      LOne := 1;
-      _LinuxSetsockopt(ARes, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
-      _LinuxSetsockopt(ARes, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
-      FillChar(LAddr, SizeOf(LAddr), 0);
-      LAddrLen := SizeOf(LAddr);
-      getpeername(ARes, sockaddr(LAddr), LAddrLen);
-      LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
-      try
-        FCallbacks.OnNewConn(NativeUInt(ARes),
-          string(LIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
-      except
-        _LinuxClose(ARes);
-      end;
-    end;
-    // If IORING_CQE_F_MORE not set, kernel cancelled the multishot accept
-    if (AFlags and IORING_CQE_F_MORE) = 0 then
-    begin
-      FMultishotAccept := False;
-      // Re-arm multishot accept — without this, server stops accepting
-      if (TInterlocked.Read(FShutdown) = 0) and (Length(FListenSockets) > 0) then
-      begin
-        FSQLock.Acquire;
-        try
-          _SubmitAcceptMultishot(FListenSockets[0]);
-          _NotifyKernel;
-        finally
-          FSQLock.Release;
-        end;
-      end;
-    end;
-    Exit;
-  end;
-
   if (AUserData and CUdTagSend) <> 0 then
   begin
     LConn := TNativeConn(Pointer(UInt64(AUserData and not CUdTagSend)));
 
     // #199: a non-blocking SEND on a full socket buffer returns -EAGAIN. That is
     // NOT fatal — re-submit the same remaining bytes via io-wq (IOSQE_ASYNC) so
-    // the kernel completes the send as the peer drains. Without this a WS/HTTP
-    // response larger than the socket send buffer (~4 MB) kills the connection.
+    // the kernel completes the send as the peer drains.
     if ARes = -CEAGAIN then
     begin
       _ResubmitSend(LConn, True);
@@ -1454,7 +1657,6 @@ begin
     if LConn.SentBytes < LTotal then
     begin
       // Partial send — re-submit for the remaining bytes.
-      // _ResubmitSend does its own AddRef; we Release the current send-op ref.
       _ResubmitSend(LConn);
       LConn.Release;
     end
@@ -1484,92 +1686,8 @@ begin
       else
         FCallbacks.OnConnError(LRecvConn);   // real error
     finally
-      _RecvPoolRelease(LCtx);
+      ARing._RecvPoolRelease(LCtx);
       LRecvConn.Release;
-    end;
-  end;
-end;
-
-// ---------------------------------------------------------------------------
-// Completion thread — single thread; serial CQE drain after each wakeup
-// ---------------------------------------------------------------------------
-
-procedure TIOUringBackend._CompletionLoop;
-var
-  LHead, LTail, LMask: UInt32;
-  LCQE: PIOUringCQE;
-begin
-  while TInterlocked.Read(FShutdown) = 0 do
-  begin
-    _io_uring_enter(FRingFd, 0, 1, IORING_ENTER_GETEVENTS);
-
-    LMask := FPCQMask^;
-    LHead := FPCQHead^;
-    LTail := FPCQTail^;
-
-    // Batch CQ head update — process all CQEs, then advance head once.
-    // FEAT_NODROP: when available, kernel applies backpressure instead of
-    // dropping CQEs.  This drain loop processes the entire batch before
-    // advancing CQ head, which is optimal — the kernel sees a single
-    // head update covering all consumed entries.
-    while LHead <> LTail do
-    begin
-      LCQE := PIOUringCQE(PByte(FPCQEs) +
-        NativeUInt(LHead and LMask) * SizeOf(TIOUringCQE));
-      try
-        _ProcessCQE(LCQE^.user_data, LCQE^.res, LCQE^.flags);
-      except
-        on E: Exception do
-          Writeln(ErrOutput, '[io_uring] CQE_EX [', E.ClassName, ']: ', E.Message);
-      end;
-      Inc(LHead);
-    end;
-    FPCQHead^ := LHead;
-  end;
-end;
-
-// ---------------------------------------------------------------------------
-// Accept thread — plain accept4() loop, identical to TEpollBackend._Accept
-// ---------------------------------------------------------------------------
-
-function TIOUringBackend._MakeAcceptThread(AListenFd: Integer): TThread;
-// AListenFd é parâmetro (capturado por valor pela closure) — evita o bug
-// clássico de captura por referência quando a variável do loop é usada
-// diretamente no anonymous method.
-begin
-  Result := TThread.CreateAnonymousThread(procedure begin _AcceptOn(AListenFd); end);
-end;
-
-procedure TIOUringBackend._AcceptOn(AListenFd: Integer);
-var
-  LFd: Integer;
-  LAddr: sockaddr_in;
-  LAddrLen: Cardinal;
-  LIP: AnsiString;
-  LOne: Integer;
-begin
-  while True do
-  begin
-    FillChar(LAddr, SizeOf(LAddr), 0);
-    LAddrLen := SizeOf(LAddr);
-    LFd := _LinuxAccept4(AListenFd, @LAddr, @LAddrLen,
-      SOCK_NONBLOCK or SOCK_CLOEXEC);
-    if LFd < 0 then
-    begin
-      if GetLastError = EINTR then Continue;
-      Break;  // listen socket closed by StopAccept
-    end;
-
-    LOne := 1;
-    _LinuxSetsockopt(LFd, IPPROTO_TCP, TCP_NODELAY, @LOne, SizeOf(LOne));
-    _LinuxSetsockopt(LFd, SOL_SOCKET, SO_KEEPALIVE, @LOne, SizeOf(LOne));
-
-    LIP := AnsiString(inet_ntoa(LAddr.sin_addr));
-    try
-      FCallbacks.OnNewConn(NativeUInt(LFd),
-        string(LIP) + ':' + IntToStr(ntohs(LAddr.sin_port)));
-    except
-      _LinuxClose(LFd);
     end;
   end;
 end;
