@@ -61,6 +61,11 @@ type
     AccumBuf: TBytes;
     AccumLen: Integer;
     KeepAlive: Boolean;
+    // Deferred-response teardown guard. Set to 1 (atomically) inside _CloseConn
+    // so a deferred completion arriving from another thread (TPoseidonResponder)
+    // knows the socket is already gone and skips the send — the object itself is
+    // kept alive by the responder's AddRef, but the fd is closed.
+    Closed: Integer;
     LastActivityTick: UInt64;
     InFlightPool: Integer;
     FPadInflight: array[0..14] of Integer; // Cache-line padding — isolate InFlightPool
@@ -135,6 +140,7 @@ begin
   AccumBuf := TBufferPool.Acquire;
   AccumLen := 0;
   KeepAlive := False;
+  Closed := 0;
   LastActivityTick := TThread.GetTickCount64;
   InFlightPool := 0;
   SSLHandle := nil;

@@ -137,9 +137,10 @@ type
     procedure UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     procedure UpgradeToH2C(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     function  DispatchWSFrames(AConn: Pointer): Boolean;
-    procedure InvokeRequest(const AReq: TPoseidonNativeRequest;
+    procedure InvokeRequest(AConn: Pointer; const AReq: TPoseidonNativeRequest;
       out AStatus: Integer; out AContentType: string;
-      out ABody: TBytes; out AExtra: TArray<TPair<string,string>>);
+      out ABody: TBytes; out AExtra: TArray<TPair<string,string>>;
+      out ADeferred: Boolean);
     procedure LogRequest(const AEvent: TPoseidonRequestLogEvent);
   end;
 
@@ -214,15 +215,18 @@ begin
   Result := False;
 end;
 
-procedure TMockCallbacks.InvokeRequest(const AReq: TPoseidonNativeRequest;
+procedure TMockCallbacks.InvokeRequest(AConn: Pointer;
+  const AReq: TPoseidonNativeRequest;
   out AStatus: Integer; out AContentType: string;
-  out ABody: TBytes; out AExtra: TArray<TPair<string,string>>);
+  out ABody: TBytes; out AExtra: TArray<TPair<string,string>>;
+  out ADeferred: Boolean);
 begin
   HandlerInvoked := True;
   AStatus        := 200;
   AContentType   := 'application/json';
   ABody          := TEncoding.UTF8.GetBytes('{"ok":true}');
   AExtra         := [];
+  ADeferred      := False;
 end;
 
 procedure TMockCallbacks.LogRequest(const AEvent: TPoseidonRequestLogEvent);
