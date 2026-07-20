@@ -372,11 +372,17 @@ tests/
 
 ## The Olympian Family
 
-| Project | Role |
-|---------|------|
-| **Poseidon** (this) | HTTP framework + async engine |
-| [**Triton**](https://github.com/herlondf/triton) | Generic resource pool (connections, clients) |
-| **Hermes** *(Redis4D)* | Redis client (key-value, pub/sub) |
+> *Poseidon commands the seas — raw power, the async engine beneath the waves.*
+> *Triton, his son, guards the depths — holds the connections that must not be lost.*
+> *Pegasus flies through the skies — HTTP routing, middleware and providers.*
+> *Hermes runs between all realms — carries messages, faster than any wave.*
+
+| Project | Myth | Role |
+|---------|------|------|
+| **Poseidon** (this) | God of the seas | Async-native HTTP framework + I/O engine — IOCP/RIO, io_uring/epoll |
+| [**Triton**](https://github.com/herlondf/triton) | Son of Poseidon, guardian of the depths | Generic resource pool — connections, clients, SMTP |
+| [**Pegasus**](https://github.com/herlondf/pegasus) | Born from Poseidon's blood, ridden by heroes | HTTP framework — routing, middleware, providers |
+| **Hermes** *(Redis4D)* | Messenger of the gods, guide between realms | Redis client — key-value, pub/sub, messaging |
 
 ---
 
