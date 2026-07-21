@@ -55,6 +55,7 @@ type
     constructor Create;
     destructor Destroy; override;
     // IIOBackend
+    procedure SetInlineDispatch(AEnabled: Boolean);
     procedure StartListening(const AHost: string; APort: Integer;
       AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
       AAcceptThreads: Integer = 1);
@@ -277,6 +278,11 @@ begin
     FWorkers[I] := TCoreWorkerThread.Create(Self, I);
     FWorkers[I].Start;
   end;
+end;
+
+procedure TEpollBackend.SetInlineDispatch(AEnabled: Boolean);
+begin
+  // No submission batching in the epoll backend — no-op.
 end;
 
 procedure TEpollBackend.StopAccept;

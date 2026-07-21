@@ -90,10 +90,15 @@ type
     // WebSocket
     function DispatchWSFrames(AConn: Pointer): Boolean;
 
-    // Application handler (includes exception handling and inflight tracking)
-    procedure InvokeRequest(const AReq: TPoseidonNativeRequest;
+    // Application handler (includes exception handling and inflight tracking).
+    // AConn is passed so the callback can bind a deferred responder to the
+    // connection currently being dispatched. ADeferred is set True when the
+    // handler took ownership of the response (Ctx.Defer) — the caller then must
+    // NOT send a response nor re-arm the connection.
+    procedure InvokeRequest(AConn: Pointer; const AReq: TPoseidonNativeRequest;
       out AStatus: Integer; out AContentType: string;
-      out ABody: TBytes; out AExtra: TArray<TPair<string,string>>);
+      out ABody: TBytes; out AExtra: TArray<TPair<string,string>>;
+      out ADeferred: Boolean);
 
     // Access log
     procedure LogRequest(const AEvent: TPoseidonRequestLogEvent);
@@ -589,13 +594,22 @@ var
   LLogEvt:     TPoseidonRequestLogEvent;
   LHdrBuf:     TBytes;
   LHdrLen:     Integer;
+  LDeferred:   Boolean;
 begin
   LConn := TNativeConn(ACtx.Conn);
   LConn.KeepAlive := ACtx.Req.KeepAlive;
 
   ACtx.StartTick := Int64(TThread.GetTickCount64);
-  FCallbacks.InvokeRequest(ACtx.Req, ACtx.Status, ACtx.ContentType,
-    ACtx.Body, ACtx.Extra);
+  FCallbacks.InvokeRequest(ACtx.Conn, ACtx.Req, ACtx.Status, ACtx.ContentType,
+    ACtx.Body, ACtx.Extra, LDeferred);
+
+  // Deferred: the handler owns the response (async). Do not send or re-arm —
+  // the responder holds the connection alive and completes it later.
+  if LDeferred then
+  begin
+    ACtx.Handled := True;
+    Exit;
+  end;
 
   // Vectored send — build headers separately, body sent as-is
   LHdrBuf := BuildHTTPResponseHeaders(ACtx.Status, ACtx.ContentType,
@@ -627,9 +641,16 @@ procedure TProtocolDispatcher.StepInvokeAndRespondLightweight(
 var
   LHdrBuf: TBytes;
   LHdrLen: Integer;
+  LDeferred: Boolean;
 begin
-  FCallbacks.InvokeRequest(ACtx.Req, ACtx.Status, ACtx.ContentType,
-    ACtx.Body, ACtx.Extra);
+  FCallbacks.InvokeRequest(ACtx.Conn, ACtx.Req, ACtx.Status, ACtx.ContentType,
+    ACtx.Body, ACtx.Extra, LDeferred);
+
+  if LDeferred then
+  begin
+    ACtx.Handled := True;
+    Exit;
+  end;
 
   // Vectored send — headers + body separately
   LHdrBuf := BuildHTTPResponseHeaders(ACtx.Status, ACtx.ContentType,

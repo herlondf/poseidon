@@ -61,6 +61,11 @@ type
     AccumBuf: TBytes;
     AccumLen: Integer;
     KeepAlive: Boolean;
+    // Deferred-response teardown guard. Set to 1 (atomically) inside _CloseConn
+    // so a deferred completion arriving from another thread (TPoseidonResponder)
+    // knows the socket is already gone and skips the send — the object itself is
+    // kept alive by the responder's AddRef, but the fd is closed.
+    Closed: Integer;
     LastActivityTick: UInt64;
     InFlightPool: Integer;
     FPadInflight: array[0..14] of Integer; // Cache-line padding — isolate InFlightPool
@@ -79,6 +84,13 @@ type
     PendingSendActual: Integer;
     SentBytes: Integer;
     OwnerEpollFd: Integer;
+    // io_uring multi-ring: index of the ring (completion thread + SQ) this
+    // connection is pinned to. Set in TIOUringBackend.RegisterConn from the
+    // GCurrentRingIdx threadvar (stamped by the accepting ring's accept thread),
+    // then read by every PostRecv/PostSend/_ResubmitSend/SocketClose so a
+    // connection's SQEs always go to the ring whose completion thread owns it —
+    // the epoll OwnerEpollFd model. Unused by the epoll backend.
+    OwnerRingIdx: Integer;
     // #11: io_uring send serialization. TLS requires strict byte ordering, but
     // io_uring does NOT order independent SEND SQEs — several frames in one
     // dispatch would submit concurrent sends that interleave on the wire ->
@@ -128,6 +140,7 @@ begin
   AccumBuf := TBufferPool.Acquire;
   AccumLen := 0;
   KeepAlive := False;
+  Closed := 0;
   LastActivityTick := TThread.GetTickCount64;
   InFlightPool := 0;
   SSLHandle := nil;
@@ -142,6 +155,7 @@ begin
   PPParsed := False;
 {$IFNDEF MSWINDOWS}
   OwnerEpollFd := -1;
+  OwnerRingIdx := 0;  // valid default ring; overwritten by RegisterConn
 {$ENDIF}
 end;
 

@@ -133,6 +133,7 @@ type
     procedure StartListening(const AHost: string; APort: Integer;
       AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
       AAcceptThreads: Integer = 1);
+    procedure SetInlineDispatch(AEnabled: Boolean);
     procedure StopAccept;
     procedure ShutdownConn(AConn: Pointer);
     procedure SignalWorkers;
@@ -531,6 +532,11 @@ begin
   FAcceptThread := TThread.CreateAnonymousThread(procedure begin _Accept; end);
   FAcceptThread.FreeOnTerminate := False;
   FAcceptThread.Start;
+end;
+
+procedure TRIOBackend.SetInlineDispatch(AEnabled: Boolean);
+begin
+  // No submission batching in the RIO backend — no-op.
 end;
 
 procedure TRIOBackend.StopAccept;

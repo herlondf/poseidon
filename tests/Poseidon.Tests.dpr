@@ -20,6 +20,7 @@ uses
   Poseidon.Tests.HPACK,
   Poseidon.Tests.Dispatcher,
   Poseidon.Tests.Connection,
+  Poseidon.Tests.DeferredResponse,
   Poseidon.Tests.Workers,
   Poseidon.Tests.Problem,
   Poseidon.Tests.Validation,

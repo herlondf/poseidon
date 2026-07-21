@@ -35,6 +35,14 @@ type
     ['{B2C3D4E5-F6A7-8901-BCDE-F12345678901}']
     // --- Lifecycle (call in order during Listen / Stop) ---
 
+    // Hint that request dispatch runs INLINE on the IO/completion thread
+    // (SyncDispatch) rather than being handed to the worker pool. The io_uring
+    // backend uses this to enable submission batching (queue SQEs and submit them
+    // with the next io_uring_enter(GETEVENTS)); it is only correct/beneficial
+    // when the submitting thread IS the completion thread. Other backends ignore
+    // it. Call before StartListening.
+    procedure SetInlineDispatch(AEnabled: Boolean);
+
     // Sets up IO subsystem, listen socket(s), workers, and accept thread(s).
     // AAcceptThreads > 1 creates per-core accept with SO_REUSEPORT (Linux)
     // or multiple accept threads on shared socket (Windows).

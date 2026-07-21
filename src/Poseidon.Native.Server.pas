@@ -86,6 +86,8 @@ type
     procedure SetPerCoreAccept(AValue: Boolean);
     function GetSyncDispatch: Boolean;
     procedure SetSyncDispatch(AValue: Boolean);
+    function GetFastPath: Boolean;
+    procedure SetFastPath(AValue: Boolean);
     function GetOnH2Push: TOnH2Push;
     procedure SetOnH2Push(AValue: TOnH2Push);
   public
@@ -147,6 +149,7 @@ type
     property TCPFastOpen: Boolean read GetTCPFastOpen write SetTCPFastOpen;
     property PerCoreAccept: Boolean read GetPerCoreAccept write SetPerCoreAccept;
     property SyncDispatch: Boolean read GetSyncDispatch write SetSyncDispatch;
+    property FastPath: Boolean read GetFastPath write SetFastPath;
     property OnH2Push: TOnH2Push read GetOnH2Push write SetOnH2Push;
     property PIDFile: string read FPIDFile write FPIDFile;
     property OnLog: TOnPoseidonLog read GetOnLog write SetOnLog;
@@ -669,6 +672,12 @@ begin Result := FServer.SyncDispatch; end;
 
 procedure TPoseidonServer.SetSyncDispatch(AValue: Boolean);
 begin FServer.SyncDispatch := AValue; end;
+
+function TPoseidonServer.GetFastPath: Boolean;
+begin Result := FServer.FastPath; end;
+
+procedure TPoseidonServer.SetFastPath(AValue: Boolean);
+begin FServer.FastPath := AValue; end;
 
 function TPoseidonServer.GetOnH2Push: TOnH2Push;
 begin Result := FServer.OnH2Push; end;

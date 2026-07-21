@@ -53,6 +53,7 @@ type
     procedure StartListening(const AHost: string; APort: Integer;
       AWorkerCount: Integer; AFastOpen: Boolean; ACallbacks: IIOCallbacks;
       AAcceptThreads: Integer = 1);
+    procedure SetInlineDispatch(AEnabled: Boolean);
     procedure StopAccept;
     procedure ShutdownConn(AConn: Pointer);
     procedure SignalWorkers;
@@ -437,6 +438,11 @@ begin
       _PostOneAccept(I);
     end;
   end;
+end;
+
+procedure TIOCPBackend.SetInlineDispatch(AEnabled: Boolean);
+begin
+  // No submission batching in the IOCP backend — no-op.
 end;
 
 procedure TIOCPBackend.StopAccept;

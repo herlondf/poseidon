@@ -80,6 +80,7 @@ type
     FTCPFastOpen: Boolean;
     FPerCoreAccept: Boolean;
     FSyncDispatch: Boolean;
+    FFastPath: Boolean;
     FProxyProtocol: TProxyProtocolMode;
     FTrustedProxies: TArray<string>;
     FIOBackend: IIOBackend;
@@ -88,6 +89,7 @@ type
     FSSLProvider: ISSLProvider;
 
     procedure SetSyncDispatch(AValue: Boolean);
+    procedure SetFastPath(AValue: Boolean);
     function  GetMaxConnections: Integer;
     procedure SetMaxConnections(AValue: Integer);
     function  GetMaxConnectionsPerIP: Integer;
@@ -121,6 +123,12 @@ type
       const AExtra: TArray<TPair<string,string>>): TBytes;
     procedure _EncryptAndSend(AConn: Pointer; const AAppData: TBytes;
       AActualLen: Integer = 0);
+    // Vectored send (headers + body, no concatenation on the plain path; SSL
+    // concatenates then encrypts). Shared by the dispatch pipeline and by
+    // deferred responders. Must be called with LConn.Lock held.
+    procedure _SendResponseV(AConn: Pointer;
+      const AHeaders: TBytes; AHdrLen: Integer;
+      const ABody: TBytes; ABodyLen: Integer);
     procedure _SSLFlushWriteBio(AConn: Pointer);
 
 
@@ -210,16 +218,24 @@ type
     // across sockets via source IP/port hash. Default False (single accept).
     // On Windows: ignored (IOCP handles distribution internally).
     property PerCoreAccept: Boolean read FPerCoreAccept write FPerCoreAccept;
-    // SyncDispatch: execute request handlers directly on IO threads instead of
-    // posting to the elastic worker pool. Eliminates thread-transition overhead
-    // (~50-100us per request) but BLOCKS the IO thread during handler execution.
-    // Only enable when handlers are non-blocking (no DB, no file I/O, no Sleep).
-    // Default False (async worker pool).
-    // NOTE: the SyncDispatch pipeline is the lightweight parser path, which does
-    // NOT perform WebSocket / HTTP-2 (h2c) upgrade detection. Enable SyncDispatch
-    // only for plain HTTP/1.1 request-response workloads; leave it False when the
-    // server must accept WebSocket or h2c upgrades (issue #165).
+    // SyncDispatch: execute request handlers directly on the IO/completion thread
+    // instead of posting to the elastic worker pool. Eliminates the
+    // completion<->pool hand-off (~2x throughput on the multi-ring io_uring
+    // backend) but BLOCKS that thread during handler execution — enable ONLY when
+    // handlers are non-blocking (no DB, no file I/O, no Sleep). Default False
+    // (async worker pool; safe for blocking handlers).
+    // Orthogonal to FastPath: SyncDispatch chooses WHERE the pipeline runs
+    // (inline vs pool); FastPath chooses WHICH pipeline (full vs lightweight).
+    // With FastPath=False (default) the FULL pipeline runs, so WebSocket / h2c
+    // upgrades, access logging and security headers all work under SyncDispatch.
     property SyncDispatch: Boolean read FSyncDispatch write SetSyncDispatch;
+    // FastPath: use the lightweight dispatch pipeline (minimal parse, no header
+    // materialization, no logging/security headers, NO WebSocket/h2c upgrade
+    // detection). Squeezes out the last ~10-20% for pure HTTP/1.1
+    // request-response workloads that never upgrade. Default False (full
+    // pipeline). Must be set before Listen(). Combine with SyncDispatch for the
+    // maximum-throughput plain-HTTP path.
+    property FastPath: Boolean read FFastPath write SetFastPath;
     // Proxy Protocol: ppDisabled (default) disables PP processing.
     // ppV1/ppV2: enforce a specific version. ppAuto: detect by signature.
     // Enable only when the server receives connections exclusively from a
@@ -248,7 +264,8 @@ uses
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.Security,
   Poseidon.Net.ResponseBuilder,
-  Poseidon.Net.HTTP1.Parser;
+  Poseidon.Net.HTTP1.Parser,
+  Poseidon.Native.Types;
 {$ELSE}
 uses
   Poseidon.Net.IO.IOUring,
@@ -257,7 +274,8 @@ uses
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.Security,
   Poseidon.Net.ResponseBuilder,
-  Poseidon.Net.HTTP1.Parser;
+  Poseidon.Net.HTTP1.Parser,
+  Poseidon.Native.Types;
 {$ENDIF}
 
 // ===========================================================================
@@ -348,6 +366,224 @@ begin
   _PostSend(AConn, LEnc);
 end;
 
+// Vectored send shared by the dispatch pipeline (via TServerDispatchAdapter)
+// and by deferred responders (TPoseidonResponder). Plain path sends headers +
+// body without concatenation; SSL path concatenates then encrypts. Caller holds
+// LConn.Lock.
+procedure TPoseidonNativeServer._SendResponseV(AConn: Pointer;
+  const AHeaders: TBytes; AHdrLen: Integer;
+  const ABody: TBytes; ABodyLen: Integer);
+var
+  LConn:   TNativeConn absolute AConn;
+  LConcat: TBytes;
+  LHLen:   Integer;
+  LBLen:   Integer;
+  LTmp:    TBytes;
+begin
+  LHLen := AHdrLen;
+  if LHLen = 0 then LHLen := Length(AHeaders);
+  LBLen := ABodyLen;
+  if LBLen = 0 then LBLen := Length(ABody);
+
+  if LConn.SSLHandle <> nil then
+  begin
+    // SSL requires contiguous data — concatenate and encrypt
+    LConcat := FBufferPool.Acquire(LHLen + LBLen);
+    if LHLen > 0 then Move(AHeaders[0], LConcat[0], LHLen);
+    if LBLen > 0 then Move(ABody[0], LConcat[LHLen], LBLen);
+    LTmp := AHeaders;
+    FBufferPool.Release(LTmp);
+    LTmp := ABody;
+    FBufferPool.Release(LTmp);
+    _EncryptAndSend(AConn, LConcat, LHLen + LBLen);
+  end
+  else
+    FIOBackend.PostSendV(AConn, AHeaders, LHLen, ABody, LBLen);
+end;
+
+// ===========================================================================
+// Deferred responses — TPoseidonResponder + Ctx.Defer hook
+// ===========================================================================
+
+// Per-thread deferral context. Set by TServerDispatchAdapter.InvokeRequest
+// around the handler call so Ctx.Defer (via GPoseidonDeferHook -> _DeferHook)
+// can mint a responder bound to the connection dispatched ON THIS THREAD.
+// Saved/restored for reentrancy; restored to nil after the top-level dispatch
+// returns, so an HTTP/2 request (which never sets this) sees GDeferConn=nil and
+// Ctx.Defer raises instead of binding to a stale connection.
+threadvar
+  GDeferConn:      Pointer;   // TNativeConn being dispatched
+  GDeferServer:    Pointer;   // TPoseidonNativeServer
+  GDeferKeepAlive: Boolean;
+  GDeferSecure:    Boolean;
+  GDeferBanner:    string;
+  GDeferActive:    Boolean;   // set True by the hook when Defer() was called
+
+// Merge middleware-added headers (captured at Defer time) with the headers the
+// app passes to Respond. App values win on a case-insensitive key collision.
+function _MergeExtra(const ABase, AOver: TArray<TPair<string,string>>):
+  TArray<TPair<string,string>>;
+var
+  I, J, N: Integer;
+  LFound:  Boolean;
+begin
+  if Length(AOver) = 0 then Exit(ABase);
+  if Length(ABase) = 0 then Exit(AOver);
+  Result := Copy(ABase);
+  for I := 0 to High(AOver) do
+  begin
+    LFound := False;
+    for J := 0 to High(Result) do
+      if SameText(Result[J].Key, AOver[I].Key) then
+      begin
+        Result[J] := AOver[I];
+        LFound := True;
+        Break;
+      end;
+    if not LFound then
+    begin
+      N := Length(Result);
+      SetLength(Result, N + 1);
+      Result[N] := AOver[I];
+    end;
+  end;
+end;
+
+type
+  // Completes a deferred HTTP/1.1 response. Bound to a connection at Defer time,
+  // it keeps that connection alive (AddRef), exempt from the idle sweep
+  // (InFlightPool) and counted for backpressure (FInFlightCount) until the app
+  // responds — from ANY thread — or drops the handle (force-close fallback).
+  TPoseidonResponder = class(TInterfacedObject, IPoseidonResponder)
+  private
+    FConn:      Pointer;
+    FServer:    TPoseidonNativeServer;
+    FKeepAlive: Boolean;
+    FSecure:    Boolean;
+    FBanner:    string;
+    FBaseExtra: TArray<TPair<string,string>>;
+    FDone:      Integer;  // 0=pending, 1=torn down (atomic, one-shot)
+    procedure Teardown(ASend: Boolean; AStatus: Integer;
+      const AContentType: string; const ABody: TBytes;
+      const AExtra: TArray<TPair<string,string>>);
+  public
+    constructor Create(AConn: Pointer; AServer: TPoseidonNativeServer;
+      AKeepAlive, ASecure: Boolean; const ABanner: string;
+      const ABaseExtra: TArray<TPair<string,string>>);
+    destructor Destroy; override;
+    procedure Respond(AStatus: Integer; const AContentType: string;
+      const ABody: TBytes; const AExtra: TArray<TPair<string,string>>);
+    procedure RespondText(AStatus: Integer; const AContentType, ABody: string);
+    procedure Fail(AStatus: Integer; const AMessage: string);
+  end;
+
+constructor TPoseidonResponder.Create(AConn: Pointer;
+  AServer: TPoseidonNativeServer; AKeepAlive, ASecure: Boolean;
+  const ABanner: string; const ABaseExtra: TArray<TPair<string,string>>);
+begin
+  inherited Create;
+  FConn      := AConn;
+  FServer    := AServer;
+  FKeepAlive := AKeepAlive;
+  FSecure    := ASecure;
+  FBanner    := ABanner;
+  FBaseExtra := ABaseExtra;
+  FDone      := 0;
+  // Keep the connection object alive across the async gap, exempt it from the
+  // idle sweep, and count it as in-flight so pre-queue backpressure sees the
+  // pending deferred work.
+  TNativeConn(FConn).AddRef;
+  TInterlocked.Increment(TNativeConn(FConn).InFlightPool);
+  TInterlocked.Increment(FServer.FInFlightCount);
+end;
+
+destructor TPoseidonResponder.Destroy;
+begin
+  // Handle dropped without a reply -> force-close so the connection is never
+  // left hanging (recv unarmed, counters never released).
+  Teardown(False, 0, '', nil, nil);
+  inherited Destroy;
+end;
+
+procedure TPoseidonResponder.Teardown(ASend: Boolean; AStatus: Integer;
+  const AContentType: string; const ABody: TBytes;
+  const AExtra: TArray<TPair<string,string>>);
+var
+  LConn:       TNativeConn;
+  LMerged:     TArray<TPair<string,string>>;
+  LHdr:        TBytes;
+  LHdrLen:     Integer;
+  LDoShutdown: Boolean;
+begin
+  // Exactly one of {Respond/Fail, destructor} runs the teardown.
+  if TInterlocked.CompareExchange(FDone, 1, 0) <> 0 then Exit;
+  LConn := TNativeConn(FConn);
+  LDoShutdown := False;
+  try
+    LConn.Lock.Enter;
+    try
+      // Socket already gone (client disconnected / idle-swept while we waited):
+      // skip the send, just release. The object stayed alive via our AddRef.
+      if TInterlocked.Add(LConn.Closed, 0) = 0 then
+      begin
+        if ASend then
+        begin
+          LConn.KeepAlive := FKeepAlive;
+          LMerged := _MergeExtra(FBaseExtra, AExtra);
+          LHdr := BuildHTTPResponseHeaders(AStatus, AContentType, Length(ABody),
+            FKeepAlive, LMerged, FSecure, FBanner, LHdrLen);
+          FServer._SendResponseV(FConn, LHdr, LHdrLen, ABody, Length(ABody));
+        end
+        else
+          LDoShutdown := True;  // graceful close after we drop the lock
+      end;
+    finally
+      LConn.Lock.Leave;
+    end;
+    if LDoShutdown then
+      FServer.FIOBackend.ShutdownConn(FConn);
+  finally
+    TInterlocked.Decrement(LConn.InFlightPool);
+    TInterlocked.Decrement(FServer.FInFlightCount);
+    LConn.Release;
+    FConn := nil;
+  end;
+end;
+
+procedure TPoseidonResponder.Respond(AStatus: Integer;
+  const AContentType: string; const ABody: TBytes;
+  const AExtra: TArray<TPair<string,string>>);
+begin
+  Teardown(True, AStatus, AContentType, ABody, AExtra);
+end;
+
+procedure TPoseidonResponder.RespondText(AStatus: Integer;
+  const AContentType, ABody: string);
+begin
+  Respond(AStatus, AContentType, TEncoding.UTF8.GetBytes(ABody), nil);
+end;
+
+procedure TPoseidonResponder.Fail(AStatus: Integer; const AMessage: string);
+begin
+  Respond(AStatus, 'text/plain', TEncoding.UTF8.GetBytes(AMessage), nil);
+end;
+
+// GPoseidonDeferHook target — mints a responder bound to the connection being
+// dispatched on the calling thread. Reads the per-thread deferral context set
+// by TServerDispatchAdapter.InvokeRequest.
+function _DeferHook(const ABaseExtra: TArray<TPair<string,string>>):
+  IPoseidonResponder;
+begin
+  if GDeferConn = nil then
+    raise Exception.Create(
+      'Ctx.Defer is only valid during an active HTTP/1.1 request dispatch ' +
+      '(HTTP/2 deferred responses are not supported yet).');
+  Result := TPoseidonResponder.Create(GDeferConn,
+    TPoseidonNativeServer(GDeferServer), GDeferKeepAlive, GDeferSecure,
+    GDeferBanner, ABaseExtra);
+  GDeferActive := True;
+end;
+
 procedure TPoseidonNativeServer._SSLFlushWriteBio(AConn: Pointer);
 var
   LConn:    TNativeConn absolute AConn;
@@ -384,9 +620,10 @@ type
     procedure UpgradeToWS(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     procedure UpgradeToH2C(AConn: Pointer; const AReq: TPoseidonNativeRequest);
     function  DispatchWSFrames(AConn: Pointer): Boolean;
-    procedure InvokeRequest(const AReq: TPoseidonNativeRequest;
+    procedure InvokeRequest(AConn: Pointer; const AReq: TPoseidonNativeRequest;
       out AStatus: Integer; out AContentType: string;
-      out ABody: TBytes; out AExtra: TArray<TPair<string,string>>);
+      out ABody: TBytes; out AExtra: TArray<TPair<string,string>>;
+      out ADeferred: Boolean);
     procedure LogRequest(const AEvent: TPoseidonRequestLogEvent);
     procedure AdjustInflight(ADelta: Integer);
   end;
@@ -417,33 +654,8 @@ end;
 procedure TServerDispatchAdapter.SendResponseV(AConn: Pointer;
   const AHeaders: TBytes; AHdrLen: Integer;
   const ABody: TBytes; ABodyLen: Integer);
-var
-  LConn:   TNativeConn;
-  LConcat: TBytes;
-  LHLen:   Integer;
-  LBLen:   Integer;
-  LTmp:    TBytes;
 begin
-  LConn := TNativeConn(AConn);
-  LHLen := AHdrLen;
-  if LHLen = 0 then LHLen := Length(AHeaders);
-  LBLen := ABodyLen;
-  if LBLen = 0 then LBLen := Length(ABody);
-
-  if LConn.SSLHandle <> nil then
-  begin
-    // SSL requires contiguous data — concatenate and encrypt
-    LConcat := FServer.FBufferPool.Acquire(LHLen + LBLen);
-    if LHLen > 0 then Move(AHeaders[0], LConcat[0], LHLen);
-    if LBLen > 0 then Move(ABody[0], LConcat[LHLen], LBLen);
-    LTmp := AHeaders;
-    FServer.FBufferPool.Release(LTmp);
-    LTmp := ABody;
-    FServer.FBufferPool.Release(LTmp);
-    FServer._EncryptAndSend(AConn, LConcat, LHLen + LBLen);
-  end
-  else
-    FServer.FIOBackend.PostSendV(AConn, AHeaders, LHLen, ABody, LBLen);
+  FServer._SendResponseV(AConn, AHeaders, AHdrLen, ABody, ABodyLen);
 end;
 
 procedure TServerDispatchAdapter.UpgradeToWS(AConn: Pointer;
@@ -463,28 +675,60 @@ begin
   Result := FServer._DispatchWSFrames(AConn);
 end;
 
-procedure TServerDispatchAdapter.InvokeRequest(const AReq: TPoseidonNativeRequest;
+procedure TServerDispatchAdapter.InvokeRequest(AConn: Pointer;
+  const AReq: TPoseidonNativeRequest;
   out AStatus: Integer; out AContentType: string;
-  out ABody: TBytes; out AExtra: TArray<TPair<string,string>>);
+  out ABody: TBytes; out AExtra: TArray<TPair<string,string>>;
+  out ADeferred: Boolean);
+var
+  LSaveConn, LSaveServer: Pointer;
+  LSaveKA, LSaveSec, LSaveActive: Boolean;
+  LSaveBanner: string;
 begin
   AStatus      := 500;
   AContentType := 'application/json';
   ABody        := DefaultErrorBody;
   SetLength(AExtra, 0);
+  ADeferred    := False;
+
+  // Publish the deferral context for this thread (save prior for reentrancy).
+  LSaveConn   := GDeferConn;
+  LSaveServer := GDeferServer;
+  LSaveKA     := GDeferKeepAlive;
+  LSaveSec    := GDeferSecure;
+  LSaveBanner := GDeferBanner;
+  LSaveActive := GDeferActive;
+
+  GDeferConn      := AConn;
+  GDeferServer    := FServer;
+  GDeferKeepAlive := AReq.KeepAlive;
+  GDeferSecure    := FServer.FSecureHeadersEnabled;
+  GDeferBanner    := FServer.FServerBanner;
+  GDeferActive    := False;
   try
-    FServer.FOnRequest(AReq, AStatus, AContentType, ABody, AExtra);
-  except
-    on E: Exception do
-    begin
-      AStatus      := 500;
-      AContentType := 'application/problem+json';
-      // Do not leak the raw exception message (info disclosure + it could break
-      // the JSON). Unexpected errors get a generic detail.
-      ABody        := TEncoding.UTF8.GetBytes(
-        '{"type":"about:blank","title":"Internal Server Error",' +
-        '"status":500,"detail":"An unexpected error occurred."}');
-      SetLength(AExtra, 0);
+    try
+      FServer.FOnRequest(AReq, AStatus, AContentType, ABody, AExtra);
+    except
+      on E: Exception do
+      begin
+        AStatus      := 500;
+        AContentType := 'application/problem+json';
+        // Do not leak the raw exception message (info disclosure + it could break
+        // the JSON). Unexpected errors get a generic detail.
+        ABody        := TEncoding.UTF8.GetBytes(
+          '{"type":"about:blank","title":"Internal Server Error",' +
+          '"status":500,"detail":"An unexpected error occurred."}');
+        SetLength(AExtra, 0);
+      end;
     end;
+    ADeferred := GDeferActive;
+  finally
+    GDeferConn      := LSaveConn;
+    GDeferServer    := LSaveServer;
+    GDeferKeepAlive := LSaveKA;
+    GDeferSecure    := LSaveSec;
+    GDeferBanner    := LSaveBanner;
+    GDeferActive    := LSaveActive;
   end;
 end;
 
@@ -969,19 +1213,31 @@ procedure TPoseidonNativeServer.SetSyncDispatch(AValue: Boolean);
 begin
   if FSyncDispatch = AValue then
     Exit;
-  // Guard: swapping FDispatcher under traffic is a UAF — a worker may still
-  // be dereferencing the old dispatcher. Deny the change once the server is
-  // active; caller must set SyncDispatch before Listen().
+  // SyncDispatch only chooses inline vs pool at dispatch time; it does not change
+  // the pipeline object, so no rebuild is needed. Still deny the change under
+  // traffic — a request may be mid-dispatch on the old routing.
   if FActive then
     raise Exception.Create(
       'TPoseidonNativeServer: SyncDispatch cannot be changed while active');
   FSyncDispatch := AValue;
-  // Rebuild pipeline — lightweight vs full is baked into the step array
+end;
+
+procedure TPoseidonNativeServer.SetFastPath(AValue: Boolean);
+begin
+  if FFastPath = AValue then
+    Exit;
+  // FastPath selects the pipeline (lightweight vs full), baked into the step
+  // array at construction — rebuild the dispatcher. Swapping FDispatcher under
+  // traffic is a UAF (a worker may still deref the old one), so deny while active.
+  if FActive then
+    raise Exception.Create(
+      'TPoseidonNativeServer: FastPath cannot be changed while active');
+  FFastPath := AValue;
   if FDispatcher <> nil then
   begin
     FreeAndNil(FDispatcher);
     FDispatcher := TProtocolDispatcher.Create(
-      TServerDispatchAdapter.Create(Self), FSyncDispatch);
+      TServerDispatchAdapter.Create(Self), FFastPath);
   end;
 end;
 
@@ -1017,6 +1273,7 @@ begin
   {$ELSE}
   FSyncDispatch := False;
   {$ENDIF}
+  FFastPath := False;  // full pipeline by default (upgrades/logging/security)
   FProxyProtocol := ppDisabled;
   FWSManager := TWebSocketManager.Create(
     procedure(AConn: Pointer; const AData: TBytes) begin _EncryptAndSend(AConn, AData); end,
@@ -1029,7 +1286,7 @@ begin
     procedure(AConn: Pointer; const AData: TBytes) begin _EncryptAndSend(AConn, AData); end,
     procedure(AConn: Pointer) begin _CloseConn(AConn); end,
     procedure(AConn: Pointer) begin _PostRecv(AConn); end);
-  FDispatcher := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self), FSyncDispatch);
+  FDispatcher := TProtocolDispatcher.Create(TServerDispatchAdapter.Create(Self), FFastPath);
   // Create platform IO backend — ONLY {$IFDEF} remaining in HttpServer.
   // Windows: IOCP by default (AcceptEx + SO_UPDATE_ACCEPT_CONTEXT + WSARecv;
   //   loads AcceptEx via WSAIoctl with a static mswsock fallback, so it works
@@ -1168,6 +1425,8 @@ begin
     LAcceptN := TThread.ProcessorCount
   else
     LAcceptN := 1;
+  // Inline dispatch (SyncDispatch) lets the io_uring backend batch SQE submits.
+  FIOBackend.SetInlineDispatch(FSyncDispatch);
   FIOBackend.StartListening(AHost, APort, LIOWorkers, FTCPFastOpen,
     TServerIOAdapter.Create(Self), LAcceptN);
 
@@ -1362,6 +1621,9 @@ begin
   // (Released only below), so the object and its Lock stay alive here.
   LConn.Lock.Enter;
   try
+    // Mark closed under the lock so a deferred responder completing from another
+    // thread sees it and skips the send instead of writing to a dead socket.
+    TInterlocked.Exchange(LConn.Closed, 1);
     if LConn.WSMode = CCMWebSocket then
     begin
       if LConn.WSConn <> nil then
@@ -1394,5 +1656,13 @@ begin
   // R-1: wake the drain event so Stop() can proceed without polling
   if Assigned(FDrainEvent) then FDrainEvent.SetEvent;
 end;
+
+initialization
+  // Wire Ctx.Defer to the native server's connection machinery. Set once at
+  // load; the per-thread deferral context selects the right connection.
+  GPoseidonDeferHook := _DeferHook;
+
+finalization
+  GPoseidonDeferHook := nil;
 
 end.
