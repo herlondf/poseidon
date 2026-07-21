@@ -48,6 +48,18 @@ type
     [Test] procedure Fuzz_MutatedValidFrames_NeverCrashesNeverHangs;
   end;
 
+  // WebSocket UTF-8 validation (RFC 3629) — the check that gates text/close
+  // frames (Autobahn 6.*/7.*). Fuzzing proves the validator never crashes/hangs
+  // on adversarial byte sequences; the vectors guard proves it actually
+  // classifies well-formed vs malformed UTF-8 correctly.
+  [TestFixture]
+  TFuzzWebSocketUtf8Tests = class
+  public
+    [Test] procedure Fuzz_RandomBytes_NeverCrashesNeverHangs;
+    [Test] procedure Fuzz_MutatedValidUtf8_NeverCrashesNeverHangs;
+    [Test] procedure KnownVectors_ClassifiedCorrectly;
+  end;
+
   // Deterministic smuggling guards for the HTTP/1 parser. Fuzzing proves "never
   // crashes"; these prove the SMUGGLING defenses actively hold — each crafts the
   // exact request for one RFC 7230 §3.3.3 desync vector and asserts the parser
@@ -87,14 +99,52 @@ uses
   System.Generics.Defaults,
   Poseidon.Net.HTTP1.Parser,
   Poseidon.Net.HTTP2.HPACK,
-  Poseidon.Net.WebSocket;
+  Poseidon.Net.WebSocket,
+  Poseidon.Net.WebSocket.Manager;
 
 const
   CHTTP1Iterations = 60000;
   CHPACKIterations = 60000;
-  // Generous ceiling: 60k pure-parse iterations complete in well under this on
-  // any dev box. Overrun ⇒ an input drove an infinite loop (a real DoS bug).
+  // Stall ceiling: the watchdog fails a run only if the loop makes NO progress
+  // for this long (a single input drove an infinite loop = a real DoS bug). It
+  // is per-stall, not per-run, so it stays correct however far FUZZ_SCALE
+  // stretches the iteration count.
   CWatchdogTimeoutMs = 25000;
+
+// Continuous-fuzzing knobs (env-driven; both default to today's exact behaviour
+// so the per-push CI gate stays fast and reproducible):
+//   FUZZ_SCALE — integer >= 1, multiplies the iteration count (nightly runs it
+//                large to fuzz for much longer).
+//   FUZZ_SEED  — hex/decimal salt XORed into every base seed, so a scheduled
+//                run explores a fresh input space each night while the default
+//                (unset -> 0) keeps the deterministic regression corpus.
+function FuzzScale: Integer;
+var
+  LEnv: string;
+  LVal: Integer;
+begin
+  Result := 1;
+  LEnv := GetEnvironmentVariable('FUZZ_SCALE');
+  if (LEnv <> '') and TryStrToInt(LEnv, LVal) and (LVal >= 1) then
+  begin
+    if LVal > 1000 then LVal := 1000;   // sanity ceiling
+    Result := LVal;
+  end;
+end;
+
+function FuzzSeedSalt: UInt64;
+var
+  LEnv: string;
+  LVal: UInt64;
+begin
+  Result := 0;
+  LEnv := GetEnvironmentVariable('FUZZ_SEED');
+  if LEnv = '' then Exit;
+  if LEnv.StartsWith('0x') or LEnv.StartsWith('0X') then
+    LEnv := '$' + LEnv.Substring(2);
+  if TryStrToUInt64(LEnv, LVal) then
+    Result := LVal;
+end;
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG — xorshift64. Seeded per run; reproducible.
@@ -208,6 +258,7 @@ var
   LThread: TThread;
   LDeadline: UInt64;
   LIter: Integer;
+  LLastIter: Integer;
   LSeed: UInt64;
   LDone: Boolean;
   LErr: string;
@@ -227,10 +278,19 @@ begin
   LThread.FreeOnTerminate := True;
   LThread.Start;
 
+  // Stall-based: reset the deadline whenever the iteration counter advances, so
+  // a long (high FUZZ_SCALE) run never false-trips — only a genuinely stuck
+  // input, which stops advancing the counter, trips the watchdog.
+  LLastIter := -1;
   LDeadline := TThread.GetTickCount64 + UInt64(CWatchdogTimeoutMs);
   repeat
     TThread.Sleep(20);
     AProgress.Snapshot(LIter, LSeed, LDone);
+    if LIter <> LLastIter then
+    begin
+      LLastIter := LIter;
+      LDeadline := TThread.GetTickCount64 + UInt64(CWatchdogTimeoutMs);
+    end;
   until LDone or (TThread.GetTickCount64 >= LDeadline);
 
   if not LDone then
@@ -432,9 +492,9 @@ var
 begin
   LSeed := $DEADBEEF01234567;
   if not ARandom then LSeed := $0BADF00DCAFEBABE;
-  LRng.Seed(LSeed);
+  LRng.Seed(LSeed xor FuzzSeedSalt);
 
-  for I := 0 to CHTTP1Iterations - 1 do
+  for I := 0 to CHTTP1Iterations * FuzzScale - 1 do
   begin
     LSeed := LRng.NextU64;
     AProgress.Mark(I, LSeed);
@@ -458,8 +518,8 @@ var
   LBody: TBytes;
   LMalformed: Boolean;
 begin
-  LRng.Seed($C0FFEE0011223344);
-  for I := 0 to CHTTP1Iterations - 1 do
+  LRng.Seed($C0FFEE0011223344 xor FuzzSeedSalt);
+  for I := 0 to CHTTP1Iterations * FuzzScale - 1 do
   begin
     AProgress.Mark(I, LRng.State);
     LBuf := RandomBuf(LRng, 2048);
@@ -519,12 +579,12 @@ var
   LHeaders: TArray<TPair<string, string>>;
   LTooBig, LProtoErr: Boolean;
 begin
-  if AStructured then LRng.Seed($1234ABCD5678EF01)
-  else LRng.Seed($FEDCBA9876543210);
+  if AStructured then LRng.Seed(UInt64($1234ABCD5678EF01) xor FuzzSeedSalt)
+  else LRng.Seed(UInt64($FEDCBA9876543210) xor FuzzSeedSalt);
 
   LCodec := TH2HpackCodec.Create;
   try
-    for I := 0 to CHPACKIterations - 1 do
+    for I := 0 to CHPACKIterations * FuzzScale - 1 do
     begin
       AProgress.Mark(I, LRng.State);
       if AStructured then
@@ -587,10 +647,10 @@ var
   LFrame: TWebSocketFrame;
   LMutations, M, LPos: Integer;
 begin
-  if AMutate then LRng.Seed($55AA55AA33CC33CC)
-  else LRng.Seed($1122334455667788);
+  if AMutate then LRng.Seed(UInt64($55AA55AA33CC33CC) xor FuzzSeedSalt)
+  else LRng.Seed(UInt64($1122334455667788) xor FuzzSeedSalt);
 
-  for I := 0 to CHTTP1Iterations - 1 do
+  for I := 0 to CHTTP1Iterations * FuzzScale - 1 do
   begin
     AProgress.Mark(I, LRng.State);
     if AMutate then
@@ -636,6 +696,87 @@ begin
   finally
     LProg.Free;
   end;
+end;
+
+// Well-formed UTF-8 across the 1/2/3/4-byte ranges (é, €, U+1F600 surrogate pair).
+function ValidUtf8Sample: TBytes;
+var
+  LS: string;
+begin
+  LS := 'ascii-' + WideChar($00E9) + WideChar($20AC) + WideChar($D83D) + WideChar($DE00);
+  Result := TEncoding.UTF8.GetBytes(LS);
+end;
+
+procedure FuzzWebSocketUtf8(AProgress: TFuzzProgress; AMutate: Boolean);
+var
+  LRng: TRng;
+  I, LMut, M, LPos: Integer;
+  LBuf: TBytes;
+begin
+  if AMutate then LRng.Seed(UInt64($77CC77CC11881188) xor FuzzSeedSalt)
+  else LRng.Seed(UInt64($33445566778899AA) xor FuzzSeedSalt);
+
+  for I := 0 to CHTTP1Iterations * FuzzScale - 1 do
+  begin
+    AProgress.Mark(I, LRng.State);
+    if AMutate then
+    begin
+      // Start from valid UTF-8, corrupt a few bytes — keeps the fuzzer near the
+      // continuation/overlong/surrogate decision boundaries.
+      LBuf := ValidUtf8Sample;
+      LMut := LRng.InRange(1, 6);
+      for M := 0 to LMut - 1 do
+      begin
+        if Length(LBuf) = 0 then Break;
+        LPos := LRng.InRange(0, Length(LBuf) - 1);
+        LBuf[LPos] := LRng.NextByte;
+      end;
+    end
+    else
+      LBuf := RandomBuf(LRng, 64);
+
+    // Invariant: never raises, never hangs. The classification is checked
+    // deterministically in KnownVectors_ClassifiedCorrectly.
+    IsValidUTF8(LBuf);
+  end;
+end;
+
+procedure TFuzzWebSocketUtf8Tests.Fuzz_RandomBytes_NeverCrashesNeverHangs;
+var
+  LProg: TFuzzProgress;
+begin
+  LProg := TFuzzProgress.Create;
+  try
+    RunWithWatchdog(LProg, procedure begin FuzzWebSocketUtf8(LProg, False); end);
+  finally
+    LProg.Free;
+  end;
+end;
+
+procedure TFuzzWebSocketUtf8Tests.Fuzz_MutatedValidUtf8_NeverCrashesNeverHangs;
+var
+  LProg: TFuzzProgress;
+begin
+  LProg := TFuzzProgress.Create;
+  try
+    RunWithWatchdog(LProg, procedure begin FuzzWebSocketUtf8(LProg, True); end);
+  finally
+    LProg.Free;
+  end;
+end;
+
+procedure TFuzzWebSocketUtf8Tests.KnownVectors_ClassifiedCorrectly;
+begin
+  // Well-formed → accepted.
+  Assert.IsTrue(IsValidUTF8(TEncoding.UTF8.GetBytes('hello')), 'ASCII must validate');
+  Assert.IsTrue(IsValidUTF8(ValidUtf8Sample), 'multi-byte UTF-8 must validate');
+  Assert.IsTrue(IsValidUTF8(nil), 'empty payload is valid UTF-8');
+  // Malformed → rejected (RFC 3629 / Autobahn 6.*).
+  Assert.IsFalse(IsValidUTF8(TBytes.Create($FF)), 'lone 0xFF is never valid UTF-8');
+  Assert.IsFalse(IsValidUTF8(TBytes.Create($80)), 'lone continuation byte is invalid');
+  Assert.IsFalse(IsValidUTF8(TBytes.Create($C3)), 'truncated 2-byte lead is invalid');
+  Assert.IsFalse(IsValidUTF8(TBytes.Create($ED, $A0, $80)), 'UTF-16 surrogate (U+D800) is invalid');
+  Assert.IsFalse(IsValidUTF8(TBytes.Create($C0, $80)), 'overlong NUL encoding is invalid');
 end;
 
 // ---------------------------------------------------------------------------
@@ -900,6 +1041,7 @@ initialization
   TDUnitX.RegisterTestFixture(TFuzzHTTP1ParserTests);
   TDUnitX.RegisterTestFixture(TFuzzHPACKTests);
   TDUnitX.RegisterTestFixture(TFuzzWebSocketTests);
+  TDUnitX.RegisterTestFixture(TFuzzWebSocketUtf8Tests);
   TDUnitX.RegisterTestFixture(THTTP1SmugglingTests);
   TDUnitX.RegisterTestFixture(THPACKInvariantTests);
 

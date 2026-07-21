@@ -1,0 +1,74 @@
+name: Fuzz Nightly
+
+# Continuous fuzzing (issue #217). The per-push CI gate (ci.yml) runs the
+# socket-free fuzz runner ONCE with the deterministic regression corpus — fast,
+# reproducible, blocks merges on any crash/hang. THIS workflow complements it:
+# nightly it re-runs the same runner with a large FUZZ_SCALE and a fresh
+# per-run FUZZ_SEED, so HTTP/1, HPACK and WebSocket parsing get exercised over a
+# much wider, ever-changing input space than a single push can afford.
+#
+# Reproducing a nightly failure: the run records the exact FUZZ_SEED it used as
+# an artifact. Replay locally with the same seed for a deterministic repro:
+#   set FUZZ_SEED=<seed-from-artifact>
+#   set FUZZ_SCALE=1
+#   tests\Poseidon.FuzzRunner.exe
+# then add that seed to a regression guard once the bug is fixed.
+#
+# Self-hosted Windows runner only — Poseidon needs RAD Studio (dcc64); see ci.yml.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: 'FUZZ_SCALE — iteration multiplier (nightly default 100)'
+        type: string
+        default: '100'
+      seed:
+        description: 'FUZZ_SEED — fixed hex/decimal salt to replay a run (blank = per-run)'
+        type: string
+        default: ''
+
+jobs:
+  fuzz:
+    runs-on: [ self-hosted, windows, delphi ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build fuzz runner
+        shell: pwsh
+        run: |
+          cmd /c "tests\build_fuzz.bat"
+          $log = Get-Content tests\build_fuzz_out.txt -Raw
+          if ($log -match '\.pas\(\d+\).*(Error|Fatal):') {
+            Write-Host $log
+            throw 'Fuzz runner failed to compile'
+          }
+          if (-not (Test-Path tests\Poseidon.FuzzRunner.exe)) { throw 'FuzzRunner.exe not produced' }
+
+      - name: Run continuous fuzz
+        shell: pwsh
+        run: |
+          $scale = '${{ github.event.inputs.scale }}'; if (-not $scale) { $scale = '100' }
+          $seed  = '${{ github.event.inputs.seed }}';  if (-not $seed)  { $seed  = "0x{0:x}" -f [int64]${{ github.run_id }} }
+          $env:FUZZ_SCALE = $scale
+          $env:FUZZ_SEED  = $seed
+          "run_id=${{ github.run_id }}`nFUZZ_SCALE=$scale`nFUZZ_SEED=$seed" | Set-Content tests\fuzz-seed.txt
+          Write-Host "Fuzzing with FUZZ_SCALE=$scale FUZZ_SEED=$seed"
+          & tests\Poseidon.FuzzRunner.exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "Fuzz run FAILED (exit $LASTEXITCODE) — reproduce with FUZZ_SEED=$seed (see fuzz-seed.txt artifact)"
+          }
+
+      - name: Upload fuzz results and seed
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-nightly-${{ github.run_id }}
+          path: |
+            tests/bin/DUnitX-Fuzz-Results.xml
+            tests/fuzz-seed.txt
+            tests/build_fuzz_out.txt
+          if-no-files-found: warn
+          retention-days: 30
