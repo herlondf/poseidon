@@ -351,17 +351,15 @@ begin
   LCtx.Handled := False;
 
   LRoute := FRouter.Lookup(AReq.Method, AReq.Path, LCtx);
-  if LRoute = nil then
-  begin
-    AStatus := 404;
-    AContentType := 'application/problem+json';
-    ABody := GNotFoundBody;
-    AExtraHeaders := nil;
-    Exit;
-  end;
 
   try
-    ExecuteChain(LCtx, LRoute^.Middlewares, FRouter.GlobalMiddlewares, LRoute);
+    if LRoute <> nil then
+      ExecuteChain(LCtx, LRoute^.Middlewares, FRouter.GlobalMiddlewares, LRoute)
+    else
+      // No route matched: still run the global chain so path-serving global
+      // middlewares (metrics, static, CORS) get a chance to handle the request.
+      // Falls through to 404 below only if none of them set Handled.
+      ExecuteChain(LCtx, nil, FRouter.GlobalMiddlewares, nil);
   except
     on E: EPoseidonException do
     begin
@@ -385,6 +383,15 @@ begin
       AExtraHeaders := nil;
       Exit;
     end;
+  end;
+
+  if (LRoute = nil) and (not LCtx.Handled) then
+  begin
+    AStatus := 404;
+    AContentType := 'application/problem+json';
+    ABody := GNotFoundBody;
+    AExtraHeaders := nil;
+    Exit;
   end;
 
   AStatus := LCtx.Status;
@@ -445,10 +452,16 @@ begin
   end
   else
   begin
-    if Assigned(LRoute^.Handler) then
-      LRoute^.Handler(LCtx^)
-    else if Assigned(LRoute^.HandlerFunc) then
-      LRoute^.HandlerFunc(LCtx^);
+    // LRoute is nil when the global chain runs without a matched route
+    // (path-serving global middlewares such as metrics/static). Skip the
+    // route handler then — there is none.
+    if LRoute <> nil then
+    begin
+      if Assigned(LRoute^.Handler) then
+        LRoute^.Handler(LCtx^)
+      else if Assigned(LRoute^.HandlerFunc) then
+        LRoute^.HandlerFunc(LCtx^);
+    end;
   end;
 end;
 
