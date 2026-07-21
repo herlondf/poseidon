@@ -367,6 +367,7 @@ tests/
 - [Changelog](CHANGELOG.md)
 - [Playbook (English)](docs/playbook/README.md)
 - [Playbook (Portugues)](docs/playbook_pt-br/README.md)
+- [FuzzRunner — continuous parser fuzzing](tests/FUZZING.md)
 - [Contributing](docs/CONTRIBUTING.md)
 - [Como contribuir (pt-BR)](docs/CONTRIBUTING_pt-br.md)
 
