@@ -17,6 +17,24 @@ in Prometheus text format at `/metrics`:
 The dashboard parses these, derives per-second rates from the counter deltas, and
 estimates percentiles from the cumulative buckets.
 
+## Build & run
+
+```
+build.bat                                  REM compiles bin\Release\Poseidon.Sample.MetricsDashboard.exe
+Poseidon.Sample.MetricsDashboard.exe       REM listens on :9001 (default)
+Poseidon.Sample.MetricsDashboard.exe 9100  REM or pass a port (also honours POSEIDON_PORT)
+```
+
+Then open `http://localhost:9001/dashboard/dashboard.html`. Hit the demo routes to
+move the charts:
+
+- `GET /ping` — trivial
+- `GET /api/users/:id` — route param
+- `GET /api/report` — variable latency (feeds the p95/p99 tail)
+- `GET /api/flaky` — errors ~1 in 12 (feeds the error-rate chart)
+
+Generate load with `hey`, `k6`, or a `curl` loop against `/api/report`.
+
 ## Wiring it into a server
 
 ```pascal
@@ -28,20 +46,23 @@ var
   App: TPoseidonServer;
 begin
   App := TPoseidonServer.Create;
-  // 1. Expose Prometheus metrics.
+  // 1. Expose Prometheus metrics at /metrics.
   App.Use(MetricsMiddleware('/metrics'));
-  // 2. Serve the dashboard (this folder's public/ dir) at /dashboard.
-  App.Use(StaticMiddleware('/dashboard', './public'));
+  // 2. Serve the dashboard (this folder's public/ dir) at /dashboard/*.
+  App.Use(StaticMiddleware('/dashboard', PublicDir));  // absolute path is safest
 
   App.Get('/ping', procedure(var Ctx: TNativeRequestContext)
     begin Ctx.Status := 200; Ctx.Body := TEncoding.UTF8.GetBytes('pong'); end);
 
-  App.Listen('0.0.0.0', 9001);
+  App.Listen(9001, '0.0.0.0');  // signature is Listen(APort, AHost[, AOnListen])
 end;
 ```
 
-Then open `http://localhost:9001/dashboard/dashboard.html`. Generate some traffic
-(e.g. `hey`, `k6`, or a loop of `curl`) and watch the charts move.
+`MetricsMiddleware` and `StaticMiddleware` are **global** middlewares (`App.Use`)
+that serve their own paths — `/metrics` and `/dashboard/*` — which have no
+registered route. The server runs the global chain for unmatched paths too, so
+those paths resolve; anything neither a route nor a global middleware handles
+still returns 404.
 
 ## Serving the page from another origin
 
