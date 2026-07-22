@@ -27,14 +27,29 @@ além das fixtures de integração via socket real do servidor.
 
 `tests/Poseidon.Tests.Fuzz.pas` fuzza as superfícies de parsing que recebem
 bytes não confiáveis — `ParseHTTP1Request`, `DecodeHTTP1Chunked`,
-`TH2HpackCodec.DecodeHeaders` e `TWebSocketUtils.ParseFrame`. Cada uma roda
-dezenas de milhares de entradas determinísticas com seed (aleatórias +
-mutação) sob uma thread watchdog que detecta loop infinito (um DoS). A
-invariante: **nunca crashar, nunca travar, nunca vazar exceção** — o parser
-sempre retorna, por mais malformada que seja a entrada.
+`TH2HpackCodec.DecodeHeaders`, `TWebSocketUtils.ParseFrame` e o validador de
+UTF-8 do WebSocket (`IsValidUTF8`, RFC 3629). Cada uma roda dezenas de milhares
+de entradas determinísticas com seed (aleatórias + mutação) sob uma thread
+watchdog **por-stall** que detecta loop infinito (um DoS). A invariante:
+**nunca crashar, nunca travar, nunca vazar exceção** — o parser sempre retorna,
+por mais malformada que seja a entrada.
+
+O fuzzing roda de forma **contínua**, hospedado pelo `Poseidon.FuzzRunner`
+(socket-free):
+
+- **A cada push / PR** — `ci/run-ci.ps1` (via `.github/workflows/ci.yml`) roda o
+  runner sobre o corpus determinístico de regressão como **hard gate**; qualquer
+  crash bloqueia o merge.
+- **Nightly** — `.github/workflows/fuzz-nightly.yml` (04:00 UTC) re-roda com
+  `FUZZ_SCALE` grande e um `FUZZ_SEED` novo por-run, explorando um espaço de
+  entrada muito maior e gravando o seed exato como artifact para replay
+  determinístico.
 
 O fuzzing já pegou um DoS remoto real no decoder HPACK (octetos não-UTF-8
 levantavam `EEncodingError`); ver as notas de segurança.
+
+> Referência completa do runner — knobs, fixtures, como reproduzir uma falha
+> noturna: [`tests/FUZZING.md`](../../../tests/FUZZING.md).
 
 ## Gate de compilação das duas faces
 

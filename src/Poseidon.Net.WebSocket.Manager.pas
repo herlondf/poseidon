@@ -74,6 +74,10 @@ type
     property OnLog: TOnPoseidonLog read FOnLog write FOnLog;
   end;
 
+// Standalone UTF-8 well-formedness check (RFC 3629). Exposed so the socket-free
+// fuzzer can hammer WebSocket text/close-frame validation directly (#217).
+function IsValidUTF8(const AData: TBytes): Boolean;
+
 implementation
 
 const

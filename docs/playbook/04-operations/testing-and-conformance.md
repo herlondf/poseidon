@@ -26,15 +26,27 @@ middlewares, plus live-socket integration fixtures for the server.
 ## In-process fuzzing
 
 `tests/Poseidon.Tests.Fuzz.pas` fuzzes the parsing surfaces that face untrusted
-bytes — `ParseHTTP1Request`, `DecodeHTTP1Chunked`, `TH2HpackCodec.DecodeHeaders`
-and `TWebSocketUtils.ParseFrame`. Each runs tens of thousands of deterministic,
-seeded inputs (random + mutated) under a watchdog thread that flags an infinite
-loop (a DoS). The invariant: **never crash, never hang, never leak an
-exception** — the parser must always return, regardless of how malformed the
-input is.
+bytes — `ParseHTTP1Request`, `DecodeHTTP1Chunked`, `TH2HpackCodec.DecodeHeaders`,
+`TWebSocketUtils.ParseFrame` and the WebSocket UTF-8 validator (`IsValidUTF8`,
+RFC 3629). Each runs tens of thousands of deterministic, seeded inputs (random +
+mutated) under a stall-based watchdog thread that flags an infinite loop (a DoS).
+The invariant: **never crash, never hang, never leak an exception** — the parser
+must always return, regardless of how malformed the input is.
+
+Fuzzing runs **continuously**, hosted by the socket-free `Poseidon.FuzzRunner`:
+
+- **Every push / PR** — `ci/run-ci.ps1` (via `.github/workflows/ci.yml`) runs the
+  runner over the deterministic regression corpus as a **hard gate**; any crash
+  blocks the merge.
+- **Nightly** — `.github/workflows/fuzz-nightly.yml` (04:00 UTC) re-runs it with a
+  large `FUZZ_SCALE` and a fresh per-run `FUZZ_SEED`, exploring a much wider input
+  space and recording the exact seed as an artifact for deterministic replay.
 
 Fuzzing already caught a real remotely-triggerable DoS in the HPACK decoder
 (invalid UTF-8 octets raised `EEncodingError`); see the security notes.
+
+> Full runner reference — knobs, fixtures, how to reproduce a nightly failure:
+> [`tests/FUZZING.md`](../../../tests/FUZZING.md).
 
 ## Dual-face compile gate
 
