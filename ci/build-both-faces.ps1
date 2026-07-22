@@ -13,8 +13,14 @@
     fails on libc symbols — that is expected and tolerated; only COMPILE errors
     (lines citing a .pas(line)) fail the gate.
 
-    The actual compiler invocations live in .bat files (cmd quotes the long
-    unit-search-path arguments reliably; a direct PowerShell call mangles them).
+    The Windows face invokes dcc64 directly via a PowerShell argument array
+    (`& $dcc @argsArr`) rather than `cmd /c build_tests.bat`. The .bat + `cmd /c`
+    path was found to fail silently (no output, no build_tests_out.txt) when run
+    under the GitHub Actions runner service's process context — reproduced
+    consistently there even though the same .bat runs fine from an interactive
+    shell. Passing arguments as a PowerShell array sidesteps both the cmd/console
+    dependency and the quoting issues a naive single-string PowerShell call used
+    to have.
 
     Usage:  pwsh ci/build-both-faces.ps1  [-Bds "<Studio path>"]
     Exit code 0 = both faces OK; non-zero = a real compile error on some face.
@@ -47,8 +53,25 @@ $failed = $false
 
 # ---- Windows face: full build of the test suite -------------------------------
 Write-Host '=== [1/2] Windows (Win64) — full build of test suite ===' -ForegroundColor Cyan
-cmd /c "`"$root\tests\build_tests.bat`"" | Out-Null
-if (Test-CompileErrors "$root\tests\build_tests_out.txt" 'Win64') {
+$testsDir  = Join-Path $root 'tests'
+$win64Log  = Join-Path $testsDir 'build_tests_out.txt'
+$dcc64     = Join-Path $Bds 'bin\dcc64.exe'
+$dcuDebug  = Join-Path $testsDir 'dcu\Debug'
+New-Item -ItemType Directory -Force $dcuDebug | Out-Null
+$dccArgs = @(
+  '--no-config', '-B', '-CC',
+  '-NSSystem;Xml;Data;Datasnap;Web;Soap;Winapi;System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win',
+  "-U$Bds\lib\Win64\release;..\src;..\middlewares;.\mocks",
+  '-I..\src;..\middlewares;.\mocks',
+  '-E.',
+  '-N0.\dcu\Debug',
+  'Poseidon.Tests.dpr'
+)
+Push-Location $testsDir
+try {
+  & $dcc64 @dccArgs 2>&1 | Out-File -FilePath $win64Log -Encoding utf8
+} finally { Pop-Location }
+if (Test-CompileErrors $win64Log 'Win64') {
   $failed = $true
 } else {
   Write-Host '    Win64 OK' -ForegroundColor Green
