@@ -966,6 +966,26 @@ begin
       FSQLock.Release;
       _io_uring_enter(FRingFd, UInt32(LToSubmit), 1, IORING_ENTER_GETEVENTS);
 
+      // Re-arm multishot accept if a previous drain's re-arm (in _ProcessCQE)
+      // found the SQ full and gave up (#224 — silent, permanent loss of
+      // accept on this ring). The syscall above just let the kernel consume
+      // submitted SQEs, so FPSQHead^ has advanced and there is now the best
+      // chance of room; retried every iteration until it succeeds.
+      if (not FMultishotAccept) and (TInterlocked.Read(FBackend.FShutdown) = 0)
+         and (FListenSocket >= 0) then
+      begin
+        FSQLock.Acquire;
+        try
+          if _SubmitAcceptMultishot then
+          begin
+            FMultishotAccept := True;
+            _NotifyKernel;
+          end;
+        finally
+          FSQLock.Release;
+        end;
+      end;
+
       LMask := FPCQMask^;
       LHead := FPCQHead^;
       LTail := FPCQTail^;
