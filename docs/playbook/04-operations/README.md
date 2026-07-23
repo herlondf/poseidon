@@ -10,3 +10,4 @@
 - [Proxy Protocol](proxy-protocol.md)
 - [Testing & conformance](testing-and-conformance.md)
 - [Platform notes & known limitations](platform-notes.md)
+- [Health checks & crash recovery](health-and-recovery.md)

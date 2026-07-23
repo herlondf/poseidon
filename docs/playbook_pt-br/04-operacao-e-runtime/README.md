@@ -10,3 +10,4 @@
 - [Proxy Protocol](proxy-protocol.md)
 - [Testes e conformidade](testes-e-conformidade.md)
 - [Notas de plataforma e limitações conhecidas](notas-de-plataforma.md)
+- [Health checks e recuperação de travamento](saude-e-recuperacao.md)
