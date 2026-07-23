@@ -1449,6 +1449,7 @@ begin
   FIdleSweep := TIdleSweepManager.Create(FConnManager, FIOBackend, @FActive);
   FIdleSweep.IdleTimeoutMs := FIdleTimeoutMs;
   FIdleSweep.OnLog := FOnLog;
+  FIdleSweep.OnForceClose := _CloseConn;  // #224 mitigation — see IdleSweep.pas
   FIdleSweep.Start;
 end;
 

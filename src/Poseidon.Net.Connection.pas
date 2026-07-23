@@ -67,6 +67,12 @@ type
     // kept alive by the responder's AddRef, but the fd is closed.
     Closed: Integer;
     LastActivityTick: UInt64;
+    // #224 mitigation: set by TIdleSweepManager when it calls ShutdownConn
+    // (0 = not yet shut down). If the connection is still open on a LATER
+    // sweep pass past the grace period, the expected recv-error completion
+    // never arrived — force a full close instead of leaking the fd forever
+    // (observed as sockets stuck in FIN_WAIT2 with no kernel timeout).
+    ShutdownRequestedTick: UInt64;
     InFlightPool: Integer;
     FPadInflight: array[0..14] of Integer; // Cache-line padding — isolate InFlightPool
     SSLHandle: Pointer;
@@ -142,6 +148,7 @@ begin
   KeepAlive := False;
   Closed := 0;
   LastActivityTick := TThread.GetTickCount64;
+  ShutdownRequestedTick := 0;
   InFlightPool := 0;
   SSLHandle := nil;
   SSLReadBio := nil;
