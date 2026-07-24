@@ -72,6 +72,13 @@ type
   {$ENDIF}
 
   TElasticWorkerPool = class
+  private const
+    // #224: cap on how long a worker ever blocks in one semaphore wait, so
+    // every deque gets its own-check-and-steal sweep this often regardless
+    // of whether the global semaphore ever signals THIS specific worker.
+    // Bounds worst-case recovery latency for a stranded item independently
+    // of FIdleTimeoutMs (which still governs elastic scale-down timing).
+    CSweepIntervalMs = 200;
   private type
     // Wrapper avoids the dcc32 generic+closure type resolution bug.
     TWorkWrapper = class
@@ -240,56 +247,50 @@ var
   LCurActive: Integer;
   LAlreadyDropped: Boolean;
   LDeque: PWorkerDeque;
+  LIdleAccumMs: Integer;
+  LWaitMs: Integer;
 begin
   TInterlocked.Increment(FActiveWorkers);
   LAlreadyDropped := False;
   LDeque := @FDeques[ADequeIdx];
+  LIdleAccumMs := 0;
   try
     // If shutdown happened between _SpawnWorker and here, exit immediately.
     if TInterlocked.Add(FShutdown, 0) <> 0 then Exit;
     while True do
     begin
+      // #224 root cause: the semaphore is a single global counter, not
+      // per-deque — a Release() for an item just enqueued into OUR deque can
+      // be consumed by ANY OTHER waiting worker, whose own check succeeds on
+      // a DIFFERENT deque first and who therefore never looks at ours. That
+      // was harmless under sustained load (a later Post() eventually wakes
+      // someone who steals it) but once traffic stops, every subsequent
+      // wake-up for every worker is a bare wrTimeout with no signal at all,
+      // and a bare timeout never checked this deque or attempted a steal —
+      // so a work item stranded at the exact moment traffic stopped was lost
+      // forever. Confirmed via a tagged live repro (Post() logged the item
+      // going into deque N; no own-deque hit or steal for that tag was ever
+      // logged again, even after 40+ seconds) and a measured ~7-in-92000
+      // in-flight leak rate during sustained load itself.
+      //
+      // Fix: wait in short CSweepIntervalMs slices instead of one long
+      // FIdleTimeoutMs block, checking our own deque (and stealing if empty)
+      // after EVERY slice, signaled or timed out. A stranded item is now
+      // found within one sweep interval instead of only when this specific
+      // worker's full idle timeout happens to elapse — the first fix (commit
+      // before this one) already guaranteed eventual recovery, but only
+      // within FIdleTimeoutMs (30s default), which is a real fix but a poor
+      // user-visible latency for what's supposed to be a fast path. Scale-down
+      // eligibility still only kicks in once accumulated idle time (across
+      // consecutive empty slices) reaches FIdleTimeoutMs, so shrink timing
+      // for the elastic pool is unchanged.
       TInterlocked.Increment(FIdleWorkers);
-      LResult := FSemaphore.WaitFor(LongWord(FIdleTimeoutMs));
+      LWaitMs := CSweepIntervalMs;
+      if LWaitMs > FIdleTimeoutMs then LWaitMs := FIdleTimeoutMs;
+      LResult := FSemaphore.WaitFor(LongWord(LWaitMs));
       TInterlocked.Decrement(FIdleWorkers);
 
       if TInterlocked.Add(FShutdown, 0) <> 0 then Break;
-
-      if LResult = wrTimeout then
-      begin
-        // Attempt to self-terminate while staying above the minimum.
-        repeat
-          LCurActive := TInterlocked.Add(FActiveWorkers, 0);
-          if LCurActive <= FMinWorkers then Break;
-        until TInterlocked.CompareExchange(
-                FActiveWorkers, LCurActive - 1, LCurActive) = LCurActive;
-
-        if LCurActive > FMinWorkers then
-        begin
-          // A Post() may have enqueued work into OUR deque in the exact
-          // window between the semaphore timing out and the CAS decrement
-          // above. Its Release() then wakes a DIFFERENT worker (or none) --
-          // once we exit, nobody owns this deque, and a steal only happens
-          // when some OTHER worker's own deque goes empty, which may never
-          // occur under sustained load, stranding the work item until that
-          // happens. Check our own deque one last time before actually
-          // leaving; if something snuck in, undo the self-termination and
-          // keep running instead of abandoning it.
-          LDeque^.Lock.Enter;
-          try
-            if LDeque^.Queue.Count > 0 then
-            begin
-              TInterlocked.Increment(FActiveWorkers);  // undo -- stay alive
-              Continue;
-            end;
-          finally
-            LDeque^.Lock.Leave;
-          end;
-          LAlreadyDropped := True;
-          Exit;
-        end;
-        Continue;
-      end;
 
       LWrapper := nil;
       LDeque^.Lock.Enter;
@@ -305,6 +306,7 @@ begin
 
       if Assigned(LWrapper) then
       begin
+        LIdleAccumMs := 0;
         LWork := LWrapper.Work;
         LWrapper.Work := nil;
         LWrapper.Free;
@@ -316,7 +318,49 @@ begin
               E.ClassName, ']: ', E.Message);
         end;
         LWork := nil;
+        Continue;  // found and ran work -- skip the idle/scale-down check below
       end;
+
+      if LResult = wrSignaled then
+      begin
+        // Someone else's Release() woke us but both our own deque and every
+        // other deque came up empty (already claimed by a faster worker) --
+        // genuine activity, not idle time; don't count this slice.
+        LIdleAccumMs := 0;
+        Continue;
+      end;
+
+      // wrTimeout with nothing found anywhere -- one more idle slice.
+      Inc(LIdleAccumMs, LWaitMs);
+      if LIdleAccumMs < FIdleTimeoutMs then Continue;
+
+      // Accumulated a full idle timeout with no work ever found -- attempt to
+      // self-terminate while staying above the minimum.
+      repeat
+        LCurActive := TInterlocked.Add(FActiveWorkers, 0);
+        if LCurActive <= FMinWorkers then Break;
+      until TInterlocked.CompareExchange(
+              FActiveWorkers, LCurActive - 1, LCurActive) = LCurActive;
+
+      if LCurActive > FMinWorkers then
+      begin
+        // Final guard against a Post() landing in OUR deque in the narrow
+        // window between the check above and the CAS decrement.
+        LDeque^.Lock.Enter;
+        try
+          if LDeque^.Queue.Count > 0 then
+          begin
+            TInterlocked.Increment(FActiveWorkers);  // undo -- stay alive
+            LIdleAccumMs := 0;
+            Continue;
+          end;
+        finally
+          LDeque^.Lock.Leave;
+        end;
+        LAlreadyDropped := True;
+        Exit;
+      end;
+      LIdleAccumMs := 0;  // min-worker: stay alive, reset the accumulator
     end;
   finally
     TBufferPool.FlushThreadCache;
