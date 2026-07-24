@@ -266,6 +266,25 @@ begin
 
         if LCurActive > FMinWorkers then
         begin
+          // A Post() may have enqueued work into OUR deque in the exact
+          // window between the semaphore timing out and the CAS decrement
+          // above. Its Release() then wakes a DIFFERENT worker (or none) --
+          // once we exit, nobody owns this deque, and a steal only happens
+          // when some OTHER worker's own deque goes empty, which may never
+          // occur under sustained load, stranding the work item until that
+          // happens. Check our own deque one last time before actually
+          // leaving; if something snuck in, undo the self-termination and
+          // keep running instead of abandoning it.
+          LDeque^.Lock.Enter;
+          try
+            if LDeque^.Queue.Count > 0 then
+            begin
+              TInterlocked.Increment(FActiveWorkers);  // undo -- stay alive
+              Continue;
+            end;
+          finally
+            LDeque^.Lock.Leave;
+          end;
           LAlreadyDropped := True;
           Exit;
         end;
