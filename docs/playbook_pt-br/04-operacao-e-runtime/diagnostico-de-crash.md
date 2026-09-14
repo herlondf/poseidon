@@ -31,7 +31,8 @@ para um inocente.
 stderr:
 
 ```
-=== POSEIDON CRASH REPORT ===
+=== POSEIDON CRASH REPORT (iid=a1b2c3) ===
+build  : a696b2d806862683f30ec60aa7179563f93340ad
 signal : 6 - SIGABRT (abort - usually glibc heap corruption)
 tid    : 7
 frames :
@@ -40,6 +41,8 @@ frames :
 /lib/x86_64-linux-gnu/libc.so.6(__libc_free+0x7e)   <- o free que detectou
 ./server[0x521457]                                   <- sua cadeia de chamada
 ./server[0x52166d]
+breadcrumbs:
+  [nfce.emissao] POST /nfce/v1/empresa/.../nfce serie=624 rp=800000879
 === END CRASH REPORT ===
 Aborted (core dumped)
 ```
@@ -64,6 +67,38 @@ addr2line -f -C -e ./server 0x521457 0x52166d
 
 O `dcclinux64` mantém símbolos por padrão; não faça `strip` no binário
 publicado.
+
+### Contra qual binário resolver
+
+`build  :` é o `.note.gnu.build-id` do binário em execução, o mesmo valor que
+`readelf -n <binario> | grep 'Build ID'` imprime. Responde "qual binário eu
+busco pro `addr2line`" sem precisar adivinhar por timestamp de deploy — um
+palpite errado resolve em silêncio para símbolos sem sentido, sem erro
+nenhum. `(unknown - ...)` quer dizer que o linker não emitiu a nota (raro) ou
+que `/proc/self/exe` não pôde ser lido no startup; o resto do relatório sai
+normal.
+
+### O que estava acontecendo nas outras threads
+
+Um abort de corrupção de heap quase nunca acontece onde foi causado (ver
+acima), então os frames sozinhos costumam apontar pra um inocente, não pra
+requisição que quebrou as coisas. Chame isso de dentro do código que trata a
+requisição, onde for útil saber "o que essa thread estava fazendo":
+
+```pascal
+TPoseidonDiagnostics.Breadcrumb('nfce.emissao',
+  Format('POST %s serie=%s rp=%s', [ARoute, ASerie, ARP]));
+```
+
+Os últimos 32 (de qualquer thread, o mais antigo cai primeiro) saem impressos
+com o *próximo* crash report, na ordem em que aconteceram — não só os da
+thread que morreu. Duas coisas que isso não é: um log de propósito geral (use
+o logger existente pra isso — aqui o teto é 32 e só aparece junto de um
+crash) e uma trilha de auditoria crítica pra correção (uma escrita
+concorrendo com a leitura do handler de crash pode rasgar o texto de uma
+entrada sob concorrência real; aceito, já que a alternativa — uma trava que a
+própria thread que crashou pode já estar segurando — é exatamente o modo de
+falha que este handler não pode sobreviver).
 
 ## Fazer o abort cair perto da causa
 
@@ -107,9 +142,14 @@ minuto:
 
 ```
 [startup] backend=epoll (io_uring unavailable) io_workers=8 accept_threads=4 \
-          req_pool=8..200 dispatch=worker-pool idle_timeout=10000ms crash_handler=True
+          req_pool=8..200 dispatch=worker-pool idle_timeout=10000ms \
+          crash_handler=True build=a696b2d806862683f30ec60aa7179563f93340ad
 [health] conns=42 inflight=3 pool=12 busy=8 idle=4 backend=epoll
 ```
+
+`build` é o mesmo valor que a linha `build  :` de um crash report carrega —
+impresso aqui também pra quem quer confirmar "é esse o build que está
+implantado" sem precisar de um crash pra checar.
 
 | Campo | Como ler |
 |---|---|

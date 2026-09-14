@@ -1646,6 +1646,7 @@ var
   LMaxReq:     Integer;
   LAcceptN:    Integer;
   LDispatchMode: string;
+  LBuildId: string;
 begin
   if FActive then
     raise Exception.Create('TPoseidonNativeServer: already listening');
@@ -1724,12 +1725,14 @@ begin
     LDispatchMode := 'sync-inline'
   else
     LDispatchMode := 'worker-pool';
+  LBuildId := TPoseidonDiagnostics.BuildId;
+  if LBuildId = '' then LBuildId := '(unknown)';
   _Log(llInfo, Format(
     '[startup] backend=%s io_workers=%d accept_threads=%d ' +
-    'req_pool=%d..%d dispatch=%s idle_timeout=%dms crash_handler=%s',
+    'req_pool=%d..%d dispatch=%s idle_timeout=%dms crash_handler=%s build=%s',
     [FBackendName, LIOWorkers, LAcceptN, LMinReq, LMaxReq, LDispatchMode,
      FIdleTimeoutMs,
-     BoolToStr(TPoseidonDiagnostics.CrashHandlerInstalled, True)]));
+     BoolToStr(TPoseidonDiagnostics.CrashHandlerInstalled, True), LBuildId]));
 
   // Inline dispatch (SyncDispatch) lets the io_uring backend batch SQE submits.
   FIOBackend.SetInlineDispatch(FSyncDispatch);

@@ -56,6 +56,23 @@ type
     // different replicas/instances sharing one aggregated log stream, and
     // correlates a crash report back to that same instance's [health] lines.
     class function InstanceId: string; static;
+    // The running binary's `.note.gnu.build-id`, as hex, or '' if the binary
+    // has none or it could not be read. A crash report names the exact build
+    // it came from, instead of the reader having to guess from a deploy
+    // timestamp which artifact to fetch for `addr2line`.
+    class function BuildId: string; static;
+    // Records one line of what the app was doing (last 32 kept, oldest
+    // dropped first) - printed with the NEXT crash report from any thread, in
+    // the order they happened. A heap-corruption abort almost never happens
+    // where it was caused (see the unit header), so the frames alone often
+    // land on an innocent bystander; the breadcrumbs are what let a reader
+    // reconstruct which request/route was in flight on which thread when it
+    // broke, without needing the failure reproduced locally first.
+    //
+    // Safe to call from any thread. This path allocates (it is normal
+    // request-handling code, not signal context) - never call it from inside
+    // a signal handler.
+    class procedure Breadcrumb(const ACategory, AMessage: string); static;
   end;
 
 implementation
@@ -65,10 +82,12 @@ implementation
 uses
   {$IFDEF FPC}
   SysUtils,
+  Classes,
   syncobjs,
   Poseidon.Compat.Posix;
   {$ELSE}
   System.SysUtils,
+  System.Classes,
   System.SyncObjs,
   Posix.Signal,
   Posix.Unistd;
@@ -82,6 +101,19 @@ const
   // 2.30 on, and Poseidon targets Linux x86-64 only, so the raw syscall is
   // both safer across base images and async-signal-safe.
   CSysGetTid = 186;
+  // sha1 build IDs (the default `ld` produces) are 20 bytes; a couple of
+  // linkers emit md5/sha256 (16/32 bytes) instead. 32 covers all of them,
+  // hex-encoded below.
+  CMaxBuildIdBytes = 32;
+  CBuildIdHexLen = CMaxBuildIdBytes * 2;
+  // Enough for "who is doing what" without a breadcrumb call turning into a
+  // small log line by itself: 31 for a category like 'nfce.emissao', 127 for
+  // a message like a route plus an id.
+  CMaxBreadcrumbs = 32;
+  CBreadcrumbCategoryLen = 31;
+  CBreadcrumbMessageLen = 127;
+  // ELF64, .note.gnu.build-id: NT_GNU_BUILD_ID.
+  CElfNoteTypeGnuBuildId = 3;
 
 function backtrace(ABuffer: PPointer; ASize: Integer): Integer; cdecl;
   external 'libc.so.6' name 'backtrace';
@@ -95,6 +127,22 @@ const
   CHandledSignals: array[0..4] of Integer =
     (SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL);
 
+type
+  // One breadcrumb. Fixed-size and written last-field-first so a concurrent
+  // reader either sees the previous complete entry (Seq not yet updated) or
+  // this one (Seq updated last, once Category/Message are already in place) -
+  // never a torn message attributed to the new Seq. A read racing a write to
+  // the very same fields can still tear the text itself; that is an accepted,
+  // cosmetic risk for a best-effort diagnostic, not a correctness one.
+  TBreadcrumbSlot = record
+    // 0 means "never written". Monotonic across the ring, so the reader can
+    // tell which of the CMaxBreadcrumbs slots are the newest ones without a
+    // separate (and racy) count/head variable.
+    Seq: Integer;
+    Category: array[0..CBreadcrumbCategoryLen] of AnsiChar;
+    Message: array[0..CBreadcrumbMessageLen] of AnsiChar;
+  end;
+
 var
   GInstalled: Integer = 0;
   // Captured by sigaction's oldact at install time; read only from signal context.
@@ -106,6 +154,16 @@ var
   // string type) from _CrashHandler, which must stay async-signal-safe.
   GInstanceId: array[0..CInstanceIdLen] of AnsiChar;
   GInstanceIdReady: Integer = 0;
+  // Null-terminated hex, read once by _EnsureBuildId. Empty string ('' i.e.
+  // GBuildId[0] = #0) when the binary has no build-id note or the ELF could
+  // not be parsed - the crash report still prints, just without this line.
+  GBuildId: array[0..CBuildIdHexLen] of AnsiChar;
+  GBuildIdReady: Integer = 0;
+  // The ring. Never resized, never freed - a fixed process-lifetime cost
+  // (32 * ~164 bytes, under 6 KB) so the crash handler can read it without
+  // allocating.
+  GBreadcrumbs: array[0..CMaxBreadcrumbs - 1] of TBreadcrumbSlot;
+  GBreadcrumbSeq: Integer = 0;
 
 // Not called from signal context - TGUID.NewGuid is a normal (allocating)
 // call, safe here because this only ever runs from ordinary thread code
@@ -123,6 +181,122 @@ begin
   for I := 0 to CInstanceIdLen - 1 do
     GInstanceId[I] := CHexDigits[LGuid.D4[I] and $0F];
   GInstanceId[CInstanceIdLen] := #0;
+end;
+
+type
+  // Only the fields this unit reads. `packed` matches the on-disk ELF64
+  // layout exactly - no compiler-inserted padding to account for.
+  TElf64Ehdr = packed record
+    e_ident: array[0..15] of Byte;
+    e_type, e_machine: Word;
+    e_version: Cardinal;
+    e_entry, e_phoff, e_shoff: UInt64;
+    e_flags: Cardinal;
+    e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx: Word;
+  end;
+
+  TElf64Shdr = packed record
+    sh_name, sh_type: Cardinal;
+    sh_flags, sh_addr, sh_offset, sh_size: UInt64;
+    sh_link, sh_info: Cardinal;
+    sh_addralign, sh_entsize: UInt64;
+  end;
+
+// Reads the `.note.gnu.build-id` note from the running binary's own ELF
+// section headers and leaves it hex-encoded in GBuildId. Not called from
+// signal context - TFileStream and the byte arrays below allocate, same as
+// _EnsureInstanceId, and for the same reason: this only ever runs from
+// ordinary thread code (InstallCrashHandler), never from _CrashHandler, which
+// only reads the already-populated GBuildId buffer.
+procedure _EnsureBuildId;
+const
+  CHexDigits: array[0..15] of AnsiChar = '0123456789abcdef';
+var
+  LFile: TFileStream;
+  LEhdr: TElf64Ehdr;
+  LShdr: TElf64Shdr;
+  LShStrTab: TBytes;
+  LNote: TBytes;
+  LSectionName: AnsiString;
+  I: Integer;
+  LPos, LNameSz, LDescSz, LNoteType, LPadded: Integer;
+  LByteIndex, LOutPos: Integer;
+begin
+  if TInterlocked.CompareExchange(GBuildIdReady, 1, 0) <> 0 then Exit;
+  GBuildId[0] := #0;
+  try
+    LFile := TFileStream.Create('/proc/self/exe', fmOpenRead or fmShareDenyNone);
+    try
+      LFile.ReadBuffer(LEhdr, SizeOf(LEhdr));
+      if (LEhdr.e_ident[0] <> $7F) or (LEhdr.e_ident[1] <> Ord('E')) or
+         (LEhdr.e_ident[2] <> Ord('L')) or (LEhdr.e_ident[3] <> Ord('F')) then
+        Exit;
+
+      // The section-header string table, to match ".note.gnu.build-id" by
+      // name instead of assuming a fixed section index.
+      LFile.Position := LEhdr.e_shoff + Int64(LEhdr.e_shstrndx) * LEhdr.e_shentsize;
+      LFile.ReadBuffer(LShdr, SizeOf(LShdr));
+      SetLength(LShStrTab, LShdr.sh_size);
+      if LShdr.sh_size > 0 then
+      begin
+        LFile.Position := LShdr.sh_offset;
+        LFile.ReadBuffer(LShStrTab[0], LShdr.sh_size);
+      end;
+
+      for I := 0 to LEhdr.e_shnum - 1 do
+      begin
+        LFile.Position := LEhdr.e_shoff + Int64(I) * LEhdr.e_shentsize;
+        LFile.ReadBuffer(LShdr, SizeOf(LShdr));
+        if (LShdr.sh_name = 0) or (Int64(LShdr.sh_name) >= Length(LShStrTab)) then
+          Continue;
+        LSectionName := PAnsiChar(@LShStrTab[LShdr.sh_name]);
+        if LSectionName <> '.note.gnu.build-id' then
+          Continue;
+        if LShdr.sh_size = 0 then
+          Exit;
+
+        SetLength(LNote, LShdr.sh_size);
+        LFile.Position := LShdr.sh_offset;
+        LFile.ReadBuffer(LNote[0], LShdr.sh_size);
+
+        // Elf64_Nota: namesz, descsz, type (4 bytes each), then name and desc,
+        // each padded up to the next 4-byte boundary. desc is the build-id
+        // itself; name is "GNU" and not needed here.
+        LPos := 0;
+        while LPos + 12 <= Length(LNote) do
+        begin
+          LNameSz := PCardinal(@LNote[LPos])^;
+          LDescSz := PCardinal(@LNote[LPos + 4])^;
+          LNoteType := PCardinal(@LNote[LPos + 8])^;
+          LPos := LPos + 12;
+          LPadded := (LNameSz + 3) and not 3;
+          LPos := LPos + LPadded;
+          if (LNoteType = CElfNoteTypeGnuBuildId) and (LDescSz > 0) and
+             (LPos + LDescSz <= Length(LNote)) then
+          begin
+            LOutPos := 0;
+            for LByteIndex := 0 to LDescSz - 1 do
+            begin
+              if LOutPos >= CBuildIdHexLen - 1 then Break;
+              GBuildId[LOutPos] := CHexDigits[LNote[LPos + LByteIndex] shr 4];
+              GBuildId[LOutPos + 1] := CHexDigits[LNote[LPos + LByteIndex] and $0F];
+              Inc(LOutPos, 2);
+            end;
+            GBuildId[LOutPos] := #0;
+            Exit;
+          end;
+          LPadded := (LDescSz + 3) and not 3;
+          LPos := LPos + LPadded;
+        end;
+      end;
+    finally
+      LFile.Free;
+    end;
+  except
+    // Unreadable /proc/self/exe, truncated ELF, no build-id note: the crash
+    // report still prints, just without this line.
+    GBuildId[0] := #0;
+  end;
 end;
 
 procedure _Emit(AMsg: PAnsiChar);
@@ -203,6 +377,37 @@ begin
   Result := (LPtr <> nil) and (NativeUInt(LPtr) <> 1);
 end;
 
+// Prints the ring in the order the breadcrumbs happened, oldest first. Reads
+// GBreadcrumbs directly with no lock: a write racing this read can tear one
+// entry's text, never more, and never corrupts the walk itself, because Seq
+// (checked below) is written only after Category/Message are already in
+// place. Taking a lock here instead would risk the one failure mode a crash
+// handler cannot survive - the crashing thread already holding it.
+procedure _EmitBreadcrumbs;
+var
+  LNewestSeq, LOldestSeq, LSeq, LSlot: Integer;
+begin
+  LNewestSeq := TInterlocked.CompareExchange(GBreadcrumbSeq, 0, 0);
+  if LNewestSeq <= 0 then Exit;
+  LOldestSeq := LNewestSeq - CMaxBreadcrumbs + 1;
+  if LOldestSeq < 1 then LOldestSeq := 1;
+
+  _Emit('breadcrumbs:'#10);
+  for LSeq := LOldestSeq to LNewestSeq do
+  begin
+    LSlot := (LSeq - 1) mod CMaxBreadcrumbs;
+    // Seq <> LSeq means this slot was never written that far (process just
+    // started) or a newer write already claimed it under a torn read of
+    // GBreadcrumbSeq above - either way, nothing reliable to print for it.
+    if GBreadcrumbs[LSlot].Seq <> LSeq then Continue;
+    _Emit('  [');
+    _Emit(PAnsiChar(@GBreadcrumbs[LSlot].Category[0]));
+    _Emit('] ');
+    _Emit(PAnsiChar(@GBreadcrumbs[LSlot].Message[0]));
+    _Emit(#10);
+  end;
+end;
+
 procedure _CrashHandler(ASigNum: Integer; ASigInfo: Psiginfo_t;
   AContext: Pointer); cdecl;
 var
@@ -213,7 +418,12 @@ begin
   _Emit(#10'=== POSEIDON CRASH REPORT (iid=');
   _Emit(PAnsiChar(@GInstanceId[0]));
   _Emit(') ==='#10);
-  _Emit('signal : ');
+  _Emit('build  : ');
+  if GBuildId[0] = #0 then
+    _Emit('(unknown - no .note.gnu.build-id, or unreadable at startup)')
+  else
+    _Emit(PAnsiChar(@GBuildId[0]));
+  _Emit(#10'signal : ');
   _EmitInt(ASigNum);
   _Emit(' - ');
   _Emit(_SignalName(ASigNum));
@@ -226,6 +436,8 @@ begin
     backtrace_symbols_fd(@LFrames[0], LCount, CStdErr)
   else
     _Emit('  <backtrace unavailable>'#10);
+
+  _EmitBreadcrumbs;
 
   _Emit('=== END CRASH REPORT ==='#10);
 
@@ -252,6 +464,8 @@ begin
 
   // Load the unwinder NOW, while the heap is still healthy.
   backtrace(@GWarmup[0], CMaxFrames);
+  // Same reasoning: read and parse the ELF now, not from _CrashHandler.
+  _EnsureBuildId;
 
   FillChar(LSA, SizeOf(LSA), 0);
   LSA._u.sa_sigaction := @_CrashHandler;
@@ -272,6 +486,35 @@ class function TPoseidonDiagnostics.InstanceId: string;
 begin
   _EnsureInstanceId;
   Result := string(AnsiString(PAnsiChar(@GInstanceId[0])));
+end;
+
+class function TPoseidonDiagnostics.BuildId: string;
+begin
+  _EnsureBuildId;
+  Result := string(AnsiString(PAnsiChar(@GBuildId[0])));
+end;
+
+class procedure TPoseidonDiagnostics.Breadcrumb(const ACategory, AMessage: string);
+var
+  LSeq, LSlot: Integer;
+  LCategoryA, LMessageA: AnsiString;
+begin
+  // Claims a slot with one atomic increment; two threads landing on the same
+  // slot (a wrap of exactly CMaxBreadcrumbs apart) can interleave their
+  // writes below. Accepted for the same reason a lock is not used here: see
+  // _EmitBreadcrumbs.
+  LSeq := TInterlocked.Increment(GBreadcrumbSeq);
+  LSlot := (LSeq - 1) mod CMaxBreadcrumbs;
+  LCategoryA := AnsiString(ACategory);
+  LMessageA := AnsiString(AMessage);
+  FillChar(GBreadcrumbs[LSlot].Category, SizeOf(GBreadcrumbs[LSlot].Category), 0);
+  FillChar(GBreadcrumbs[LSlot].Message, SizeOf(GBreadcrumbs[LSlot].Message), 0);
+  StrLCopy(PAnsiChar(@GBreadcrumbs[LSlot].Category[0]), PAnsiChar(LCategoryA),
+    High(GBreadcrumbs[LSlot].Category));
+  StrLCopy(PAnsiChar(@GBreadcrumbs[LSlot].Message[0]), PAnsiChar(LMessageA),
+    High(GBreadcrumbs[LSlot].Message));
+  // Written last, on purpose: see TBreadcrumbSlot.
+  GBreadcrumbs[LSlot].Seq := LSeq;
 end;
 
 {$ELSE}
@@ -321,6 +564,20 @@ class function TPoseidonDiagnostics.InstanceId: string;
 begin
   _EnsureInstanceId;
   Result := string(AnsiString(PAnsiChar(@GInstanceId[0])));
+end;
+
+class function TPoseidonDiagnostics.BuildId: string;
+begin
+  // No crash handler is installed on Windows (WER covers that), so nothing
+  // ever reads this - a PE has the equivalent (the CodeView debug directory's
+  // GUID+age), but there is no reader for it here yet.
+  Result := '';
+end;
+
+class procedure TPoseidonDiagnostics.Breadcrumb(const ACategory, AMessage: string);
+begin
+  // Nothing on Windows ever prints these back (see BuildId) - keeping this a
+  // true no-op instead of maintaining a ring nobody reads.
 end;
 
 {$ENDIF}
