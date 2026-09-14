@@ -63,6 +63,18 @@ type
     // completion never arrived; force the close rather than leak the fd, which
     // was seen stuck in FIN_WAIT2 with no kernel timeout.
     ShutdownRequestedTick: UInt64;
+    // IOCP only: the just-posted zero-byte-recv context (PRecvZeroCtx in
+    // Poseidon.Net.IO.IOCP.pas), non-nil only between PostRecv posting it and
+    // its IOCP completion being dequeued (which Disposes it and clears this
+    // back to nil, whether that happens through the normal worker loop or
+    // through DrainCompletions at final teardown, see Poseidon.Net.IO.IOCP.pas,
+    // #leak-conn-ctx). SocketClose only ever acts on this field itself when
+    // called with AFinalTeardown = True (Stop(), after JoinWorkers, when no
+    // worker thread remains to dequeue it normally); every other call site
+    // leaves it alone and trusts the still-running worker loop, the only
+    // safe single owner of that Dispose while workers are alive. Untyped
+    // (Pointer) so this cross-platform unit need not know the context type.
+    PendingRecvCtx: Pointer;
     InFlightPool: Integer;
     FPadInflight: array[0..14] of Integer; // cache-line isolation for InFlightPool
     SSLHandle: Pointer;
@@ -119,6 +131,21 @@ type
     // Never call Free directly; Release owns the teardown.
     procedure AddRef;
     procedure Release;
+    // Shutdown-only: frees the connection without waiting for FRefCount to
+    // reach 0 on its own. An idle keep-alive connection normally has an
+    // outstanding WSARecv/io_uring recv holding its own ref (see class
+    // comment); ShutdownConn's socket-level shutdown() does not synchronously
+    // cancel that op, so if its completion has not landed by the time the
+    // server joins its IO worker threads, that ref is never released and the
+    // connection (and its Lock/AccumBuf) leaks. Callable ONLY after the
+    // caller has positively confirmed no worker thread can still be mid-
+    // callback for this connection (i.e. TPoseidonNativeServer.Stop, after
+    // FRequestPool.Shutdown reported a clean drain AND FIOBackend.JoinWorkers
+    // has returned): at that point no further completion will ever be
+    // delivered for it, so any un-released ref never will be either, and
+    // waiting for it would leak forever instead of freeing it. Calling this
+    // while a worker could still be running is a use-after-free.
+    procedure ForceRelease;
     // #234: for a caller holding only a raw pointer it does not own, such as the
     // epoll loop's LEvents[I].data.ptr. See the body for why AddRef is unsafe.
     function TryAddRef: Boolean;
@@ -155,6 +182,12 @@ begin
   Result := False;
 end;
 
+procedure TNativeConn.ForceRelease;
+begin
+  FRefCount := 0;
+  Self.Free;
+end;
+
 procedure TNativeConn.Release;
 var
   LNew: Integer;
@@ -189,6 +222,7 @@ begin
   Closed := 0;
   LastActivityTick := TThread.GetTickCount64;
   ShutdownRequestedTick := 0;
+  PendingRecvCtx := nil;
   InFlightPool := 0;
   SSLHandle := nil;
   SSLReadBio := nil;

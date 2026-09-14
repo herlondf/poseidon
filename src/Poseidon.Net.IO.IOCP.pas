@@ -47,6 +47,8 @@ type
     procedure _PostOneAccept(AIdx: Integer; ARetriesLeft: Integer = 3);
     procedure _WorkerLoop;
     procedure _OnRecvReady(AConn: Pointer);
+    function DrainCompletions(ATimeoutMs: Cardinal;
+      ATarget: Pointer = nil): Boolean;
   public
     constructor Create;
     destructor Destroy; override;
@@ -64,10 +66,14 @@ type
     procedure PostSendV(AConn: Pointer;
       const AHeaders: TBytes; AHdrLen: Integer;
       const ABody: TBytes; ABodyLen: Integer);
-    procedure SocketClose(AConn: Pointer);
+    procedure SocketClose(AConn: Pointer; AFinalTeardown: Boolean = False);
   end;
 
 implementation
+
+uses
+  Poseidon.Net.ResponseBuilder,
+  Poseidon.Net.HttpServer;
 
 // #223: WSAStartup/WSACleanup are process-wide (refcounted internally by
 // Winsock itself), but each TIOCPBackend instance previously called
@@ -518,11 +524,14 @@ begin
     FWorkers[I].Free;
   end;
   SetLength(FWorkers, 0);
-  if FIocp <> 0 then
-  begin
-    CloseHandle(FIocp);
-    FIocp := 0;
-  end;
+  // #leak-conn-ctx: deliberately NOT closing FIocp here anymore. Stop()'s
+  // step 5 (the forced straggler walk) runs after JoinWorkers returns and
+  // calls SocketClose(..., True) on any connection still open, which itself
+  // calls DrainCompletions to consume completions for cancelled recv/
+  // DisconnectEx ops still outstanding on those sockets - that only works if
+  // the port those completions are queued to is still alive. Destroy already
+  // closes FIocp if still open, which happens once this backend object
+  // itself is freed, safely after Stop() (and step 5) has fully returned.
   // #223: deliberately no WSACleanup - see _WinsockAcquire comment above.
 end;
 
@@ -572,18 +581,29 @@ begin
   LBytes := 0;
 
   LConn.AddRef;
+  // #leak-conn-ctx: tracked here (cleared on every Dispose(LCtx) path in this
+  // unit) so SocketClose can cancel and safely wait for it if the completion
+  // never gets dequeued before JoinWorkers returns, instead of either
+  // leaking it or freeing it out from under a still-pending OS operation.
+  // Set before posting: on the two synchronous-completion paths below,
+  // Dispose(LCtx) happens (and clears this back to nil) before this function
+  // returns, so there's no window where SocketClose could observe a stale
+  // pointer to memory already freed here.
+  LConn.PendingRecvCtx := LCtx;
   LRes := WSARecv(LConn.Socket, @LCtx^.WsaBuf, 1, LBytes, LFlags,
     PWSAOverlapped(@LCtx^.Ovl), nil);
 
   if LRes = 0 then
   begin
     // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS - data already available
+    LConn.PendingRecvCtx := nil;
     Dispose(LCtx);
     _OnRecvReady(AConn);
     LConn.Release;
   end
   else if WSAGetLastError <> WSA_IO_PENDING then
   begin
+    LConn.PendingRecvCtx := nil;
     LConn.Release;
     Dispose(LCtx);
     FCallbacks.OnConnError(AConn);
@@ -747,17 +767,177 @@ begin
   end;
 end;
 
-procedure TIOCPBackend.SocketClose(AConn: Pointer);
+const
+  // #leak-conn-ctx: how long SocketClose will let DrainCompletions wait, per
+  // straggler socket, for the OS to actually deliver a still-outstanding
+  // overlapped op's completion through the port before giving up and leaking
+  // its context. Only paid once per connection still open at shutdown, and
+  // only after CancelIoEx + closesocket have already been issued for it, so
+  // this should resolve almost immediately in practice, not actually sleep
+  // for the full bound.
+  CPendingOpWaitMs = 250;
+
+// #leak-conn-ctx: drains completions directly from the port, instead of
+// polling OVERLAPPED.Internal (an earlier version of this fix did exactly
+// that, and it never worked for a zero-byte recv specifically: confirmed
+// empirically that GetQueuedCompletionStatus reliably delivers that
+// operation's completion, with ERROR_OPERATION_ABORTED after CancelIoEx,
+// while Internal stays STATUS_PENDING forever regardless of how long you
+// wait or how the socket is closed. Whatever AFD.sys does internally for
+// that operation type apparently updates the port's queue but not the
+// OVERLAPPED's own status field, unlike a "real" I/O like DisconnectEx.
+// Only safe to call once no worker thread is left running (Stop(), after
+// JoinWorkers): a live worker could dequeue the very same completions this
+// drains, freeing them twice. Frees whatever it dequeues regardless of
+// which connection it belongs to (opportunistically also cleaning up other
+// stragglers' completions still sitting in the queue, which is fine: each
+// context is disposed exactly once here, and TNativeConn.PendingRecvCtx is
+// cleared for its owner so that connection's own SocketClose call - if not
+// already past this point - sees nil and does not try to touch it again).
+// ATarget, when given, is compared against each dequeued OVERLAPPED pointer;
+// the Boolean result says whether THAT specific one was seen and disposed
+// before the deadline (the caller's one way to confirm its own context was
+// actually freed here, since the loop may dispose other stragglers' contexts
+// first). With ATarget = nil the result is always False; only the caller
+// asking about a specific context cares about it.
+function TIOCPBackend.DrainCompletions(ATimeoutMs: Cardinal;
+  ATarget: Pointer): Boolean;
+var
+  LDeadline: UInt64;
+  LRemainMs: Int64;
+  LBytes: DWORD;
+  LKey: NativeUInt;
+  LOvl: Pointer;
+  LHdr: PIocpHdr;
+  LDisCtx: PDisconnectCtx;
+  LAcceptCtx: PAcceptCtx;
+begin
+  Result := False;
+  if FIocp = 0 then Exit;
+  LDeadline := TThread.GetTickCount64 + ATimeoutMs;
+  while True do
+  begin
+    LRemainMs := Int64(LDeadline) - Int64(TThread.GetTickCount64);
+    if LRemainMs <= 0 then Exit;
+    LBytes := 0;
+    LKey := 0;
+    LOvl := nil;
+    // Ignore the True/False result: a completed-but-failed op (the common
+    // case here, ERROR_OPERATION_ABORTED from our own CancelIoEx) returns
+    // False while still filling LOvl, per GetQueuedCompletionStatus's own
+    // documented contract. Only a nil LOvl means nothing was dequeued.
+    _IocpGet(FIocp, @LBytes, @LKey, @LOvl, DWORD(LRemainMs));
+    if LOvl = nil then Exit;
+    if (ATarget <> nil) and (LOvl = ATarget) then Result := True;
+
+    LHdr := PIocpHdr(LOvl);
+    case LHdr^.Action of
+      iaRecvZero:
+      begin
+        if TNativeConn(PRecvZeroCtx(LOvl)^.Conn).PendingRecvCtx = LOvl then
+          TNativeConn(PRecvZeroCtx(LOvl)^.Conn).PendingRecvCtx := nil;
+        Dispose(PRecvZeroCtx(LOvl));
+      end;
+      iaRecv: FreeMem(PRecvCtx(LOvl));
+      iaSend:
+      begin
+        TBufferPool.Release(PSendCtx(LOvl)^.SendBuf);
+        Dispose(PSendCtx(LOvl));
+      end;
+      iaSendV:
+      begin
+        TBufferPool.Release(PSendVCtx(LOvl)^.HeaderBuf);
+        TBufferPool.Release(PSendVCtx(LOvl)^.BodyBuf);
+        Dispose(PSendVCtx(LOvl));
+      end;
+      iaDisconnect:
+      begin
+        LDisCtx := PDisconnectCtx(LOvl);
+        if LDisCtx^.Socket <> INVALID_SOCKET then
+          closesocket(LDisCtx^.Socket);
+        Dispose(LDisCtx);
+      end;
+      iaAccept:
+      begin
+        // FAcceptCtxs entries are a fixed, backend-owned pool reused for the
+        // process lifetime, never heap-allocated per completion: nothing to
+        // Dispose, just make sure a leftover accepted socket does not leak.
+        LAcceptCtx := PAcceptCtx(LOvl);
+        if LAcceptCtx^.AcceptSocket <> INVALID_SOCKET then
+        begin
+          closesocket(LAcceptCtx^.AcceptSocket);
+          LAcceptCtx^.AcceptSocket := INVALID_SOCKET;
+        end;
+      end;
+    end;
+    // Once the one context the caller was actually waiting on is confirmed
+    // disposed, stop: further _IocpGet calls would otherwise block up to
+    // LRemainMs each for stragglers nobody asked about, wasting the rest of
+    // the bound for nothing this caller needs.
+    if Result then Exit;
+  end;
+end;
+
+procedure TIOCPBackend.SocketClose(AConn: Pointer; AFinalTeardown: Boolean);
 var
   LConn: TNativeConn absolute AConn;
   LCtx: PDisconnectCtx;
+  LPendingRecv: PRecvZeroCtx;
   LSock: TSocket;
+  LLinger: TLinger;
 begin
   // #173: capture the handle and invalidate the connection's copy up-front, so
   // a concurrent IdleSweep.ShutdownConn cannot shutdown() a descriptor we are
   // about to recycle (CTF_REUSE_SOCKET) into another connection.
   LSock := LConn.Socket;
   LConn.Socket := INVALID_SOCKET;
+
+  // #leak-conn-ctx: a still-outstanding zero-byte-recv (PostRecv posted it).
+  // CRITICAL: only touch it ourselves when AFinalTeardown, i.e. when Stop()
+  // has already run JoinWorkers, so no worker thread will ever dequeue this
+  // completion. In the ordinary case (idle timeout, protocol error, any
+  // close while the server is still running), workers are alive: a worker
+  // WILL dequeue this recv's completion through the normal iaRecvZero path
+  // in _WorkerLoop and Dispose it there. Draining it here too,
+  // unconditionally, caused exactly that: a live worker's Dispose racing
+  // this function's own Dispose on the same context, a double free that
+  // FastMM4's CheckHeapForCorruption caught ("block header has been
+  // corrupted" during a worker's FreeMem) on nothing more than a single
+  // ordinary request. So outside final teardown, this field is cleared and
+  // otherwise left alone, matching this function's original
+  // (pre-#leak-conn-ctx) behavior: trust the worker loop, the only safe
+  // single owner of that Dispose while it is still running.
+  LPendingRecv := PRecvZeroCtx(LConn.PendingRecvCtx);
+  LConn.PendingRecvCtx := nil;
+  if AFinalTeardown and (LPendingRecv <> nil) then
+  begin
+    // CancelIoEx forces the pending recv to actually be cancelled instead of
+    // possibly sitting outstanding forever (a genuinely idle keep-alive
+    // connection has nothing else that would ever complete it). SO_LINGER{on,
+    // 0} + closesocket then destroys the socket outright: nothing left to
+    // gracefully close or pool for reuse once a recv was still outstanding
+    // anyway (the CTF_REUSE_SOCKET dance below assumes a socket with no I/O
+    // left on it), so an abortive close costs nothing here.
+    //
+    // DrainCompletions, not polling OVERLAPPED.Internal, is what actually
+    // observes this completion: confirmed empirically (GetQueuedCompletionStatus
+    // reliably delivers it, with ERROR_OPERATION_ABORTED, right after
+    // CancelIoEx) that a zero-byte recv's Internal field never leaves
+    // STATUS_PENDING no matter how the socket is closed or how long you wait,
+    // while GetQueuedCompletionStatus does see it. Whatever AFD.sys does
+    // internally for this operation type updates the port's queue but not the
+    // OVERLAPPED's own status field, unlike DisconnectEx below. See
+    // DrainCompletions's own header for the full reasoning.
+    CancelIoEx(THandle(LSock), POverlapped(@LPendingRecv^.Ovl));
+    LLinger.l_onoff := 1;
+    LLinger.l_linger := 0;
+    setsockopt(LSock, SOL_SOCKET, SO_LINGER, @LLinger, SizeOf(LLinger));
+    closesocket(LSock);
+    if not DrainCompletions(CPendingOpWaitMs, @LPendingRecv^.Ovl) then
+      Writeln(ErrOutput, '[iocp] leaking RecvZeroCtx: OS did not report ',
+        'completion within ', CPendingOpWaitMs, 'ms at shutdown');
+    Exit;
+  end;
 
   // TCP half-close - FIN before RST so the client receives the last bytes
   shutdown(LSock, SD_SEND);
@@ -773,7 +953,26 @@ begin
       POverlapped(@LCtx^.Ovl), CTF_REUSE_SOCKET, 0) then
     begin
       if WSAGetLastError = WSA_IO_PENDING then
-        Exit;  // will complete via IOCP
+      begin
+        if AFinalTeardown then
+        begin
+          // Same reasoning as the recv above: only safe to drain and dispose
+          // it ourselves when no live worker could also dequeue and dispose
+          // the same context (that double free is exactly what broke the
+          // recv case above when this was unconditional). closesocket forces
+          // the OS to actually finish with LCtx^.Ovl. Closing here forfeits
+          // CTF_REUSE_SOCKET's pooled reuse for this connection, moot at
+          // final teardown anyway.
+          closesocket(LSock);
+          if not DrainCompletions(CPendingOpWaitMs, @LCtx^.Ovl) then
+            Writeln(ErrOutput, '[iocp] leaking DisconnectCtx: OS did not ',
+              'report completion within ', CPendingOpWaitMs, 'ms at shutdown');
+        end;
+        // Not final teardown: a worker is still alive to dequeue this
+        // completion through the iaDisconnect path and Dispose(LCtx) there
+        // (the original, always-safe behavior). Nothing more to do here.
+        Exit;
+      end;
       // DisconnectEx failed - fall through to closesocket
       Dispose(LCtx);
     end
@@ -941,6 +1140,7 @@ begin
         // Zero-byte recv: LBytes is always 0; do synchronous recv
         if LHdr^.Action = iaRecvZero then
         begin
+          LConn.PendingRecvCtx := nil;
           Dispose(PRecvZeroCtx(LOvl));
           _OnRecvReady(LConn);
           LConn.Release;
@@ -1026,8 +1226,15 @@ begin
     if LSawShutdown then Exit;
   end;
   finally
-    // L4: drenar TLC do worker no fim do loop - evita vazamento em graceful reload
+    // L4: drenar TLC do worker no fim do loop - evita vazamento em graceful reload.
+    // Same reasoning applies to the per-thread Date-header cache and defer-banner
+    // string (both plain UnicodeString threadvars, lazily created the first time
+    // this thread builds a response): a worker thread that built even one
+    // response on this loop (SyncDispatch/backpressure/HTTP2 path) leaks them
+    // otherwise, same as the buffer cache above.
     TBufferPool.FlushThreadCache;
+    ResetThreadDateCache;
+    ResetThreadDeferVars;
   end;
 end;
 

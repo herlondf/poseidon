@@ -1868,12 +1868,51 @@ begin
         LConn.SSLReadBio  := nil;
         LConn.SSLWriteBio := nil;
       end;
-      FIOBackend.SocketClose(LConn);
-      LConn.Release;
+      // AFinalTeardown=True: JoinWorkers has already run (above), so no
+      // worker thread remains to dequeue this connection's completions -
+      // only here is it both necessary and safe for SocketClose itself to
+      // wait for and dispose a still-outstanding recv/DisconnectEx context
+      // (see Poseidon.Net.IO.IOCP.pas, #leak-conn-ctx). Every other
+      // SocketClose call site in this unit runs while workers are still
+      // alive and must NOT pass True there: that path double-frees such a
+      // context together with the worker's own normal disposal of it.
+      FIOBackend.SocketClose(LConn, True);
+      // #leak-conn: an idle keep-alive connection can still be holding a ref
+      // for a recv that ShutdownConn's socket shutdown() never synchronously
+      // cancelled. JoinWorkers has already returned above, so if the pool
+      // drained cleanly (LDrained), no thread will ever deliver that
+      // completion (or touch this connection) again, so nothing will ever
+      // call Release for it either. ForceRelease frees the connection object
+      // itself directly in that case: safe, it only touches refcount and
+      // Delphi-side fields, never memory the OS driver might still write
+      // into (SocketClose above already resolved that risk for the recv/
+      // disconnect context themselves, see Poseidon.Net.IO.IOCP.pas,
+      // #leak-conn-ctx, by waiting for the OS to confirm completion before
+      // freeing them). On the timeout path (not LDrained) a straggler worker
+      // may still be running, so keep the existing behavior instead: a
+      // normal Release, leaking rather than risking a use-after-free, same
+      // trade-off already made for SSLHandle above.
+      if LDrained then
+        LConn.ForceRelease
+      else
+        LConn.Release;
     end;
   finally
     FConnManager.Lock.Leave;
   end;
+
+  // #leak-conn: LConn.ForceRelease above runs each straggler's Destroy on
+  // THIS (the caller's) thread, which calls TBufferPool.Release(AccumBuf),
+  // that lazily creates/populates a thread-local buffer cache (threadvar) for
+  // whichever thread calls Stop, exactly like any worker thread's. Every
+  // other thread that touches the pool flushes this cache before it exits
+  // (see Poseidon.Net.Pool.Workers.pas, the IOCP/IOUring/Epoll worker loops),
+  // this thread does not normally, and Stop may be the last thing it ever
+  // does, so do the same flush here or the cache (and any buffers still in
+  // it) leaks for the rest of the process's life.
+  TBufferPool.FlushThreadCache;
+  ResetThreadDateCache;
+  ResetThreadDeferVars;
 
   FreeAndNil(FIdleSweep);
 end;

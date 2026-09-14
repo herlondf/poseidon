@@ -146,7 +146,7 @@ type
     procedure PostSendV(AConn: Pointer;
       const AHeaders: TBytes; AHdrLen: Integer;
       const ABody: TBytes; ABodyLen: Integer);
-    procedure SocketClose(AConn: Pointer);
+    procedure SocketClose(AConn: Pointer; AFinalTeardown: Boolean = False);
   end;
 
 implementation
@@ -851,7 +851,7 @@ begin
   end;
 end;
 
-procedure TRIOBackend.SocketClose(AConn: Pointer);
+procedure TRIOBackend.SocketClose(AConn: Pointer; AFinalTeardown: Boolean);
 var
   LConn: TNativeConn absolute AConn;
   LSock: TSocket;

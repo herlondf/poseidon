@@ -168,10 +168,14 @@ type
     procedure PostSendV(AConn: Pointer;
       const AHeaders: TBytes; AHdrLen: Integer;
       const ABody: TBytes; ABodyLen: Integer);
-    procedure SocketClose(AConn: Pointer);
+    procedure SocketClose(AConn: Pointer; AFinalTeardown: Boolean = False);
   end;
 
 implementation
+
+uses
+  Poseidon.Net.ResponseBuilder,
+  Poseidon.Net.HttpServer;
 
 // io_uring constants and types
 
@@ -649,7 +653,13 @@ begin
       try
         _CompletionLoop;
       finally
+        // Same-thread Date-header cache / defer-banner (UnicodeString
+        // threadvars) leak otherwise if this thread ever builds a response
+        // directly (SyncDispatch/backpressure/HTTP2 path), same reasoning
+        // as the buffer-cache flush.
         TBufferPool.FlushThreadCache;
+        ResetThreadDateCache;
+        ResetThreadDeferVars;
       end;
     end);
   FCompThread.FreeOnTerminate := False;
@@ -679,6 +689,8 @@ begin
           _AcceptLoop;
         finally
           TBufferPool.FlushThreadCache;
+          ResetThreadDateCache;
+          ResetThreadDeferVars;
         end;
       end);
     FAcceptThread.FreeOnTerminate := False;
@@ -1478,7 +1490,7 @@ begin
   PostSend(AConn, LConcat, LHLen + LBLen);
 end;
 
-procedure TIOUringBackend.SocketClose(AConn: Pointer);
+procedure TIOUringBackend.SocketClose(AConn: Pointer; AFinalTeardown: Boolean);
 var
   LConn: TNativeConn absolute AConn;
   LRing: TUringRing;

@@ -86,8 +86,20 @@ type
       const ABody: TBytes; ABodyLen: Integer);
 
     // Platform-specific socket teardown: remove from epoll / close fd or handle.
-    // Called from server's _CloseConn after app-level cleanup (SSL, WS, H2) is done.
-    procedure SocketClose(AConn: Pointer);
+    // Called from server's _CloseConn after app-level cleanup (SSL, WS, H2) is
+    // done, and also from TPoseidonNativeServer.Stop's final forced-teardown
+    // walk (AFinalTeardown = True in that case only). The distinction matters
+    // on IOCP: a still-outstanding overlapped op's completion is normally left
+    // for a live worker thread to dequeue and dispose (the only safe option
+    // while workers are running: disposing it here too would race that
+    // worker's own Dispose on the same context, a double free). Only once
+    // JoinWorkers has stopped every worker thread does nothing else exist to
+    // ever dequeue that completion, so only then is it both necessary and
+    // safe for SocketClose itself to drain the completion port and dispose
+    // it (see DrainCompletions in Poseidon.Net.IO.IOCP.pas; the port itself
+    // stays open past JoinWorkers precisely so this can still happen). Other
+    // backends accept the parameter for interface parity but do not need it.
+    procedure SocketClose(AConn: Pointer; AFinalTeardown: Boolean = False);
   end;
 
 implementation

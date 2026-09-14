@@ -85,10 +85,14 @@ type
     procedure PostSendV(AConn: Pointer;
       const AHeaders: TBytes; AHdrLen: Integer;
       const ABody: TBytes; ABodyLen: Integer);
-    procedure SocketClose(AConn: Pointer);
+    procedure SocketClose(AConn: Pointer; AFinalTeardown: Boolean = False);
   end;
 
 implementation
+
+uses
+  Poseidon.Net.ResponseBuilder,
+  Poseidon.Net.HttpServer;
 
 
 const
@@ -203,11 +207,17 @@ end;
 
 procedure TCoreWorkerThread.Execute;
 begin
-  // L4: drenar TLC do worker no fim - evita vazamento em graceful reload
+  // L4: drenar TLC do worker no fim - evita vazamento em graceful reload.
+  // Same for the per-thread Date-header cache / defer-banner (plain
+  // UnicodeString threadvars, lazily created on this thread's first response):
+  // leaked otherwise if this core thread ever builds a response directly
+  // (SyncDispatch/backpressure/HTTP2 path).
   try
     FBackend._CoreWorkerLoop(FCoreIdx);
   finally
     TBufferPool.FlushThreadCache;
+    ResetThreadDateCache;
+    ResetThreadDeferVars;
   end;
 end;
 
@@ -597,7 +607,7 @@ begin
   Result := TInterlocked.CompareExchange(LConn.SocketOpGuard, 1, 0) = 0;
 end;
 
-procedure TEpollBackend.SocketClose(AConn: Pointer);
+procedure TEpollBackend.SocketClose(AConn: Pointer; AFinalTeardown: Boolean);
 var
   LConn: TNativeConn absolute AConn;
   LSock: Integer;
