@@ -462,6 +462,7 @@ begin
 
   ACtx.Req.RemoteAddr := LConn.RemoteAddr;
   _CompactAccum(LConn, ACtx.Consumed);
+  LConn.HeadersEverCompleted := True;  // #254: header deadline no longer applies
 end;
 
 // StepParseHTTP1Lightweight - minimal parse, zero header string allocations
@@ -503,6 +504,7 @@ begin
 
   _CompactAccum(LConn, ACtx.Consumed);
   LConn.KeepAlive := ACtx.Req.KeepAlive;
+  LConn.HeadersEverCompleted := True;  // #254: header deadline no longer applies
 end;
 
 // StepUpgradeDetection - check for WebSocket/H2C upgrades (GET only)

@@ -65,6 +65,8 @@ type
     // #233: watchdog for a handler stuck in normal operation (not just at
     // shutdown, where FDrainTimeoutMs already covers this). 0 = disabled.
     FMaxHandlerRunMs: Integer;
+    // #254 (Slowloris): absolute header-completion deadline. 0 = disabled.
+    FHeaderTimeoutMs: Integer;
     // #234 incident mitigation: see ShrinkAccumBufEnabled property.
     FShrinkAccumBufEnabled: Boolean;
     FIdleSweep: TIdleSweepManager;
@@ -76,6 +78,7 @@ type
     FIOWorkerCount: Integer;
     FRequestPool: TElasticWorkerPool;
     FOnLog: TOnPoseidonLog;
+    FLogFormat: TPoseidonLogFormat;
     FOnRequestLog: TOnPoseidonRequestLog;
     FMinTLSVersion: Integer;
     FMaxRequestSize: Integer;
@@ -181,6 +184,14 @@ type
     // keep today's behavior - a handler stuck in normal operation runs
     // forever - unless this is set explicitly).
     property MaxHandlerRunMs: Integer read FMaxHandlerRunMs write FMaxHandlerRunMs;
+    // #254: absolute deadline (ms, from connection open) to complete the
+    // first request's headers - unlike IdleTimeoutMs, NOT reset by partial
+    // activity, closing the classic Slowloris loophole (trickle one byte
+    // every few seconds, forever, to hold a connection slot open for free).
+    // Stops applying once headers are parsed once on the connection; the
+    // rest of its keep-alive life is governed by IdleTimeoutMs as before.
+    // 0 = disabled (default - opt-in, like MaxHandlerRunMs).
+    property HeaderTimeoutMs: Integer read FHeaderTimeoutMs write FHeaderTimeoutMs;
     // #234 incident mitigation (2026-08-12): the idle-sweep shrinks an idle,
     // fully-drained oversized AccumBuf back to tier 0 (see Poseidon.Net.IdleSweep
     // SweepLoop) - a real memory-consumption fix (was written for exactly this:
@@ -226,6 +237,14 @@ type
     // Optional log callback. When assigned, all internal errors are routed here.
     // When nil (default), errors are written to ErrOutput.
     property OnLog: TOnPoseidonLog read FOnLog write FOnLog;
+    // Format of the server's OWN default log sink only (Writeln to ErrOutput
+    // when OnLog is nil) - has no effect once OnLog is assigned, since a
+    // consumer callback controls its own formatting entirely. lfPlain
+    // (default) keeps today's "[poseidon][LEVEL][iid=xxx] message" text
+    // lines; lfJSON wraps the same message as one JSON object per line for
+    // log aggregators (CloudWatch Insights, Loki) that parse JSON without a
+    // regex. See TPoseidonLogFormat for exactly what "structured" means here.
+    property LogFormat: TPoseidonLogFormat read FLogFormat write FLogFormat;
     // Optional access-log callback. Fired after every HTTP/1.1 request is
     // dispatched. Receives method, path, status, duration (ms), remote addr,
     // and byte counts. nil (default) = no access logging.
@@ -1186,10 +1205,25 @@ begin
 
   // v2-perf: SyncDispatch - execute directly on IO thread, skip worker pool.
   // Eliminates thread transition overhead (~50-100us per request).
+  //
+  // #257: InFlightPool must be counted here too, even though this path never
+  // touches the worker pool. It is the ONLY signal TIdleSweepManager.SweepLoop
+  // has for "a handler is running on this connection" (see IdleSweep.pas) -
+  // without it, a sync-dispatched handler stuck longer than IdleTimeoutMs
+  // looked idle to the sweep, which then tried to shrink its AccumBuf under
+  // LConn.Lock.Enter - the SAME lock _ProcessRecv already holds for the
+  // entire synchronous dispatch below, freezing the sweep thread on this one
+  // connection and starving every other connection's idle-timeout/#233
+  // watchdog check for as long as the stuck handler ran.
   if FSyncDispatch then
   begin
     TNativeConn(AConn).LastActivityTick := TThread.GetTickCount64;
-    FDispatcher.Dispatch(AConn, LCfg);
+    TInterlocked.Increment(TNativeConn(AConn).InFlightPool);
+    try
+      FDispatcher.Dispatch(AConn, LCfg);
+    finally
+      TInterlocked.Decrement(TNativeConn(AConn).InFlightPool);
+    end;
     Exit;
   end;
 
@@ -1533,12 +1567,52 @@ begin
   Result := FWSManager.DispatchFrames(AConn);
 end;
 
+// Escapes a string for a JSON string literal (backslash, quote, control
+// chars) - the same reason Poseidon.Middleware.Metrics escapes Prometheus
+// label values: an exception message or a request path can legitimately
+// contain any of these, and one unescaped quote would silently corrupt every
+// line after it for a log aggregator parsing this as JSON.
+function _JSONEscape(const S: string): string;
+var
+  I: Integer;
+  C: Char;
+  LSB: TStringBuilder;
+begin
+  LSB := TStringBuilder.Create;
+  try
+    for I := 1 to Length(S) do
+    begin
+      C := S[I];
+      case C of
+        '"':  LSB.Append('\"');
+        '\':  LSB.Append('\\');
+        #10:  LSB.Append('\n');
+        #13:  LSB.Append('\r');
+        #9:   LSB.Append('\t');
+      else
+        if C < #$20 then
+          LSB.Append('\u').Append(IntToHex(Ord(C), 4))
+        else
+          LSB.Append(C);
+      end;
+    end;
+    Result := LSB.ToString;
+  finally
+    LSB.Free;
+  end;
+end;
+
 procedure TPoseidonNativeServer._Log(ALevel: TLogLevel; const AMessage: string);
 const
   LEVEL_LABEL: array[TLogLevel] of string = ('DEBUG', 'INFO', 'WARN', 'ERROR');
 begin
   if Assigned(FOnLog) then
     FOnLog(ALevel, AMessage)
+  else if FLogFormat = lfJSON then
+    Writeln(ErrOutput, Format(
+      '{"level":"%s","iid":"%s","msg":"%s"}',
+      [LEVEL_LABEL[ALevel], TPoseidonDiagnostics.InstanceId,
+       _JSONEscape(AMessage)]))
   else
     Writeln(ErrOutput, '[poseidon][', LEVEL_LABEL[ALevel], '][iid=',
       TPoseidonDiagnostics.InstanceId, '] ', AMessage);
@@ -1560,52 +1634,14 @@ end;
 // Read fresh every call (no caching) - this is the periodic heartbeat, at
 // most once every few seconds, not a hot-path call.
 function TPoseidonNativeServer._GetProcessRSSKB: Int64;
-{$IFDEF MSWINDOWS}
-var
-  LCounters: TProcessMemoryCounters;
 begin
-  FillChar(LCounters, SizeOf(LCounters), 0);
-  LCounters.cb := SizeOf(LCounters);
-  if GetProcessMemoryInfo(GetCurrentProcess, @LCounters, SizeOf(LCounters)) then
-    Result := LCounters.WorkingSetSize div 1024
-  else
-    Result := -1;
+  // #256-adjacent cleanup: this used to duplicate TPoseidonDiagnostics'
+  // platform-specific /proc/self/status (Linux) / GetProcessMemoryInfo
+  // (Windows) logic verbatim. Moved there so the metrics middleware and any
+  // future caller read the exact same number the exact same way, not a
+  // second maintained copy that could drift.
+  Result := TPoseidonDiagnostics.RSSKB;
 end;
-{$ELSE}
-var
-  LFile: TextFile;
-  LLine: string;
-  LSpacePos: Integer;
-begin
-  Result := -1;
-  AssignFile(LFile, '/proc/self/status');
-  try
-    try
-      Reset(LFile);
-    except
-      Exit;
-    end;
-    try
-      while not Eof(LFile) do
-      begin
-        ReadLn(LFile, LLine);
-        if LLine.StartsWith('VmRSS:') then
-        begin
-          LLine := Trim(Copy(LLine, Length('VmRSS:') + 1, MaxInt));
-          LSpacePos := Pos(' ', LLine);
-          if LSpacePos > 0 then LLine := Copy(LLine, 1, LSpacePos - 1);
-          Result := StrToInt64Def(LLine, -1);
-          Break;
-        end;
-      end;
-    finally
-      CloseFile(LFile);
-    end;
-  except
-    Result := -1;
-  end;
-end;
-{$ENDIF}
 
 // Periodic health line. Every value here is already tracked for other reasons,
 // so this adds nothing to the request path - it only makes the trend visible.
@@ -1770,6 +1806,7 @@ begin
   FIdleSweep := TIdleSweepManager.Create(FConnManager, FIOBackend, @FActive);
   FIdleSweep.IdleTimeoutMs := FIdleTimeoutMs;
   FIdleSweep.MaxHandlerRunMs := FMaxHandlerRunMs;
+  FIdleSweep.HeaderTimeoutMs := FHeaderTimeoutMs;
   FIdleSweep.ShrinkAccumBufEnabled := FShrinkAccumBufEnabled;
   FIdleSweep.OnLog := FOnLog;
   FIdleSweep.OnForceClose := _CloseConn;  // #224 mitigation - see IdleSweep.pas

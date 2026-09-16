@@ -63,6 +63,19 @@ type
     // completion never arrived; force the close rather than leak the fd, which
     // was seen stuck in FIN_WAIT2 with no kernel timeout.
     ShutdownRequestedTick: UInt64;
+    // #254 (Slowloris): stamped once at connection creation, NEVER reset by
+    // partial activity (unlike LastActivityTick, which resets on every byte -
+    // exactly what let Slowloris hold a connection open forever by trickling
+    // one byte every few seconds). Scoped to the first request only: once
+    // HeadersEverCompleted flips true, this deadline no longer applies.
+    HeaderDeadlineTick: UInt64;
+    // #254: true once ParseHTTP1Request/ParseHTTP1Lightweight has ever
+    // successfully parsed a full request line + headers on this connection.
+    // A connection that reaches this point has proven it is not a
+    // never-finishes-headers Slowloris client; the header deadline above
+    // stops applying, and the connection falls back to the normal
+    // IdleTimeoutMs behavior for the rest of its keep-alive life.
+    HeadersEverCompleted: Boolean;
     // IOCP only: the just-posted zero-byte-recv context (PRecvZeroCtx in
     // Poseidon.Net.IO.IOCP.pas), non-nil only between PostRecv posting it and
     // its IOCP completion being dequeued (which Disposes it and clears this
@@ -222,6 +235,8 @@ begin
   Closed := 0;
   LastActivityTick := TThread.GetTickCount64;
   ShutdownRequestedTick := 0;
+  HeaderDeadlineTick := LastActivityTick;
+  HeadersEverCompleted := False;
   PendingRecvCtx := nil;
   InFlightPool := 0;
   SSLHandle := nil;

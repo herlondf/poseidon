@@ -54,6 +54,15 @@ type
 
   TLogLevel = (llDebug, llInfo, llWarning, llError);
   TOnPoseidonLog = reference to procedure(ALevel: TLogLevel; const AMessage: string);
+  // Only affects the server's OWN default log sink (Writeln to ErrOutput
+  // when no OnLog callback is assigned) - a consumer that sets OnLog already
+  // controls formatting entirely and this has no effect on it. lfJSON wraps
+  // the exact same pre-formatted message string (e.g. the whole "[health]
+  // conns=..." line) as one JSON string field - it does not break individual
+  // key=value pairs out into separate JSON fields, so a log aggregator gets
+  // valid, parseable JSON, but "structured" here means "one JSON object per
+  // line", not "one field per metric".
+  TPoseidonLogFormat = (lfPlain, lfJSON);
 
   TPoseidonRequestLogEvent = record
     Method: string;

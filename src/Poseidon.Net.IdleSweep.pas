@@ -28,6 +28,10 @@ type
     FIdleTimeoutMs: Integer;
     // #233: watchdog for a handler stuck in normal operation. 0 = disabled.
     FMaxHandlerRunMs: Integer;
+    // #254 (Slowloris): absolute deadline to complete the first request's
+    // headers, unaffected by IdleTimeoutMs resetting on every partial byte.
+    // 0 = disabled.
+    FHeaderTimeoutMs: Integer;
     FSweepThread: TThread;
     FStopEvent: TEvent;
     FConnManager: TConnectionManager;
@@ -52,6 +56,10 @@ type
     // it stuck and force-closes the connection, leaving teardown to the worker's
     // own Release rather than killing the thread. 0 = disabled.
     property MaxHandlerRunMs: Integer read FMaxHandlerRunMs write FMaxHandlerRunMs;
+    // #254: see FHeaderTimeoutMs. 0 = disabled (default - opt-in, like
+    // MaxHandlerRunMs, so existing deployments keep today's behavior unless
+    // set explicitly).
+    property HeaderTimeoutMs: Integer read FHeaderTimeoutMs write FHeaderTimeoutMs;
     // #234 (2026-08-12): shrinks an idle, drained AccumBuf back to tier 0.
     // Defaults True, but HttpServer turns it off in production while the heap
     // corruption in #234 is unresolved: this is the newest code touching
@@ -131,6 +139,8 @@ var
   LIdle:    Int64;
   LLastBeat: UInt64;
   LOldBuf:  TBytes;
+  LHDiff:   UInt64;
+  LHeaderAge: Int64;
 begin
   LLastBeat := TThread.GetTickCount64;
   while FActive^ do
@@ -147,7 +157,8 @@ begin
       try FOnHeartbeat(); except on E: Exception do; end;
     end;
 
-    if (FIdleTimeoutMs <= 0) and (FMaxHandlerRunMs <= 0) then Continue;
+    if (FIdleTimeoutMs <= 0) and (FMaxHandlerRunMs <= 0) and
+       (FHeaderTimeoutMs <= 0) then Continue;
 
     LSnap := FConnManager.Snapshot;
     LNowTick := TThread.GetTickCount64;
@@ -173,6 +184,38 @@ begin
             LIdle := MaxInt
           else
             LIdle := Integer(LDiff);
+        end;
+
+        // #254 (Slowloris): absolute deadline to complete the FIRST request's
+        // headers, measured from HeaderDeadlineTick (stamped once at connect,
+        // never reset by partial activity - unlike LIdle/LastActivityTick
+        // above, which is exactly the loophole Slowloris exploits). Same
+        // wrap-safety reasoning as LIdle: a tick at or past the sample means
+        // the deadline has not started counting against this pass yet.
+        if (FHeaderTimeoutMs > 0) and (not LConn.HeadersEverCompleted) then
+        begin
+          if LConn.HeaderDeadlineTick >= LNowTick then
+            LHeaderAge := 0
+          else
+          begin
+            LHDiff := LNowTick - LConn.HeaderDeadlineTick;
+            if LHDiff > UInt64(MaxInt) then
+              LHeaderAge := MaxInt
+            else
+              LHeaderAge := Integer(LHDiff);
+          end;
+          if LHeaderAge > FHeaderTimeoutMs then
+          begin
+            if Assigned(FOnLog) then
+              FOnLog(llWarning, '[sweep] #254 header deadline: ' +
+                LConn.RemoteAddr + ' incomplete headers after ' +
+                IntToStr(LHeaderAge) + 'ms (limit ' +
+                IntToStr(FHeaderTimeoutMs) + 'ms) - closing connection ' +
+                '(Slowloris guard)');
+            if Assigned(FOnForceClose) then
+              FOnForceClose(LSnap[I]);
+            Continue;
+          end;
         end;
 
         if TInterlocked.Add(LConn.InFlightPool, 0) > 0 then
