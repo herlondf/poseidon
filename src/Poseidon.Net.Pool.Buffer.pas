@@ -53,6 +53,19 @@ type
     // Flush thread-local cache back to global pool and free the cache object.
     // Call this before a worker thread exits to prevent leaking buffers.
     class procedure FlushThreadCache; static;
+    // #245: instrumentation for the pool's own "next step" - confirm whether
+    // Tier 2 (only 16 global slots, shared by every thread) actually
+    // exhausts under real large-response traffic before bumping
+    // POOL_TIER2_MAX or adding a Tier 3, which would otherwise be an
+    // unvalidated tuning guess. Incremented when Acquire had to heap-alloc
+    // because BOTH the thread-local cache and the global Tier 2 stack were
+    // empty - i.e. a response that should have been pooled, wasn't.
+    class function Tier2ExhaustedCount: Int64; static;
+    // #245: requests for buffers > 512 KB (Tier 2's ceiling) always bypass
+    // the pool by design (see the unit header) - this is expected, not a
+    // sizing problem, but worth seeing alongside Tier2ExhaustedCount to
+    // tell the two situations apart in a metrics dashboard.
+    class function OversizedCount: Int64; static;
   end;
 
 implementation
@@ -113,6 +126,10 @@ var
   GTier0: TStack<TBytes>;
   GTier1: TStack<TBytes>;
   GTier2: TStack<TBytes>;
+  // #245: TInterlocked-protected, read via TBufferPool.Tier2ExhaustedCount/
+  // OversizedCount - see those methods' comments for what each counts.
+  GTier2ExhaustedCount: Int64 = 0;
+  GOversizedCount: Int64 = 0;
 {$IFDEF FPC}
   // FPC's TMonitor is non-functional (TMonitor.Enter AVs), so the global-pool
   // fallback path uses an explicit critical section instead. One lock for all
@@ -137,6 +154,12 @@ begin
   end;
   if not LHave then
   begin
+    // #245: only Tier 2's exhaustion is what the issue asks about (16 global
+    // slots shared by every thread, for the tier that matters most - large
+    // responses). ABufSize is one of the three distinct tier size constants,
+    // so this comparison unambiguously identifies which tier missed.
+    if ABufSize = POOL_TIER2_SIZE then
+      TInterlocked.Increment(GTier2ExhaustedCount);
     SetLength(Result, ABufSize);
     _HintHugePage(Result);
   end;
@@ -182,7 +205,10 @@ begin
       Result := _GlobalPopOrAlloc(GTier2, POOL_TIER2_SIZE);
   end
   else
+  begin
+    TInterlocked.Increment(GOversizedCount);
     SetLength(Result, ASize);
+  end;
 end;
 
 // Release - thread-local first, overflow goes to global
@@ -260,6 +286,16 @@ begin
   LCache.FTier2Count := 0;
 
   FreeAndNil(GTLCache);
+end;
+
+class function TBufferPool.Tier2ExhaustedCount: Int64;
+begin
+  Result := TInterlocked.Read(GTier2ExhaustedCount);
+end;
+
+class function TBufferPool.OversizedCount: Int64;
+begin
+  Result := TInterlocked.Read(GOversizedCount);
 end;
 
 initialization

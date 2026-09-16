@@ -22,7 +22,8 @@ uses
   System.SyncObjs,
   System.Generics.Collections,
   System.Diagnostics,
-  Poseidon.Diagnostics;
+  Poseidon.Diagnostics,
+  Poseidon.Net.Pool.Buffer;
 
 const
   CHistBounds: array[0..7] of Int64 = (5, 10, 25, 50, 100, 250, 500, 1000);
@@ -156,6 +157,16 @@ begin
   ALSB.AppendLine('# HELP poseidon_private_dirty_kb /proc/self/smaps_rollup Private_Dirty - memory only this process holds, shared library pages excluded (Linux only, -1 on Windows)');
   ALSB.AppendLine('# TYPE poseidon_private_dirty_kb gauge');
   ALSB.AppendLine(Format('poseidon_private_dirty_kb %d', [TPoseidonDiagnostics.PrivateDirtyKB]));
+
+  // #245: confirms (or not) whether Tier 2 of the AccumBuf pool actually
+  // exhausts under real large-response traffic before anyone bumps
+  // POOL_TIER2_MAX/adds a Tier 3 on an unvalidated guess.
+  ALSB.AppendLine('# HELP poseidon_bufferpool_tier2_exhausted_total Times a buffer request found both the thread-local cache and the global Tier 2 pool (16 slots, 512KB each) empty and had to heap-allocate instead');
+  ALSB.AppendLine('# TYPE poseidon_bufferpool_tier2_exhausted_total counter');
+  ALSB.AppendLine(Format('poseidon_bufferpool_tier2_exhausted_total %d', [TBufferPool.Tier2ExhaustedCount]));
+  ALSB.AppendLine('# HELP poseidon_bufferpool_oversized_total Buffer requests above 512KB, which bypass the pool by design (not a sizing problem, but shown alongside tier2_exhausted for context)');
+  ALSB.AppendLine('# TYPE poseidon_bufferpool_oversized_total counter');
+  ALSB.AppendLine(Format('poseidon_bufferpool_oversized_total %d', [TBufferPool.OversizedCount]));
 end;
 
 function BuildPrometheusText(const AStore: TMetricsStore): string;

@@ -54,4 +54,29 @@ LServer := TPoseidonNativeServer.Create(nil, nil, nil);
 LServer := TPoseidonNativeServer.Create(TMyMockBufferPool.Create, nil, nil);
 ```
 
+## Tier 2 exhaustion (#245)
+
+Tier 2 has only 16 **global** slots (shared by every thread) for 512 KB
+buffers — the tier that matters most for large responses. Whether this
+actually runs dry under real large-response traffic (as opposed to just
+being theoretically possible) was an open question, not a confirmed
+problem: bumping `POOL_TIER2_MAX` or adding a Tier 3 without evidence would
+be an unvalidated tuning guess.
+
+`TBufferPool.Tier2ExhaustedCount` and `.OversizedCount` answer this directly
+- also exposed as Prometheus counters
+(`poseidon_bufferpool_tier2_exhausted_total`,
+`poseidon_bufferpool_oversized_total` - see [metrics.md](metrics.md)):
+
+- **`Tier2ExhaustedCount`** climbing under load means a response that
+  *should* have been pooled wasn't - both the calling thread's local cache
+  and the global Tier 2 stack were empty, so it fell back to a heap
+  `SetLength`. This is the actual signal to raise `POOL_TIER2_MAX` or add a
+  Tier 3.
+- **`OversizedCount`** is requests above 512 KB, which bypass the pool
+  *by design* (see the tiers table above) - not a sizing problem on its
+  own, shown alongside `Tier2ExhaustedCount` only for context (a large
+  `OversizedCount` might mean your response sizes belong in a bigger tier
+  entirely, rather than Tier 2 needing more slots).
+
 See [Core Concepts — Buffer pool](../../02-core-concepts/buffer-pool.md) for the conceptual overview.

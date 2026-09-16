@@ -50,4 +50,30 @@ LServer := TPoseidonNativeServer.Create(nil, nil, nil);
 LServer := TPoseidonNativeServer.Create(TMeuMockBufferPool.Create, nil, nil);
 ```
 
+## Esgotamento do Tier 2 (#245)
+
+O Tier 2 tem só 16 slots **globais** (compartilhados por todas as threads)
+pra buffers de 512 KB — o tier que mais importa pra respostas grandes. Se
+isso de fato esgota sob tráfego real de resposta grande (em vez de só ser
+teoricamente possível) era uma pergunta em aberto, não um problema
+confirmado: subir `POOL_TIER2_MAX` ou adicionar um Tier 3 sem evidência
+seria um chute de ajuste não validado.
+
+`TBufferPool.Tier2ExhaustedCount` e `.OversizedCount` respondem isso
+diretamente — também expostos como contadores Prometheus
+(`poseidon_bufferpool_tier2_exhausted_total`,
+`poseidon_bufferpool_oversized_total` — veja [metrics.md](metrics.md)):
+
+- **`Tier2ExhaustedCount`** subindo sob carga significa que uma resposta que
+  *deveria* ter sido pooled não foi — tanto o cache local da thread quanto
+  a stack global do Tier 2 estavam vazios, caindo pra um `SetLength` de
+  heap. Esse é o sinal de verdade pra subir `POOL_TIER2_MAX` ou adicionar
+  um Tier 3.
+- **`OversizedCount`** é requisições acima de 512 KB, que bypassam o pool
+  *por design* (veja a tabela de tiers acima) — não é um problema de
+  dimensionamento por si só, mostrado junto do `Tier2ExhaustedCount` só
+  como contexto (um `OversizedCount` grande pode significar que o tamanho
+  das suas respostas pertence a um tier maior por completo, não que o
+  Tier 2 precisa de mais slots).
+
 Veja [Conceitos Core — Pool de buffers](../../02-conceitos-core/pool-de-buffers.md) para a visão conceitual.
