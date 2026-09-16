@@ -107,6 +107,24 @@ type
     // tighter number for "how much memory is this instance really pinning."
     // Linux only (kernel 4.14+); -1 on Windows or if unavailable.
     class function PrivateDirtyKB: Int64; static;
+    // Current process resident set size, in KB. -1 if it could not be read.
+    // Shared here (not private to the HTTP server) so any caller - the
+    // [health] heartbeat, a metrics exporter, a future admin endpoint - reads
+    // the exact same number the same way, once. Read fresh every call (no
+    // caching): cheap enough for a periodic heartbeat, not for a hot path.
+    class function RSSKB: Int64; static;
+    // Forces glibc to attempt returning freed-but-retained heap memory to the
+    // OS right now (libc malloc_trim(0)), instead of waiting for the trim
+    // threshold to be crossed on its own. Returns True if it actually
+    // released something, False if there was nothing to trim (or on
+    // Windows/FPC, where this is a no-op). This is a diagnostic/operational
+    // tool, not a fix: if MallocInfo's AArenaKB - AInUseKB keeps growing back
+    // right after a successful trim, that is retention/fragmentation
+    // recurring, not something to keep working around by calling this
+    // periodically - see MALLOC_TRIM_THRESHOLD_/MALLOC_MMAP_THRESHOLD_
+    // tuning instead. Safe to call from any thread; not free (walks glibc's
+    // internal heap structures under its own lock) - not a hot-path call.
+    class function TryMallocTrim: Boolean; static;
   end;
 
 implementation
@@ -169,6 +187,12 @@ type
 // Aggregates across every arena (just the one, with MALLOC_ARENA_MAX=1), not
 // per-thread - a single call already gives the process-wide picture.
 function mallinfo2: TMallinfo2; cdecl; external 'libc.so.6' name 'mallinfo2';
+
+// pad = bytes to leave free at the top of the heap after trimming (0 = trim
+// as much as possible). Returns 1 if memory was actually released to the OS,
+// 0 if there was nothing to trim.
+function malloc_trim(pad: NativeUInt): Integer; cdecl;
+  external 'libc.so.6' name 'malloc_trim';
 
 const
   CHandledSignals: array[0..4] of Integer =
@@ -647,6 +671,50 @@ begin
   end;
 end;
 
+class function TPoseidonDiagnostics.RSSKB: Int64;
+var
+  LFile: TextFile;
+  LLine: string;
+  LSpacePos: Integer;
+begin
+  Result := -1;
+  AssignFile(LFile, '/proc/self/status');
+  try
+    try
+      Reset(LFile);
+    except
+      Exit;
+    end;
+    try
+      while not Eof(LFile) do
+      begin
+        ReadLn(LFile, LLine);
+        if LLine.StartsWith('VmRSS:') then
+        begin
+          LLine := Trim(Copy(LLine, Length('VmRSS:') + 1, MaxInt));
+          LSpacePos := Pos(' ', LLine);
+          if LSpacePos > 0 then LLine := Copy(LLine, 1, LSpacePos - 1);
+          Result := StrToInt64Def(LLine, -1);
+          Break;
+        end;
+      end;
+    finally
+      CloseFile(LFile);
+    end;
+  except
+    Result := -1;
+  end;
+end;
+
+class function TPoseidonDiagnostics.TryMallocTrim: Boolean;
+begin
+  try
+    Result := malloc_trim(0) <> 0;
+  except
+    Result := False;
+  end;
+end;
+
 {$ELSE}
 
 uses
@@ -655,7 +723,9 @@ uses
   syncobjs;
   {$ELSE}
   System.SysUtils,
-  System.SyncObjs;
+  System.SyncObjs,
+  Winapi.Windows,
+  Winapi.PsAPI;
   {$ENDIF}
 
 const
@@ -754,6 +824,32 @@ begin
   Result := Int64(LTotalBytes div 1024);
 end;
 {$ENDIF}
+
+{$IFDEF FPC}
+class function TPoseidonDiagnostics.RSSKB: Int64;
+begin
+  // Winapi.PsAPI is not wired up for the FPC/Windows combination here.
+  Result := -1;
+end;
+{$ELSE}
+class function TPoseidonDiagnostics.RSSKB: Int64;
+var
+  LCounters: TProcessMemoryCounters;
+begin
+  FillChar(LCounters, SizeOf(LCounters), 0);
+  LCounters.cb := SizeOf(LCounters);
+  if GetProcessMemoryInfo(GetCurrentProcess, @LCounters, SizeOf(LCounters)) then
+    Result := LCounters.WorkingSetSize div 1024
+  else
+    Result := -1;
+end;
+{$ENDIF}
+
+class function TPoseidonDiagnostics.TryMallocTrim: Boolean;
+begin
+  // malloc_trim is glibc-only; nothing to do on Windows.
+  Result := False;
+end;
 
 {$ENDIF}
 

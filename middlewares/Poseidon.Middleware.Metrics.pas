@@ -21,7 +21,8 @@ uses
   System.Classes,
   System.SyncObjs,
   System.Generics.Collections,
-  System.Diagnostics;
+  System.Diagnostics,
+  Poseidon.Diagnostics;
 
 const
   CHistBounds: array[0..7] of Int64 = (5, 10, 25, 50, 100, 250, 500, 1000);
@@ -117,6 +118,46 @@ begin
   Result := StringReplace(Result, #10, '\n', [rfReplaceAll]);
 end;
 
+// Process-level gauges (memory/fd) - one value per process, no path label,
+// unlike everything else this middleware exposes. Sourced from
+// TPoseidonDiagnostics so this never re-implements /proc parsing or duplicates
+// a number the [health] log line already computes the same way. -1 (Windows,
+// or unavailable) is intentionally still emitted as a real gauge value rather
+// than omitted: a scraped "-1" is an unambiguous, queryable "not available on
+// this platform", where a missing metric silently looks like "still zero" to
+// anyone graphing it.
+procedure AppendProcessGauges(ALSB: TStringBuilder);
+var
+  LMallocInUseKB, LMallocArenaKB, LMallocMmapKB: Int64;
+begin
+  ALSB.AppendLine('# HELP poseidon_rss_kb Process resident set size (KB)');
+  ALSB.AppendLine('# TYPE poseidon_rss_kb gauge');
+  ALSB.AppendLine(Format('poseidon_rss_kb %d', [TPoseidonDiagnostics.RSSKB]));
+
+  TPoseidonDiagnostics.MallocInfo(LMallocInUseKB, LMallocArenaKB, LMallocMmapKB);
+  ALSB.AppendLine('# HELP poseidon_malloc_inuse_kb glibc mallinfo2 uordblks - bytes the app still holds live (Linux only, -1 on Windows)');
+  ALSB.AppendLine('# TYPE poseidon_malloc_inuse_kb gauge');
+  ALSB.AppendLine(Format('poseidon_malloc_inuse_kb %d', [LMallocInUseKB]));
+  ALSB.AppendLine('# HELP poseidon_malloc_arena_kb glibc mallinfo2 arena - non-mmap heap footprint sbrk''d from the OS (Linux only, -1 on Windows)');
+  ALSB.AppendLine('# TYPE poseidon_malloc_arena_kb gauge');
+  ALSB.AppendLine(Format('poseidon_malloc_arena_kb %d', [LMallocArenaKB]));
+  ALSB.AppendLine('# HELP poseidon_malloc_mmap_kb glibc mallinfo2 hblkhd - large allocations backed by mmap (Linux only, -1 on Windows)');
+  ALSB.AppendLine('# TYPE poseidon_malloc_mmap_kb gauge');
+  ALSB.AppendLine(Format('poseidon_malloc_mmap_kb %d', [LMallocMmapKB]));
+
+  ALSB.AppendLine('# HELP poseidon_delphi_heap_kb Delphi memory manager bytes in use (Windows/OSX only, -1 on Linux - see Poseidon.Diagnostics)');
+  ALSB.AppendLine('# TYPE poseidon_delphi_heap_kb gauge');
+  ALSB.AppendLine(Format('poseidon_delphi_heap_kb %d', [TPoseidonDiagnostics.DelphiHeapInUseKB]));
+
+  ALSB.AppendLine('# HELP poseidon_fd_count Open file descriptors (Linux only, -1 on Windows)');
+  ALSB.AppendLine('# TYPE poseidon_fd_count gauge');
+  ALSB.AppendLine(Format('poseidon_fd_count %d', [TPoseidonDiagnostics.OpenFDCount]));
+
+  ALSB.AppendLine('# HELP poseidon_private_dirty_kb /proc/self/smaps_rollup Private_Dirty - memory only this process holds, shared library pages excluded (Linux only, -1 on Windows)');
+  ALSB.AppendLine('# TYPE poseidon_private_dirty_kb gauge');
+  ALSB.AppendLine(Format('poseidon_private_dirty_kb %d', [TPoseidonDiagnostics.PrivateDirtyKB]));
+end;
+
 function BuildPrometheusText(const AStore: TMetricsStore): string;
 var
   LPairs: TArray<TPair<string, TMetricBucket>>;
@@ -127,6 +168,8 @@ begin
   LPairs := AStore.Snapshot;
   LSB := TStringBuilder.Create;
   try
+    AppendProcessGauges(LSB);
+
     LSB.AppendLine('# HELP poseidon_requests_total Total HTTP requests handled');
     LSB.AppendLine('# TYPE poseidon_requests_total counter');
     for LPair in LPairs do
