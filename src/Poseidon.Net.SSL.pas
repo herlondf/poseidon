@@ -88,6 +88,10 @@ type
   TFn_ssl_get0_alpn   = procedure(ssl: Pointer; dataptr: Pointer; lenptr: Pointer); cdecl;
   TFn_ctx_set_verify  = procedure(ctx: Pointer; mode: Integer; cb: Pointer); cdecl;
   TFn_ctx_load_verify = function(ctx: Pointer; cafile, capath: PAnsiChar): Integer; cdecl;
+  // int SSL_CTX_set_cipher_list(SSL_CTX*, const char*) and
+  // int SSL_CTX_set_ciphersuites(SSL_CTX*, const char*) - same signature,
+  // one alias covers both (#255).
+  TFn_ctx_set_str     = function(ctx: Pointer; const str: PAnsiChar): Integer; cdecl;
 
   TPoseidonLibHandle = NativeUInt;
 
@@ -131,6 +135,12 @@ type
     class var f_SSL_CTX_set_verify: TFn_ctx_set_verify;
     class var f_SSL_CTX_load_verify_locations: TFn_ctx_load_verify;
     class var f_SSL_CTX_set_options: TFn_ctx_setopt;
+    // #255: explicit cipher policy instead of "whatever the host's OpenSSL
+    // package defaults to today". set_cipher_list is TLS<=1.2 only (its
+    // OpenSSL "no-CBC/no-RC4" grammar rejects TLS 1.3 ciphersuite names);
+    // set_ciphersuites is TLS 1.3's own separate, OpenSSL 1.1.1+-only API.
+    class var f_SSL_CTX_set_cipher_list: TFn_ctx_set_str;
+    class var f_SSL_CTX_set_ciphersuites: TFn_ctx_set_str;
 
     class function  TryLoadLib(const AName: string): TPoseidonLibHandle;
     class function  RequireProc(ALib: TPoseidonLibHandle; const AName: string): Pointer;
@@ -341,6 +351,17 @@ begin
   @f_SSL_CTX_set_options := GetProcAddress(FLibSSL, 'SSL_CTX_set_options');
 {$ELSE}
   @f_SSL_CTX_set_options := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_set_options')));
+{$ENDIF}
+
+  // #255: set_cipher_list present since ~forever; set_ciphersuites only since
+  // OpenSSL 1.1.1 (TLS 1.3). Both loaded as optional - CTX_SetSecurityOptions
+  // guards each with Assigned() before calling.
+{$IFDEF MSWINDOWS}
+  @f_SSL_CTX_set_cipher_list  := GetProcAddress(FLibSSL, 'SSL_CTX_set_cipher_list');
+  @f_SSL_CTX_set_ciphersuites := GetProcAddress(FLibSSL, 'SSL_CTX_set_ciphersuites');
+{$ELSE}
+  @f_SSL_CTX_set_cipher_list  := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_set_cipher_list')));
+  @f_SSL_CTX_set_ciphersuites := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_set_ciphersuites')));
 {$ENDIF}
 
   FLoaded := True;
@@ -597,11 +618,35 @@ const
   SSL_OP_NO_COMPRESSION           = NativeUInt($00020000);  // CRIME
   SSL_OP_CIPHER_SERVER_PREFERENCE = NativeUInt($00400000);
   SSL_OP_NO_RENEGOTIATION         = NativeUInt($40000000);  // TLS 1.2 reneg DoS
+  // #255: explicit, curated, AEAD-only cipher policy - no CBC (Lucky13/
+  // padding-oracle history), no RC4/3DES, no static-RSA key exchange (no
+  // forward secrecy). Without this call the policy is silently whatever the
+  // host's installed OpenSSL package defaults to, which can change across an
+  // unrelated OS package update. TLS<=1.2 list is Mozilla's long-stable
+  // "intermediate" cipher set; TLS 1.3 only ever offers AEAD suites by
+  // protocol design (CBC/RC4 do not exist in TLS 1.3 at all), so this is
+  // about being explicit/deterministic rather than closing an actual gap
+  // there.
+  CTLS12CipherList =
+    'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:' +
+    'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:' +
+    'ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
+  CTLS13CipherSuites =
+    'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256';
 begin
-  if not Assigned(f_SSL_CTX_set_options) then Exit;
-  f_SSL_CTX_set_options(ACtx,
-    SSL_OP_NO_RENEGOTIATION or SSL_OP_NO_COMPRESSION or
-    SSL_OP_CIPHER_SERVER_PREFERENCE);
+  if Assigned(f_SSL_CTX_set_options) then
+    f_SSL_CTX_set_options(ACtx,
+      SSL_OP_NO_RENEGOTIATION or SSL_OP_NO_COMPRESSION or
+      SSL_OP_CIPHER_SERVER_PREFERENCE);
+
+  // Best-effort: an older OpenSSL missing set_ciphersuites (pre-1.1.1, no
+  // TLS 1.3 support anyway) or rejecting this exact list should not prevent
+  // the server from starting - it falls back to that OpenSSL's own default
+  // policy for whichever call did not take effect.
+  if Assigned(f_SSL_CTX_set_cipher_list) then
+    f_SSL_CTX_set_cipher_list(ACtx, PAnsiChar(AnsiString(CTLS12CipherList)));
+  if Assigned(f_SSL_CTX_set_ciphersuites) then
+    f_SSL_CTX_set_ciphersuites(ACtx, PAnsiChar(AnsiString(CTLS13CipherSuites)));
 end;
 
 // TLS session resumption - reduces handshake RTT on reconnections
