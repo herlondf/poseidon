@@ -121,8 +121,8 @@ App.Use(CompressionMiddleware(1024));
 
 ## 6. Timeout
 
-Aborts request processing and returns `503 Service Unavailable` if the handler
-does not complete within the configured duration.
+Replaces the response with `503 Service Unavailable` if the handler chain took
+longer than the configured duration to complete.
 
 ```pascal
 uses Poseidon.Middleware.Timeout;
@@ -132,6 +132,16 @@ App.Use(TimeoutMiddleware(5000));
 ```
 
 The timeout applies to the handler chain only, not to the network read phase.
+
+> **This is a post-execution check, not a preemptive abort.** `ANext()` still
+> blocks until the handler actually returns; the middleware only measures how
+> long that took and swaps the response afterward. **A handler that never
+> returns (a hung outbound call, an infinite loop) is not interrupted by this
+> middleware** — it keeps running, holding its worker, regardless of the
+> configured duration. For that case use the server-level
+> [`MaxHandlerRunMs` watchdog](../04-operations/limits-and-backpressure.md#stuck-handler-watchdog-233)
+> instead, which detects the stuck handler independently of any middleware and
+> closes the connection (see #233).
 
 ---
 
@@ -202,6 +212,13 @@ Metrics are labeled by `path` only (no `method`/`status` labels — errors are a
 separate `poseidon_errors_total` counter). Histogram bucket bounds (ms):
 5, 10, 25, 50, 100, 250, 500, 1000, +Inf. Path cardinality is capped
 (default 10000 unique paths) to bound memory under a hostile-path attack.
+
+The same response also carries process-level gauges with no `path` label —
+`poseidon_rss_kb`, `poseidon_malloc_inuse_kb`/`_arena_kb`/`_mmap_kb`,
+`poseidon_delphi_heap_kb`, `poseidon_fd_count`, `poseidon_private_dirty_kb` —
+sourced from `TPoseidonDiagnostics` (see
+[metrics.md](../04-operations/metrics.md#process-level-gauges) for what each
+means and how to read them together).
 
 ---
 

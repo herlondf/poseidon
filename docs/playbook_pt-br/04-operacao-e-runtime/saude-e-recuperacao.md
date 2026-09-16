@@ -70,3 +70,26 @@ Veja [#224](https://github.com/herlondf/poseidon/issues/224) pra
 investigação completa (reproduzido no WSL2 e numa VPS Linux real, nos dois
 backends de IO) e o status atual antes de assumir que isso já foi
 corrigido.
+
+## Log estruturado (JSON)
+
+Por padrão (`LogFormat := lfPlain`), o próprio sink de log do servidor — as
+linhas `[startup]`/`[health]` e qualquer outra coisa logada via `_Log` quando
+nenhum callback `OnLog` está definido — escreve texto puro:
+`[poseidon][INFO][iid=eda89e] [health] conns=13 ...`.
+
+```pascal
+LServer.LogFormat := lfJSON;
+```
+
+envolve cada uma dessas mesmas linhas como um objeto JSON:
+`{"level":"INFO","iid":"eda89e","msg":"[health] conns=13 ..."}`, que um
+agregador de log (CloudWatch Insights, Loki) consegue parsear sem regex de
+texto. Isso só envolve a mensagem *inteira* já formatada como um único campo
+JSON string — não quebra `conns=13 inflight=...` em campos JSON separados por
+métrica. Se precisar disso, parseie `msg` depois, ou use o endpoint Prometheus
+[`/metrics`](metrics.md), que já expõe esses valores individualmente como
+números consultáveis.
+
+`LogFormat` só afeta esse sink padrão. Uma vez que `OnLog` é definido, seu
+callback controla a formatação por completo e `LogFormat` não tem efeito.
