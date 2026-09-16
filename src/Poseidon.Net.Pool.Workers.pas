@@ -414,12 +414,18 @@ begin
 end;
 
 function TElasticWorkerPool.Shutdown(ATimeoutMs: Integer): Boolean;
+const
+  // Defensive cap on #258's drain-until-empty loop below - not expected to
+  // ever bind (see the comment at the loop itself).
+  CMaxDrainPasses = 1000;
 var
   LActive: Integer;
   LStart: Int64;
   LWrapper: TWorkWrapper;
   LWork: TElasticWorkItem;
   I: Integer;
+  LDrainedAny: Boolean;
+  LPassNum: Integer;
 begin
   if TInterlocked.Add(FShutdown, 0) <> 0 then
     Exit(TInterlocked.Add(FActiveWorkers, 0) = 0);
@@ -442,38 +448,60 @@ begin
   // paired with Post, so the closures run synchronously here on the shutdown
   // thread. Their bodies are short: dispatch already refuses new work once
   // FShutdown is set, and exceptions are swallowed as in the worker loop.
-  for I := 0 to FDequeCount - 1 do
-  begin
-    repeat
-      LWrapper := nil;
-      FDeques[I].Lock.Enter;
-      try
-        if FDeques[I].Queue.Count > 0 then
-        begin
-          LWrapper := FDeques[I].Queue.Dequeue;
-          TInterlocked.Decrement(FPendingItems);
-        end;
-      finally
-        FDeques[I].Lock.Leave;
-      end;
-      if not Assigned(LWrapper) then Break;
-
-      LWork := LWrapper.Work;
-      LWrapper.Work := nil;
-      LWrapper.Free;
-      if Assigned(LWork) then
-      begin
+  //
+  // #258: Post() reads FShutdown as an unlocked hint (see its own comment
+  // above) to avoid dirtying the cache line on every call. A caller that
+  // reads FShutdown=0 a moment before the Exchange below flips it still
+  // enqueues normally afterward - if that Enqueue lands on a deque index
+  // AFTER this drain has already finished with it, the single sequential
+  // pass below (I := 0 to FDequeCount-1, each visited exactly once) would
+  // never come back to collect it: the item, and the caller's paired
+  // AddRef/InFlightPool/FInFlightCount increment, would leak forever, since
+  // no worker exists anymore to dequeue it. LDrainedAny makes this drain
+  // itself the "N consecutive empty passes" loop: keep sweeping every deque
+  // until one full pass finds nothing left anywhere, which is guaranteed to
+  // happen quickly (the race window is one in-flight Enqueue per straggling
+  // caller at the instant of the flip, not a sustained producer - normal
+  // callers see FShutdown<>0 and never enqueue at all). CMaxDrainPasses is a
+  // defensive cap only, not expected to ever bind.
+  LPassNum := 0;
+  repeat
+    Inc(LPassNum);
+    LDrainedAny := False;
+    for I := 0 to FDequeCount - 1 do
+    begin
+      repeat
+        LWrapper := nil;
+        FDeques[I].Lock.Enter;
         try
-          LWork();
-        except
-          on E: Exception do
-            Writeln(ErrOutput, '[pool.workers] SHUTDOWN_DRAIN_EX [',
-              E.ClassName, ']: ', E.Message);
+          if FDeques[I].Queue.Count > 0 then
+          begin
+            LWrapper := FDeques[I].Queue.Dequeue;
+            TInterlocked.Decrement(FPendingItems);
+          end;
+        finally
+          FDeques[I].Lock.Leave;
         end;
-        LWork := nil;
-      end;
-    until False;
-  end;
+        if not Assigned(LWrapper) then Break;
+        LDrainedAny := True;
+
+        LWork := LWrapper.Work;
+        LWrapper.Work := nil;
+        LWrapper.Free;
+        if Assigned(LWork) then
+        begin
+          try
+            LWork();
+          except
+            on E: Exception do
+              Writeln(ErrOutput, '[pool.workers] SHUTDOWN_DRAIN_EX [',
+                E.ClassName, ']: ', E.Message);
+          end;
+          LWork := nil;
+        end;
+      until False;
+    end;
+  until (not LDrainedAny) or (LPassNum >= CMaxDrainPasses);
 
   // True only if no worker is still executing a (possibly stuck) handler.
   Result := TInterlocked.Add(FActiveWorkers, 0) = 0;
