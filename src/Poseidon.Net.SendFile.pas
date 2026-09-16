@@ -2,6 +2,45 @@ unit Poseidon.Net.SendFile;
 
 // Zero-copy file transfer via sendfile(2) on Linux.
 // Falls back to read+send on Windows.
+//
+// #251 (2026-09-16): attempted TransmitFile on Windows here and reverted -
+// see the "NOT DONE" note below before trying again.
+//
+// #251-adjacent finding, unrelated to the attempt below: as of 2026-09-16,
+// NOTHING in this repo actually calls PoseidonSendFile - grep the whole
+// tree. The Static middleware (Poseidon.Middleware.Static.pas) serves files
+// via TFile.ReadAllBytes into Ctx.Body, going through the normal buffered
+// response path on BOTH platforms, not this unit. So today the real
+// sendfile(2) path on Linux is equally unused - wiring this into Static (or
+// a future streaming-response feature) means bypassing the normal Ctx.Body
+// pipeline for large static files, which touches response-completion/
+// keep-alive bookkeeping and deserves its own scoped session.
+//
+// NOT DONE: TransmitFile was implemented (both as a raw mswsock.dll static
+// import, then again resolved properly via
+// WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER, WSAID_TRANSMITFILE) - the
+// same pattern Poseidon.Net.IO.IOCP._LoadExtensions uses for AcceptEx) and
+// validated with a live loopback smoke test (real listener + client socket,
+// real file, byte-for-byte comparison) before being considered for commit.
+// BOTH versions hung forever on the actual TransmitFile call itself on this
+// dev machine - reproduced repeatedly, resolution succeeded
+// (Assigned(LFunc) = True) but the call never returned, with a synchronous
+// (lpOverlapped = nil) invocation. This was caught specifically BECAUSE it
+// was tested live rather than just compiled - reverted rather than shipped,
+// since a synchronous hang on every static-file response would be a much
+// worse regression than the existing (correct, if not zero-copy) read+send
+// fallback. Root cause not confirmed - plausible suspects: a Layered
+// Service Provider in this machine's Winsock catalog (corporate VPN/
+// endpoint security software is common on a managed dev box) intercepting
+// TransmitFile with a broken/hanging implementation of its own, or some
+// other environment-specific Winsock quirk. Whoever picks this up next
+// should: (1) test on a clean Windows host with no corporate security
+// software first, to rule out environment-specific interference; (2) if it
+// still hangs, use the OVERLAPPED-with-a-real-event pattern (not
+// lpOverlapped = nil) with a bounded WaitForSingleObject timeout, so a
+// broken implementation degrades to the read+send fallback instead of
+// hanging the request forever, no matter the environment it eventually
+// deploys to.
 
 interface
 
