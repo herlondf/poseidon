@@ -1620,6 +1620,7 @@ procedure TPoseidonNativeServer._EmitHeartbeat;
 var
   LAlive: Integer;
   LIdle: Integer;
+  LMallocInUseKB, LMallocArenaKB, LMallocMmapKB: Int64;
 begin
   // ActiveWorkers counts every thread ALIVE, idle ones included - reporting it
   // as "active" reads as "busy" and would mislead exactly when it matters. The
@@ -1627,14 +1628,34 @@ begin
   // itself climbs toward its ceiling, is the saturation slide.
   LAlive := GetWorkerActiveCount;
   LIdle := GetWorkerIdleCount;
+  // malloc_* splits rss_kb into "the app's own live allocations" (inuse) vs.
+  // "heap space glibc is holding but not using" (arena - inuse) vs. "large
+  // allocations backed by mmap" (mmap) - see TPoseidonDiagnostics.MallocInfo.
+  // Linux only (-1 on Windows). delphi_heap_kb is the Windows-side mirror of
+  // that same split, one layer up in the Delphi memory manager itself - -1 on
+  // Linux, where SysGetMem already IS glibc malloc (see MallocInfo's header),
+  // so there is nothing separate left for it to report there. fd_count and
+  // private_dirty_kb round this out on Linux: an fd leak drags its own
+  // buffers along (see TPoseidonDiagnostics.OpenFDCount), and private_dirty
+  // is the tighter "memory this instance alone is really pinning" number
+  // next to rss_kb, which also counts shared library pages.
+  TPoseidonDiagnostics.MallocInfo(LMallocInUseKB, LMallocArenaKB, LMallocMmapKB);
   _Log(llInfo, Format(
-    '[health] conns=%d inflight=%d pool=%d busy=%d idle=%d rss_kb=%d backend=%s',
+    '[health] conns=%d inflight=%d pool=%d busy=%d idle=%d rss_kb=%d ' +
+    'malloc_inuse_kb=%d malloc_arena_kb=%d malloc_mmap_kb=%d delphi_heap_kb=%d ' +
+    'fd_count=%d private_dirty_kb=%d backend=%s',
     [FConnManager.Count,
      TInterlocked.Read(FInFlightCount),
      LAlive,
      LAlive - LIdle,
      LIdle,
      _GetProcessRSSKB,
+     LMallocInUseKB,
+     LMallocArenaKB,
+     LMallocMmapKB,
+     TPoseidonDiagnostics.DelphiHeapInUseKB,
+     TPoseidonDiagnostics.OpenFDCount,
+     TPoseidonDiagnostics.PrivateDirtyKB,
      FBackendName]));
 end;
 

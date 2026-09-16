@@ -73,6 +73,40 @@ type
     // request-handling code, not signal context) - never call it from inside
     // a signal handler.
     class procedure Breadcrumb(const ACategory, AMessage: string); static;
+    // glibc's own view of the heap (mallinfo2), in KB. AInUseKB is memory the
+    // application actually still holds live; AArenaKB is the non-mmap'd heap
+    // footprint sbrk'd from the OS (freed-but-retained space included);
+    // AMmapKB backs large allocations made via mmap, which the kernel takes
+    // back immediately on free, unlike arena space. The point of splitting
+    // these out from rss_kb: if AInUseKB stays flat while rss_kb keeps
+    // climbing, growth is retained/fragmented free space the allocator
+    // hasn't returned to the OS, not a leak - if AInUseKB climbs too, it is.
+    // Linux only; returns False (all fields -1) on Windows.
+    class function MallocInfo(out AInUseKB, AArenaKB, AMmapKB: Int64): Boolean; static;
+    // Bytes the Delphi memory manager itself has handed out and not yet freed
+    // (small + medium + large blocks), in KB, from System.GetMemoryManagerState.
+    // Windows/OSX only (getmem.inc's segmented allocator; declared under
+    // {$IFDEF MSWINDOWS} in System.pas). On Linux this returns -1 always:
+    // Delphi's memory manager there is a thin wrapper straight over glibc
+    // (SysGetMem calls __malloc), so there is no separate Delphi-level heap
+    // to report - MallocInfo's AInUseKB already covers 100% of it on that
+    // platform. Kept for local Windows debugging parity; not meaningful in
+    // the Linux production deployment this unit mainly targets.
+    class function DelphiHeapInUseKB: Int64; static;
+    // Count of open file descriptors (`/proc/self/fd` entries). A leaked
+    // socket or stream almost always drags its read/write buffers with it,
+    // so an fd count that climbs in lockstep with rss_kb points at "not
+    // closing something" (a connection, a stream, a handle) rather than a
+    // pure allocator question. Linux only; -1 on Windows.
+    class function OpenFDCount: Int64; static;
+    // `Private_Dirty` from `/proc/self/smaps_rollup`, in KB: memory this
+    // process alone has written to and holds, no shared library pages
+    // counted in. rss_kb includes those shared pages (counted again in
+    // every other process mapping the same .so), so it can read higher than
+    // what this process would actually free up if it exited - this is the
+    // tighter number for "how much memory is this instance really pinning."
+    // Linux only (kernel 4.14+); -1 on Windows or if unavailable.
+    class function PrivateDirtyKB: Int64; static;
   end;
 
 implementation
@@ -122,6 +156,19 @@ procedure backtrace_symbols_fd(ABuffer: PPointer; ASize: Integer;
   external 'libc.so.6' name 'backtrace_symbols_fd';
 function _syscall(ANum: NativeInt): NativeInt; cdecl varargs;
   external 'libc.so.6' name 'syscall';
+
+type
+  // Matches glibc's `struct mallinfo2` field-for-field (10x size_t, no
+  // padding since every field is the same width) - required for the x86-64
+  // SysV ABI's hidden-pointer return of structs over 16 bytes to line up.
+  TMallinfo2 = record
+    Arena, Ordblks, Smblks, Hblks, Hblkhd, Usmblks, Fsmblks, Uordblks,
+      Fordblks, Keepcost: NativeUInt;
+  end;
+
+// Aggregates across every arena (just the one, with MALLOC_ARENA_MAX=1), not
+// per-thread - a single call already gives the process-wide picture.
+function mallinfo2: TMallinfo2; cdecl; external 'libc.so.6' name 'mallinfo2';
 
 const
   CHandledSignals: array[0..4] of Integer =
@@ -517,6 +564,89 @@ begin
   GBreadcrumbs[LSlot].Seq := LSeq;
 end;
 
+class function TPoseidonDiagnostics.MallocInfo(out AInUseKB, AArenaKB,
+  AMmapKB: Int64): Boolean;
+var
+  LInfo: TMallinfo2;
+begin
+  try
+    LInfo := mallinfo2;
+    AInUseKB := Int64(LInfo.Uordblks) div 1024;
+    AArenaKB := Int64(LInfo.Arena) div 1024;
+    AMmapKB := Int64(LInfo.Hblkhd) div 1024;
+    Result := True;
+  except
+    AInUseKB := -1;
+    AArenaKB := -1;
+    AMmapKB := -1;
+    Result := False;
+  end;
+end;
+
+class function TPoseidonDiagnostics.OpenFDCount: Int64;
+var
+  LSR: TSearchRec;
+  LCount: Int64;
+begin
+  Result := -1;
+  if FindFirst('/proc/self/fd/*', faAnyFile, LSR) <> 0 then Exit;
+  LCount := 0;
+  try
+    repeat
+      if (LSR.Name <> '.') and (LSR.Name <> '..') then
+        Inc(LCount);
+    until FindNext(LSR) <> 0;
+  finally
+    FindClose(LSR);
+  end;
+  Result := LCount;
+end;
+
+// GetMemoryManagerState (Windows/OSX-only, getmem.inc's segmented allocator)
+// has no Linux equivalent: Delphi's own memory manager here is a thin wrapper
+// straight over glibc (SysGetMem calls __malloc, see System.pas's POSIX
+// branch), so MallocInfo's AInUseKB already covers 100% of what would go
+// here. Always -1 on this platform - see the interface comment.
+class function TPoseidonDiagnostics.DelphiHeapInUseKB: Int64;
+begin
+  Result := -1;
+end;
+
+class function TPoseidonDiagnostics.PrivateDirtyKB: Int64;
+var
+  LFile: TextFile;
+  LLine: string;
+  LSpacePos: Integer;
+begin
+  Result := -1;
+  AssignFile(LFile, '/proc/self/smaps_rollup');
+  try
+    try
+      Reset(LFile);
+    except
+      Exit;
+    end;
+    try
+      while not Eof(LFile) do
+      begin
+        ReadLn(LFile, LLine);
+        if LLine.StartsWith('Private_Dirty:') then
+        begin
+          LLine := Trim(Copy(LLine, Length('Private_Dirty:') + 1, MaxInt));
+          LSpacePos := Pos(' ', LLine);
+          if LSpacePos > 0 then LLine := Copy(LLine, 1, LSpacePos - 1);
+          Result := StrToInt64Def(LLine, -1);
+          Break;
+        end;
+      end;
+    finally
+      CloseFile(LFile);
+    end;
+  except
+    Result := -1;
+  end;
+end;
+
 {$ELSE}
 
 uses
@@ -579,6 +709,51 @@ begin
   // Nothing on Windows ever prints these back (see BuildId) - keeping this a
   // true no-op instead of maintaining a ring nobody reads.
 end;
+
+class function TPoseidonDiagnostics.MallocInfo(out AInUseKB, AArenaKB,
+  AMmapKB: Int64): Boolean;
+begin
+  // mallinfo2 is glibc-only; the [health] line just omits these on Windows.
+  AInUseKB := -1;
+  AArenaKB := -1;
+  AMmapKB := -1;
+  Result := False;
+end;
+
+class function TPoseidonDiagnostics.OpenFDCount: Int64;
+begin
+  // /proc is Linux-only; no Windows equivalent wired up here.
+  Result := -1;
+end;
+
+class function TPoseidonDiagnostics.PrivateDirtyKB: Int64;
+begin
+  // smaps_rollup is Linux-only.
+  Result := -1;
+end;
+
+{$IFDEF FPC}
+class function TPoseidonDiagnostics.DelphiHeapInUseKB: Int64;
+begin
+  // FPC has no GetMemoryManagerState equivalent wired up here.
+  Result := -1;
+end;
+{$ELSE}
+class function TPoseidonDiagnostics.DelphiHeapInUseKB: Int64;
+var
+  LState: TMemoryManagerState;
+  LSmall: TSmallBlockTypeState;
+  LTotalBytes: UInt64;
+begin
+  System.GetMemoryManagerState(LState);
+  LTotalBytes := UInt64(LState.TotalAllocatedMediumBlockSize) +
+    UInt64(LState.TotalAllocatedLargeBlockSize);
+  for LSmall in LState.SmallBlockTypeStates do
+    LTotalBytes := LTotalBytes +
+      UInt64(LSmall.UseableBlockSize) * UInt64(LSmall.AllocatedBlockCount);
+  Result := Int64(LTotalBytes div 1024);
+end;
+{$ENDIF}
 
 {$ENDIF}
 
