@@ -4,8 +4,20 @@
 //
 // WHY: FastMM uses global heap locks that create severe contention under high
 // concurrency on Linux. glibc malloc uses per-thread arenas (ptmalloc2) that
-// scale linearly with core count - the same approach FPC uses via its `cmem`
-// unit that achieves 8.6x more throughput than Delphi's FastMM.
+// scale linearly with core count - conceptually the same approach FPC's
+// `cmem` unit takes.
+//
+// #256 (2026-09-16): this unit existed but was not linked into any .dpr, and
+// the "8.6x more throughput than FastMM" figure that used to be claimed here
+// had NO benchmark or experiment backing it anywhere in this repo - treat it
+// as unverified, not as a measured result. Now linked into
+// `samples/memory-manager-bench` (see that sample's README for how to run
+// it), but the actual before/after measurement still has not been run: doing
+// so needs a host that can fully LINK a Linux64 binary (the Linux SDK/
+// PAServer sysroot - this repo's own bare Windows dev boxes cannot, see
+// `ci/build-both-faces.ps1`'s comment on link-skipped compile checks; the
+// CI runner can). Do not restate a throughput number here until that sample
+// has actually been run and the result recorded.
 //
 // USAGE: This unit MUST be the FIRST unit in the .dpr uses clause:
 //
