@@ -254,6 +254,26 @@ const
   // process grinds to a halt. SO_SNDTIMEO caps the blocking send at this
   // many seconds, so a stalled peer surfaces as a bounded error (existing
   // OnConnError path) instead of an unrecoverable leaked thread.
+  //
+  // #247 tried IORING_OP_ASYNC_CANCEL on ShutdownConn as a faster alternative
+  // to this timeout - implemented, compiled clean both platforms, then tested
+  // LIVE on debian-bench (32MB body, a client that reads once then stops
+  // draining, forcing a real ~2.5MB stuck kernel send buffer). The cancel SQE
+  // completed with res=0 (kernel reports success), but the connection stayed
+  // in FIN-WAIT-1 for the SAME ~75-80s either way (measured via `ss`, with vs
+  // without the change, same payload/timing). Root cause: by the time the
+  // send is stuck, those bytes are already sitting in the KERNEL's socket
+  // send buffer (visible as Send-Q in `ss`), not just referenced by our SQE -
+  // cancelling io_uring's own bookkeeping for the request doesn't discard
+  // already-buffered socket data, and a plain close() on a socket with
+  // unsent buffered data does a graceful FIN-WAIT teardown, not an instant
+  // drop. Reverted (no code change here) - see the issue for the full
+  // write-up. A real fix would need SO_LINGER (l_onoff=1, l_linger=0) to
+  // force an immediate RST instead of a graceful close when there's a stuck
+  // send at teardown time - a different, larger change (discards in-flight
+  // response bytes unconditionally, including for a merely-slow-but-honest
+  // client, not just an adversarial one) that deserves its own design pass,
+  // not a bolt-on.
   CSendTimeoutSec = 20;
 
   // #229: caps consecutive EAGAIN->io-wq-async resubmits for one send before
