@@ -1287,9 +1287,19 @@ begin
   begin
     TNativeConn(AConn).LastActivityTick := TThread.GetTickCount64;
     TInterlocked.Increment(TNativeConn(AConn).InFlightPool);
+    // #248-investigation follow-up (found live on debian-bench, 2026-09-16):
+    // FInFlightCount - the server-WIDE counter MaxQueueDepth and
+    // MaxInFlightGrowthPerWindow (#237) both read - was never touched here,
+    // only InFlightPool (per-connection, fixed for #257). Confirmed live: a
+    // real open connection under SyncDispatch=True showed inflight=0 in the
+    // [health] line the whole time. Without this, both backpressure
+    // mechanisms are silently inert under SyncDispatch=True (the FPC
+    // default, and this bench sample's own explicit choice).
+    TInterlocked.Increment(FInFlightCount);
     try
       FDispatcher.Dispatch(AConn, LCfg);
     finally
+      TInterlocked.Decrement(FInFlightCount);
       TInterlocked.Decrement(TNativeConn(AConn).InFlightPool);
     end;
     Exit;
