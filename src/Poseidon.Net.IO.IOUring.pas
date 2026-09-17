@@ -77,14 +77,6 @@ type
     FBackend: TIOUringBackend;
     FIdx: Integer;
     FRingFd: Integer;
-    // #248: set by SetupRing if IORING_REGISTER_RING_FDS succeeds. When True,
-    // _RingEnter passes FRegRingIdx (not FRingFd) plus
-    // IORING_ENTER_REGISTERED_RING_FD to every io_uring_enter call, letting
-    // the kernel skip fdget/fdput on the ring's own fd. Purely an enter-time
-    // optimization - every other syscall on this ring (mmap, register,
-    // eventual close) still uses FRingFd, which stays valid regardless.
-    FUseRegRingFd: Boolean;
-    FRegRingIdx: Integer;
     FSQRing: Pointer;
     FCQRing: Pointer;
     FSQEs: Pointer;
@@ -121,12 +113,6 @@ type
     constructor Create(ABackend: TIOUringBackend; AIdx: Integer);
     destructor Destroy; override;
     procedure SetupRing;       // io_uring_setup + mmap + reg-files init
-    // #248: every io_uring_enter call in this ring's lifecycle goes through
-    // here instead of calling _io_uring_enter directly, so the registered-fd
-    // fast path (see FUseRegRingFd) is applied consistently everywhere - a
-    // raw call site accidentally left using FRingFd/no flag would still work
-    // correctly, just without the optimization, never incorrectly.
-    function  _RingEnter(AToSubmit, AMinComplete, AFlags: UInt32): Integer;
     procedure StartThreads;    // completion thread, then accept thread
     procedure TeardownMaps;    // munmap rings + close ring fd (idempotent)
     procedure SignalShutdown;  // post one NOP to wake the completion thread
@@ -201,10 +187,6 @@ const
 
   // io_uring_enter flags
   IORING_ENTER_GETEVENTS = UInt32(1);
-  // #248: tell the kernel the fd argument below is a registered-ring index
-  // (from IORING_REGISTER_RING_FDS), not a real fd - skips fdget/fdput on
-  // the ring's own fd for every io_uring_enter call. 1<<4 (kernel 5.18+).
-  IORING_ENTER_REGISTERED_RING_FD = UInt32(1 shl 4);
 
   // io_uring_setup flags
   IORING_SETUP_CQSIZE = UInt32($200);
@@ -249,7 +231,6 @@ const
   IORING_REGISTER_FILES = UInt32(2);
   IORING_REGISTER_FILES_UPDATE = UInt32(6);
   IORING_REGISTER_PROBE = UInt32(8);
-  IORING_REGISTER_RING_FDS = UInt32(20);  // #248, kernel 5.18+
 
   CRegFilesMax = 4096;  // max registered fd slots per ring
 
@@ -305,16 +286,6 @@ type
     offset: UInt32;
     resv: UInt32;
     fds: UInt64; // pointer to fd array
-  end;
-
-  // #248: io_uring_rsrc_update struct for IORING_REGISTER_RING_FDS. offset =
-  // UInt32(-1) on input asks the kernel to auto-pick a slot; on success the
-  // kernel writes the chosen registered index back into offset. data = the
-  // real ring fd being registered.
-  TIOUringRsrcUpdate = packed record
-    offset: UInt32;
-    resv: UInt32;
-    data: UInt64;
   end;
 
   // io_uring_setup params: offsets within the SQ ring mmap
@@ -569,18 +540,6 @@ begin
   inherited Destroy;
 end;
 
-// #248: routes every io_uring_enter through the registered-ring-fd fast path
-// once SetupRing has established one; falls back to the plain fd otherwise
-// (older kernel, or the register call failed for any reason).
-function TUringRing._RingEnter(AToSubmit, AMinComplete, AFlags: UInt32): Integer;
-begin
-  if FUseRegRingFd then
-    Result := _io_uring_enter(FRegRingIdx, AToSubmit, AMinComplete,
-      AFlags or IORING_ENTER_REGISTERED_RING_FD)
-  else
-    Result := _io_uring_enter(FRingFd, AToSubmit, AMinComplete, AFlags);
-end;
-
 procedure TUringRing.SetupRing;
 var
   LParams: TIOUringParams;
@@ -588,7 +547,6 @@ var
   LCQSize: NativeUInt;
   I: Integer;
   LInitFds: array of Int32;
-  LRsrcUpdate: TIOUringRsrcUpdate;
 begin
   // Normal mode (no SQPOLL - see unit header). COOP_TASKRUN (kernel 5.19+) tells
   // the kernel it needs no inter-processor interrupt to notify completions - the
@@ -682,20 +640,6 @@ begin
     for I := 0 to High(FRegFds) do
       FRegFds[I] := -1;
     FRegCount := 0;
-  end;
-
-  // #248: register this ring's own fd so every io_uring_enter call (see
-  // _RingEnter) can skip the kernel's fdget/fdput on it. Best-effort: kernel
-  // < 5.18 fails the register call, FUseRegRingFd stays False, _RingEnter
-  // keeps using the plain fd - functionally identical, just without this
-  // micro-optimization.
-  LRsrcUpdate.offset := UInt32(-1);  // ask the kernel to auto-pick a slot
-  LRsrcUpdate.resv := 0;
-  LRsrcUpdate.data := UInt64(FRingFd);
-  if _io_uring_register(FRingFd, IORING_REGISTER_RING_FDS, @LRsrcUpdate, 1) = 1 then
-  begin
-    FRegRingIdx := Integer(LRsrcUpdate.offset);
-    FUseRegRingFd := True;
   end;
 end;
 
@@ -815,7 +759,7 @@ begin
     _SubmitSQE(IORING_OP_NOP, -1, nil, 0, CUdShutdown);
     // Submit ALL queued SQEs (the batched completion loop may have deferred some)
     // so the shutdown NOP is guaranteed to reach the kernel and wake the thread.
-    _RingEnter(UInt32(FPendingSQEs), 0, 0);
+    _io_uring_enter(FRingFd, UInt32(FPendingSQEs), 0, 0);
     FPendingSQEs := 0;
   finally
     FSQLock.Release;
@@ -978,7 +922,7 @@ begin
   if LPending <= 0 then
     LPending := 1;
   FPendingSQEs := 0;
-  _RingEnter(LPending, 0, 0);
+  _io_uring_enter(FRingFd, LPending, 0, 0);
 end;
 
 // SQE submission - MUST be called under FSQLock
@@ -1050,7 +994,7 @@ begin
       LToSubmit := FPendingSQEs;
       FPendingSQEs := 0;
       FSQLock.Release;
-      _RingEnter(UInt32(LToSubmit), 1, IORING_ENTER_GETEVENTS);
+      _io_uring_enter(FRingFd, UInt32(LToSubmit), 1, IORING_ENTER_GETEVENTS);
 
       // Re-arm multishot accept if a previous drain's re-arm (in _ProcessCQE)
       // found the SQ full and gave up (#224 - silent, permanent loss of
@@ -1571,7 +1515,7 @@ begin
     try
       if LRing.FPendingSQEs > 0 then
       begin
-        LRing._RingEnter(UInt32(LRing.FPendingSQEs), 0, 0);
+        _io_uring_enter(LRing.FRingFd, UInt32(LRing.FPendingSQEs), 0, 0);
         LRing.FPendingSQEs := 0;
       end;
     finally
