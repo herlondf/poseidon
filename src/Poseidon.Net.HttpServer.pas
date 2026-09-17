@@ -86,6 +86,13 @@ type
     FDrainEvent: TEvent;
     FDrainTimeoutMs: Integer;
     FMaxQueueDepth: Integer;
+    // #237: all four accessed via TInterlocked from multiple IO threads
+    // concurrently in _DispatchAccumBuf - see the comment there.
+    FMaxInFlightGrowthPerWindow: Integer;
+    FLoadSheddingWindowMs: Integer;
+    FRetryAfterSeconds: Integer;
+    FGrowthWindowStartTick: Int64;
+    FGrowthWindowStartCount: Integer;
     FSecureHeadersEnabled: Boolean;
     FServerBanner: string;
     FTCPFastOpen: Boolean;
@@ -264,6 +271,27 @@ type
     // R-5: Maximum concurrent in-flight requests. 0 = unlimited (default).
     // When the limit is reached, new requests receive 503.
     property MaxQueueDepth:  Integer read FMaxQueueDepth  write FMaxQueueDepth;
+    // #237: load shedding on in-flight GROWTH, not just the hard MaxQueueDepth
+    // ceiling. If FInFlightCount grows by more than this many requests within
+    // LoadSheddingWindowMs, new requests are shed with 503 - catching a sharp
+    // overload spike EARLY (while it is still ramping up), rather than only
+    // once the queue has already filled all the way to MaxQueueDepth. 0 =
+    // disabled (default - opt-in, like MaxHandlerRunMs/HeaderTimeoutMs).
+    // Complements, does not replace, MaxQueueDepth: both checks run, either
+    // one can trigger shedding on its own.
+    property MaxInFlightGrowthPerWindow: Integer
+      read FMaxInFlightGrowthPerWindow write FMaxInFlightGrowthPerWindow;
+    // #237: size of the sliding window MaxInFlightGrowthPerWindow measures
+    // growth over. Default 1000 (1s). Deliberately its own timer, not tied to
+    // HeartbeatMs - an operator disabling the [health] log line (HeartbeatMs
+    // := 0) must not silently also disable load shedding.
+    property LoadSheddingWindowMs: Integer
+      read FLoadSheddingWindowMs write FLoadSheddingWindowMs;
+    // #237: Retry-After value (seconds) sent with every load-shedding 503 -
+    // MaxQueueDepth's pre-existing 503 included, which had no Retry-After at
+    // all before this. Default 1.
+    property RetryAfterSeconds: Integer
+      read FRetryAfterSeconds write FRetryAfterSeconds;
     // R-3: Maximum WebSocket frame payload size in bytes. 0 = unlimited (default).
     // Frames exceeding this limit close the connection with code 1009.
     property MaxWSFrameSize: Int64   read GetMaxWSFrameSize  write SetMaxWSFrameSize;
@@ -1174,6 +1202,10 @@ procedure TPoseidonNativeServer._DispatchAccumBuf(AConn: Pointer);
 var
   LCfg:  TDispatchConfig;
   LResp: TBytes;
+  LInFlightNow: Integer;
+  LShedReason: string;
+  LNowTick, LWindowStart: Int64;
+  LGrowth: Integer;
 {$IFDEF FPC}
   LJob:  TFPCDispatchJob;
 {$ENDIF}
@@ -1182,15 +1214,51 @@ begin
   // number of in-flight (queued + executing) tasks reaches MaxQueueDepth.
   // Force-close the connection (KeepAlive := False) so the client does not
   // immediately retry on the same socket and worsen the overload.
-  if (FMaxQueueDepth > 0) and
-     (TInterlocked.Read(FInFlightCount) >= Int64(FMaxQueueDepth)) then
+  //
+  // #237: load shedding on GROWTH, checked alongside the hard ceiling above -
+  // either one can trigger shedding. FGrowthWindowStartTick/-Count track a
+  // sliding window (LoadSheddingWindowMs, default 1s): once expired, whichever
+  // thread's CompareExchange wins resets the window; every thread then reads
+  // the (possibly just-reset) baseline and compares current FInFlightCount
+  // against it. This is a best-effort/racy sample by design, not a precise
+  // counter - a load-shedding heuristic gains nothing from perfect precision
+  // (see the same reasoning already applied to TElasticWorkerPool.Post's own
+  // unlocked FShutdown hint read), and paying for a lock on this hot path to
+  // get it would be the wrong trade.
+  if (FMaxQueueDepth > 0) or (FMaxInFlightGrowthPerWindow > 0) then
   begin
-    TNativeConn(AConn).KeepAlive := False;
-    LResp := BuildHTTPResponse(503, 'text/plain',
-      TEncoding.ASCII.GetBytes('Service Unavailable'),
-      False, [], FSecureHeadersEnabled, FServerBanner);
-    _EncryptAndSend(AConn, LResp);
-    Exit;
+    LInFlightNow := Integer(TInterlocked.Read(FInFlightCount));
+    LShedReason := '';
+    LGrowth := 0;
+
+    if (FMaxQueueDepth > 0) and (LInFlightNow >= FMaxQueueDepth) then
+      LShedReason := 'queue depth'
+    else if FMaxInFlightGrowthPerWindow > 0 then
+    begin
+      LNowTick := Int64(TThread.GetTickCount64);
+      LWindowStart := TInterlocked.Read(FGrowthWindowStartTick);
+      if LNowTick - LWindowStart >= Int64(FLoadSheddingWindowMs) then
+        if TInterlocked.CompareExchange(FGrowthWindowStartTick, LNowTick, LWindowStart) = LWindowStart then
+          TInterlocked.Exchange(FGrowthWindowStartCount, LInFlightNow);
+      LGrowth := LInFlightNow - TInterlocked.Add(FGrowthWindowStartCount, 0);
+      if LGrowth >= FMaxInFlightGrowthPerWindow then
+        LShedReason := 'growth rate';
+    end;
+
+    if LShedReason <> '' then
+    begin
+      TNativeConn(AConn).KeepAlive := False;
+      _Log(llWarning, Format(
+        '[loadshed] 503 (%s): in_flight=%d max_queue_depth=%d growth=%d max_growth=%d/%dms',
+        [LShedReason, LInFlightNow, FMaxQueueDepth, LGrowth,
+         FMaxInFlightGrowthPerWindow, FLoadSheddingWindowMs]));
+      LResp := BuildHTTPResponse(503, 'text/plain',
+        TEncoding.ASCII.GetBytes('Service Unavailable'),
+        False, [TPair<string,string>.Create('Retry-After', IntToStr(FRetryAfterSeconds))],
+        FSecureHeadersEnabled, FServerBanner);
+      _EncryptAndSend(AConn, LResp);
+      Exit;
+    end;
   end;
 
   LCfg.ProxyProtocol        := FProxyProtocol;
@@ -1446,6 +1514,11 @@ begin
   FDrainTimeoutMs := CDefaultDrainTimeoutMs;
   FDrainEvent := TEvent.Create(nil, True, False, '');
   FMaxQueueDepth := 0;
+  FMaxInFlightGrowthPerWindow := 0;
+  FLoadSheddingWindowMs := 1000;
+  FRetryAfterSeconds := 1;
+  FGrowthWindowStartTick := Int64(TThread.GetTickCount64);
+  FGrowthWindowStartCount := 0;
   FShrinkAccumBufEnabled := True;
   FSecureHeadersEnabled := False;
   FServerBanner := 'Poseidon/1.0';

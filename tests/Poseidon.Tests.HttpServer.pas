@@ -71,6 +71,12 @@ type
     [Test]
     procedure MaxQueueDepth_QueueFull_Returns503;
 
+    // Load shedding on in-flight growth (#237)
+    [Test]
+    procedure MaxInFlightGrowth_HighGrowth_Returns503WithRetryAfter;
+    [Test]
+    procedure MaxInFlightGrowth_BelowThreshold_Returns200;
+
     // Secure response headers (A-1)
     [Test]
     procedure SecureHeaders_Enabled_ResponseContainsXContentTypeOptions;
@@ -572,6 +578,94 @@ begin
   finally
     GAdvServer.MaxQueueDepth := 0;
     FreeAndNil(GAdvSlowGate);
+  end;
+end;
+
+// ── Load shedding on in-flight growth (#237) ──────────────────────────────────
+
+procedure TPoseidonHttpServerAdvTests.MaxInFlightGrowth_HighGrowth_Returns503WithRetryAfter;
+// Same shape as the MaxQueueDepth test above (gate holds requests in-flight,
+// flood concurrently), but exercising the growth-window mechanism instead:
+// MaxQueueDepth stays 0 (disabled) here, only MaxInFlightGrowthPerWindow is
+// set, so ANY 503 in this test can only have come from the growth check.
+var
+  LTasks:  TArray<ITask>;
+  LWork:   TProc;
+  I:       Integer;
+  LGot503: Integer;
+  LRetryAfterSeen: Integer;
+const
+  GROWTH_LIMIT = 3;
+  FLOOD_COUNT = 20;
+begin
+  GAdvSlowGate := TEvent.Create(nil, True, False, '');
+  GAdvServer.MaxInFlightGrowthPerWindow := GROWTH_LIMIT;
+  GAdvServer.LoadSheddingWindowMs := 2000;  // wide enough that the whole flood lands in one window
+  GAdvServer.RetryAfterSeconds := 5;
+  LGot503 := 0;
+  LRetryAfterSeen := 0;
+  SetLength(LTasks, FLOOD_COUNT);
+  LWork := procedure
+    var
+      LC: THTTPClient;
+      LR: IHTTPResponse;
+    begin
+      LC := THTTPClient.Create;
+      try
+        LC.HandleRedirects := False;
+        try
+          LR := LC.Get(ADV_BASE + '/');
+          if LR.StatusCode = 503 then
+          begin
+            TInterlocked.Exchange(LGot503, 1);
+            if LR.HeaderValue['Retry-After'] = '5' then
+              TInterlocked.Exchange(LRetryAfterSeen, 1);
+          end;
+        except
+        end;
+      finally
+        LC.Free;
+      end;
+    end;
+  try
+    for I := 0 to FLOOD_COUNT - 1 do
+      LTasks[I] := TTask.Run(LWork);
+    Sleep(400);
+    GAdvSlowGate.SetEvent;
+    TTask.WaitForAll(LTasks, 8000);
+    Assert.IsTrue(LGot503 = 1,
+      'At least one request should receive 503 when in-flight growth exceeds the window threshold');
+    Assert.IsTrue(LRetryAfterSeen = 1,
+      'The 503 response must carry the configured Retry-After value');
+  finally
+    GAdvServer.MaxInFlightGrowthPerWindow := 0;
+    GAdvServer.LoadSheddingWindowMs := 1000;
+    GAdvServer.RetryAfterSeconds := 1;
+    FreeAndNil(GAdvSlowGate);
+  end;
+end;
+
+procedure TPoseidonHttpServerAdvTests.MaxInFlightGrowth_BelowThreshold_Returns200;
+// A single, unhurried request must never be shed - the mechanism is opt-in
+// (0 = disabled by default, confirmed implicitly by every OTHER test in this
+// fixture never setting it) and, even enabled, must not fire below its own
+// threshold.
+var
+  LClient: THTTPClient;
+  LResponse: IHTTPResponse;
+begin
+  GAdvServer.MaxInFlightGrowthPerWindow := 3;
+  try
+    LClient := THTTPClient.Create;
+    try
+      LResponse := LClient.Get(ADV_BASE + '/');
+      Assert.AreEqual(200, LResponse.StatusCode,
+        'A lone request must not be shed when in-flight growth is far below the threshold');
+    finally
+      LClient.Free;
+    end;
+  finally
+    GAdvServer.MaxInFlightGrowthPerWindow := 0;
   end;
 end;
 

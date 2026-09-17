@@ -35,6 +35,46 @@ LServer.MaxQueueDepth := 500;  // 0 = unlimited (default)
 Pair with `WorkerCount` to size the system: `MaxQueueDepth` is the acceptance gate
 (fast path), `WorkerCount` is the processing capacity (slow path).
 
+## Load shedding on in-flight growth (#237)
+
+`MaxQueueDepth` only reacts once the queue is already completely full - a
+hard ceiling. For a sharp overload spike, that ceiling can be reached and
+crossed within a single request's own processing time, well after the
+overload was already underway. `MaxInFlightGrowthPerWindow` reacts earlier,
+to how FAST in-flight requests are piling up, not just to how many there are
+right now:
+
+```pascal
+LServer.MaxInFlightGrowthPerWindow := 50;  // 0 = disabled (default)
+LServer.LoadSheddingWindowMs       := 1000; // 1 s window (default)
+LServer.RetryAfterSeconds          := 1;    // sent on every load-shedding 503 (default)
+```
+
+If in-flight requests grow by more than `MaxInFlightGrowthPerWindow` within
+`LoadSheddingWindowMs`, new requests are shed with `503` +
+`Retry-After: <RetryAfterSeconds>` - the same response `MaxQueueDepth`'s own
+hard ceiling produces (which also gained a `Retry-After` header alongside
+this feature; it had none before). Both checks run on every request; either
+one can trigger shedding independently - they complement, not replace, each
+other.
+
+`LoadSheddingWindowMs` is its own timer, deliberately not tied to
+`HeartbeatMs`/the `[health]` log line: disabling heartbeat logging must not
+silently also disable load shedding.
+
+This is a best-effort, racy sample by design (the sliding window is read/
+reset via `TInterlocked`, not a lock) - the right trade for a load-shedding
+heuristic on the request hot path, where perfect precision buys nothing a
+lock wouldn't cost you back in latency. Pick `MaxInFlightGrowthPerWindow`
+above your normal traffic's natural burstiness (watch `poseidon_requests_total`
+or your own metrics for a baseline first) - too low, and legitimate traffic
+spikes get shed; too high, and it never fires before `MaxQueueDepth`'s own
+ceiling would have anyway.
+
+This is opt-in (default `0`, disabled), same reasoning as `MaxHandlerRunMs`
+and `HeaderTimeoutMs` elsewhere on this page: existing deployments keep
+today's behavior unless set explicitly.
+
 ## Rate limiting
 
 Fixed-window counters reset every second.
@@ -126,7 +166,8 @@ an explicit timeout on the outbound client for that).
 | `MaxHeaderSize` | 64 KB | `400` |
 | `MaxConnections` | 0 (∞) | socket dropped |
 | `MaxConnectionsPerIP` | 0 (∞) | socket dropped |
-| `MaxQueueDepth` | 0 (∞) | `503` |
+| `MaxQueueDepth` | 0 (∞) | `503` + `Retry-After` |
+| `MaxInFlightGrowthPerWindow` | 0 (disabled) | `503` + `Retry-After` |
 | `RateLimitPerIP` | 0 (∞) | `429` (or `RateLimitResponse`) |
 | `RateLimitGlobal` | 0 (∞) | `429` (or `RateLimitResponse`) |
 | `MaxWSFrameSize` | 0 (∞) | WS close `1009` |

@@ -35,6 +35,48 @@ LServer.MaxQueueDepth := 500;  // 0 = ilimitado (padrão)
 Use em conjunto com `WorkerCount`: `MaxQueueDepth` é o portão de aceitação
 (caminho rápido), `WorkerCount` é a capacidade de processamento (caminho lento).
 
+## Load shedding por crescimento de in-flight (#237)
+
+`MaxQueueDepth` só reage quando a fila já está completamente cheia — um
+teto rígido. Num pico de sobrecarga agudo, esse teto pode ser atingido e
+ultrapassado dentro do próprio tempo de processamento de uma requisição,
+bem depois da sobrecarga já estar em andamento. `MaxInFlightGrowthPerWindow`
+reage mais cedo, ao quão RÁPIDO as requisições em andamento estão se
+acumulando, não só a quantas existem agora:
+
+```pascal
+LServer.MaxInFlightGrowthPerWindow := 50;  // 0 = desabilitado (padrão)
+LServer.LoadSheddingWindowMs       := 1000; // janela de 1s (padrão)
+LServer.RetryAfterSeconds          := 1;    // enviado em todo 503 de load shedding (padrão)
+```
+
+Se as requisições em andamento crescem mais que `MaxInFlightGrowthPerWindow`
+dentro de `LoadSheddingWindowMs`, novas requisições são descartadas com
+`503` + `Retry-After: <RetryAfterSeconds>` — a mesma resposta que o teto
+rígido do `MaxQueueDepth` já produz (que também ganhou um header
+`Retry-After` junto com esta feature; não tinha nenhum antes). As duas
+checagens rodam em toda requisição; qualquer uma pode disparar o descarte
+sozinha — elas se complementam, não se substituem.
+
+`LoadSheddingWindowMs` é seu próprio timer, deliberadamente não atrelado ao
+`HeartbeatMs`/linha de log `[health]`: desabilitar o log de heartbeat não
+pode silenciosamente desabilitar o load shedding também.
+
+Isso é uma amostragem best-effort, com corrida por design (a janela
+deslizante é lida/resetada via `TInterlocked`, não um lock) — a troca certa
+pra uma heurística de load shedding no caminho quente da requisição, onde
+precisão perfeita não compra nada que um lock não custasse de volta em
+latência. Escolha `MaxInFlightGrowthPerWindow` acima da rajada natural do
+seu tráfego normal (observe `poseidon_requests_total` ou suas próprias
+métricas pra ter uma base primeiro) — baixo demais, e picos de tráfego
+legítimo são descartados; alto demais, e nunca dispara antes do próprio
+teto do `MaxQueueDepth` já ter disparado de qualquer jeito.
+
+Isso é opt-in (padrão `0`, desabilitado), mesmo raciocínio do
+`MaxHandlerRunMs` e `HeaderTimeoutMs` no resto desta página: deploys
+existentes mantêm o comportamento de hoje a menos que seja configurado
+explicitamente.
+
 ## Rate limiting
 
 Contadores de janela fixa que reiniciam a cada segundo.
@@ -129,7 +171,8 @@ ou um timeout explícito no client de saída para isso).
 | `MaxHeaderSize` | 64 KB | `400` |
 | `MaxConnections` | 0 (∞) | socket descartado |
 | `MaxConnectionsPerIP` | 0 (∞) | socket descartado |
-| `MaxQueueDepth` | 0 (∞) | `503` |
+| `MaxQueueDepth` | 0 (∞) | `503` + `Retry-After` |
+| `MaxInFlightGrowthPerWindow` | 0 (desabilitado) | `503` + `Retry-After` |
 | `RateLimitPerIP` | 0 (∞) | `429` (ou `RateLimitResponse`) |
 | `RateLimitGlobal` | 0 (∞) | `429` (ou `RateLimitResponse`) |
 | `MaxWSFrameSize` | 0 (∞) | WS close `1009` |
