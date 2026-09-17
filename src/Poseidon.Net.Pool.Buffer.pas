@@ -5,7 +5,7 @@
 // Three tiers by buffer size:
 //   Tier 0 -   8 KB (256 slots) - initial connection buffer, ping/small requests
 //   Tier 1 -  64 KB ( 64 slots) - medium requests / uploads
-//   Tier 2 - 512 KB ( 16 slots) - large responses / streaming
+//   Tier 2 - 512 KB (128 slots) - large responses / streaming
 //
 // v2: Thread-local fast path per tier.  Each worker thread keeps a small cache
 //     (TL_TIER*_MAX) per tier - Acquire/Release hit this cache first with ZERO
@@ -15,6 +15,16 @@
 // Acquire(ASize) returns the smallest tier whose slot size >= ASize.
 // Buffers larger than 512 KB bypass the pool (heap alloc/free).
 // Release detects the tier by buffer length and returns it to the correct stack.
+//
+// #245: POOL_TIER2_MAX was 16, confirmed exhausting under concurrent
+// large-response load (measured live on debian-bench, wrk -c200 against a
+// ~100KB JSON response: 35410/130703 requests, 27.1%, fell through to a
+// fresh heap alloc/free instead of the pool). Bumped to 128 and re-measured
+// on the same hardware/load: exhaustion dropped to 658/173447 (0.38%),
+// throughput up 33% (8656 -> 11539 req/s), average latency down 32%
+// (22.09ms -> 15.11ms). Worst-case resident cost is lazy (only reached if
+// that many Tier 2 buffers are genuinely concurrently in flight): 128 *
+// 512KB = 64MB, versus 16 * 512KB = 8MB before.
 
 interface
 
@@ -32,7 +42,7 @@ const
 
   POOL_TIER0_MAX   = 256;
   POOL_TIER1_MAX   =  64;
-  POOL_TIER2_MAX   =  16;
+  POOL_TIER2_MAX   =  128;  // #245: was 16, see header comment for measurement
 
   // Thread-local cache sizes per tier (small - avoids hoarding buffers)
   TL_TIER0_MAX     =   8;
