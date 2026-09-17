@@ -50,9 +50,25 @@ from the plaintext hot path).
 
 ## Recorded results
 
-_(none yet — fill in after running on a host that can link, per above)_
+Run on debian-bench (Debian 13, kernel 6.12, 4 vCPU), 3 runs each, binaries
+built with the exact commands above (`-O<BDS lib path>` + `--libpath` at
+`Benchmark/tools/linux_stubs`, see the `poseidon-benchmark` skill for the
+full cross-compile recipe):
 
-| Variant | ops/sec | Host | Date |
+| Variant | ops/sec (3 runs) | Host | Date |
 |---|---|---|---|
-| FastMM (default) | — | — | — |
-| libc malloc/free | — | — | — |
+| FastMM (default) | 26,101,141 / 18,390,804 / 19,417,475 | debian-bench | 2026-09-17 |
+| libc malloc/free | 22,889,842 / 21,505,376 / 25,000,000 | debian-bench | 2026-09-17 |
+
+**The "8.6x" claim is false.** The two ranges overlap entirely (roughly
+18-26M ops/sec either way) — no statistically meaningful difference for this
+allocation shape (small/medium sizes, concurrent churn across 8 threads).
+The claim has been removed from `Poseidon.MemoryManager.Linux.pas`'s header
+comment (done earlier, see #256); this confirms removing it was correct
+rather than just cautious.
+
+This does not mean the unit is useless — it may still matter for a
+different workload shape (e.g. very large allocations, or a single-threaded
+pattern where FastMM's lock-free-per-thread design has less to offer), but
+that would need its own targeted measurement, not an extrapolation from this
+result.
