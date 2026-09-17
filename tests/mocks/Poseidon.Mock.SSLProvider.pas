@@ -64,6 +64,7 @@ type
     procedure SetMinVersion(ACtx: Pointer; AVersion: Integer);
     procedure SetSecurityOptions(ACtx: Pointer);
     procedure EnableSessionCache(ACtx: Pointer);
+    procedure EnableTicketKeyRotation(ACtx: Pointer);
     procedure SetSNICallback(ACtx: Pointer; ACallback: Pointer; AArg: Pointer);
     procedure SetALPN(ACtx: Pointer; AServer: TObject);
     procedure ConfigureMTLS(ACtx: Pointer; const ACAFile: string);
@@ -189,6 +190,11 @@ end;
 procedure TSpySSLProvider.EnableSessionCache(ACtx: Pointer);
 begin
   _Log('EnableSessionCache');
+end;
+
+procedure TSpySSLProvider.EnableTicketKeyRotation(ACtx: Pointer);
+begin
+  _Log('EnableTicketKeyRotation');
 end;
 
 procedure TSpySSLProvider.SetSNICallback(ACtx: Pointer; ACallback: Pointer;

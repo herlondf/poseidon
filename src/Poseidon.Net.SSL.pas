@@ -50,6 +50,26 @@ const
   SSL_SESS_CACHE_OFF               = $0000;
   SSL_SESS_CACHE_SERVER            = $0002;
 
+  // #255 item 2: session-ticket key rotation callback - the classic
+  // EVP_CIPHER_CTX/HMAC_CTX callback (SSL_CTX_set_tlsext_ticket_key_cb),
+  // not the newer _evp_cb variant (which takes an EVP_MAC_CTX* instead of
+  // HMAC_CTX* for the MAC side). Deprecated as of OpenSSL 3.0 but still
+  // present/functional unless a build explicitly strips deprecated-3.0 API
+  // (OPENSSL_NO_DEPRECATED_3_0) - kept for compatibility back to 1.0.x,
+  // where only this variant exists. Confirmed against a real OpenSSL 3.x
+  // ssl.h (Ubuntu 24.04, libssl-dev 3.0.13): 72, NOT 58 (58 is actually
+  // SSL_CTRL_GET_TLSEXT_TICKET_KEYS, an unrelated control - an earlier
+  // version of this code had the wrong constant, silently registered
+  // nothing (SSL_CTX_callback_ctrl returned 0), and every "resumption" in
+  // that state was OpenSSL's own built-in ticket key, not this callback at
+  // all - caught only by checking the ctrl call's return value AND getting
+  // a real header to check against).
+  SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB = 72;
+  CTicketKeyNameLen  = 16;  // key_name[16] in the callback signature
+  CTicketAESKeyLen   = 32;  // AES-256 key
+  CTicketHMACKeyLen  = 32;  // HMAC-SHA256 key
+  CTicketIVLen       = 16;  // AES-256-CBC IV (== EVP_MAX_IV_LENGTH here)
+
 type
   EPoseidonSSL = class(Exception);
 
@@ -92,6 +112,25 @@ type
   // int SSL_CTX_set_ciphersuites(SSL_CTX*, const char*) - same signature,
   // one alias covers both (#255).
   TFn_ctx_set_str     = function(ctx: Pointer; const str: PAnsiChar): Integer; cdecl;
+
+  // #255 item 2: session-ticket key rotation FFI surface.
+  TFn_evp_cipher      = function: Pointer; cdecl;  // EVP_aes_256_cbc()
+  TFn_evp_md          = function: Pointer; cdecl;  // EVP_sha256()
+  // int EVP_EncryptInit_ex(EVP_CIPHER_CTX*, const EVP_CIPHER*, ENGINE*, const
+  // unsigned char* key, const unsigned char* iv) - EVP_DecryptInit_ex is the
+  // same signature.
+  TFn_evp_cipherinit  = function(ctx, cipher, impl: Pointer;
+    const key, iv: PByte): Integer; cdecl;
+  // int HMAC_Init_ex(HMAC_CTX*, const void* key, int keylen, const EVP_MD*,
+  // ENGINE*)
+  TFn_hmac_init       = function(hctx: Pointer; const key: PByte; keylen: Integer;
+    md, impl: Pointer): Integer; cdecl;
+  // int RAND_bytes(unsigned char* buf, int num)
+  TFn_rand_bytes      = function(buf: PByte; num: Integer): Integer; cdecl;
+  // The classic (non-EVP) ticket key callback - stable across every OpenSSL
+  // version since TLS session tickets were introduced.
+  TFn_ticket_key_cb   = function(ASSL: Pointer; AKeyName: PByte; AIV: PByte;
+    ACtx, AHCtx: Pointer; AEnc: Integer): Integer; cdecl;
 
   TPoseidonLibHandle = NativeUInt;
 
@@ -141,6 +180,30 @@ type
     // set_ciphersuites is TLS 1.3's own separate, OpenSSL 1.1.1+-only API.
     class var f_SSL_CTX_set_cipher_list: TFn_ctx_set_str;
     class var f_SSL_CTX_set_ciphersuites: TFn_ctx_set_str;
+
+    // #255 item 2
+    class var f_EVP_aes_256_cbc: TFn_evp_cipher;
+    class var f_EVP_sha256: TFn_evp_md;
+    class var f_EVP_EncryptInit_ex: TFn_evp_cipherinit;
+    class var f_EVP_DecryptInit_ex: TFn_evp_cipherinit;
+    class var f_HMAC_Init_ex: TFn_hmac_init;
+    class var f_RAND_bytes: TFn_rand_bytes;
+
+    class var FTicketLock: TCriticalSection;
+    class var FTicketKeyName: array[0..CTicketKeyNameLen - 1] of Byte;
+    class var FTicketAESKey:  array[0..CTicketAESKeyLen - 1] of Byte;
+    class var FTicketHMACKey: array[0..CTicketHMACKeyLen - 1] of Byte;
+    class var FTicketPrevName:    array[0..CTicketKeyNameLen - 1] of Byte;
+    class var FTicketPrevAESKey:  array[0..CTicketAESKeyLen - 1] of Byte;
+    class var FTicketPrevHMACKey: array[0..CTicketHMACKeyLen - 1] of Byte;
+    class var FTicketHasPrevKey: Boolean;
+    class var FTicketRotationMs: UInt64;
+    class var FTicketLastRotationTick: UInt64;
+    class var FTicketCallbackCount: Int64;
+    class var FTicketRotationCount: Int64;
+
+    class procedure TicketKey_GenerateInto(AName, AAESKey, AHMACKey: PByte);
+    class procedure TicketKey_MaybeRotate;
 
     class function  TryLoadLib(const AName: string): TPoseidonLibHandle;
     class function  RequireProc(ALib: TPoseidonLibHandle; const AName: string): Pointer;
@@ -197,6 +260,24 @@ type
     // Enable server-side TLS session cache to reduce handshake cost on
     // reconnections. ACacheSize is the max number of cached sessions (default 1024).
     class procedure CTX_EnableSessionCache(ACtx: Pointer; ACacheSize: Integer = 1024);
+
+    // #255 item 2: rotate the AES-256-CBC + HMAC-SHA256 key pair used to
+    // encrypt/decrypt TLS session tickets, on a timer (lazily checked inside
+    // the callback, no background thread). A ticket issued under the
+    // previous key still resumes successfully during exactly one rotation
+    // interval of grace (the callback returns 2 = "valid, reissue"), then is
+    // no longer accepted (server falls back to a full handshake, not an
+    // error). Best-effort/no-op (logs nothing, just does not register) if
+    // the required OpenSSL symbols are unavailable - callers should still
+    // treat TLS as functional either way, this only affects forward-secrecy
+    // posture under long uptimes, never correctness.
+    class procedure CTX_EnableTicketKeyRotation(ACtx: Pointer;
+      ARotationIntervalMs: UInt64 = 12 * 3600 * 1000);
+
+    // Diagnostics only (#255) - lets a live test confirm the callback is
+    // genuinely being invoked by real handshakes, not just registered.
+    class function TicketKeyCallbackCount: Int64; static;
+    class function TicketKeyRotationCount: Int64; static;
   end;
 
 implementation
@@ -204,21 +285,22 @@ implementation
 uses
 {$IFDEF MSWINDOWS}
   {$IFDEF FPC}
-  Poseidon.Compat.DynLib;
+  Classes, Poseidon.Compat.DynLib;
   {$ELSE}
-  Winapi.Windows;
+  System.Classes, Winapi.Windows;
   {$ENDIF}
 {$ELSE}
   {$IFDEF FPC}
-  Poseidon.Compat.DynLib;
+  Classes, Poseidon.Compat.DynLib;
   {$ELSE}
-  Posix.Dlfcn;
+  System.Classes, Posix.Dlfcn;
   {$ENDIF}
 {$ENDIF}
 
 class constructor TPoseidonSSL.Create;
 begin
   FLock := TCriticalSection.Create;
+  FTicketLock := TCriticalSection.Create;
   FLoaded := False;
   FLibSSL := 0;
   FLibCrypto := 0;
@@ -234,6 +316,7 @@ begin
   if FLibSSL <> 0    then dlclose(FLibSSL);
   if FLibCrypto <> 0 then dlclose(FLibCrypto);
 {$ENDIF}
+  FTicketLock.Free;
   FLock.Free;
 end;
 
@@ -362,6 +445,25 @@ begin
 {$ELSE}
   @f_SSL_CTX_set_cipher_list  := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_set_cipher_list')));
   @f_SSL_CTX_set_ciphersuites := dlsym(FLibSSL, MarshaledAString(AnsiString('SSL_CTX_set_ciphersuites')));
+{$ENDIF}
+
+  // #255 item 2: all from libcrypto, present in every OpenSSL version this
+  // unit supports - loaded as optional anyway so a stripped/unusual build
+  // degrades to "no ticket rotation" instead of failing TLS entirely.
+{$IFDEF MSWINDOWS}
+  @f_EVP_aes_256_cbc     := GetProcAddress(FLibCrypto, 'EVP_aes_256_cbc');
+  @f_EVP_sha256          := GetProcAddress(FLibCrypto, 'EVP_sha256');
+  @f_EVP_EncryptInit_ex  := GetProcAddress(FLibCrypto, 'EVP_EncryptInit_ex');
+  @f_EVP_DecryptInit_ex  := GetProcAddress(FLibCrypto, 'EVP_DecryptInit_ex');
+  @f_HMAC_Init_ex        := GetProcAddress(FLibCrypto, 'HMAC_Init_ex');
+  @f_RAND_bytes          := GetProcAddress(FLibCrypto, 'RAND_bytes');
+{$ELSE}
+  @f_EVP_aes_256_cbc     := dlsym(FLibCrypto, MarshaledAString(AnsiString('EVP_aes_256_cbc')));
+  @f_EVP_sha256          := dlsym(FLibCrypto, MarshaledAString(AnsiString('EVP_sha256')));
+  @f_EVP_EncryptInit_ex  := dlsym(FLibCrypto, MarshaledAString(AnsiString('EVP_EncryptInit_ex')));
+  @f_EVP_DecryptInit_ex  := dlsym(FLibCrypto, MarshaledAString(AnsiString('EVP_DecryptInit_ex')));
+  @f_HMAC_Init_ex        := dlsym(FLibCrypto, MarshaledAString(AnsiString('HMAC_Init_ex')));
+  @f_RAND_bytes          := dlsym(FLibCrypto, MarshaledAString(AnsiString('RAND_bytes')));
 {$ENDIF}
 
   FLoaded := True;
@@ -657,6 +759,181 @@ class procedure TPoseidonSSL.CTX_EnableSessionCache(ACtx: Pointer; ACacheSize: I
 begin
   f_SSL_CTX_ctrl(ACtx, SSL_CTRL_SET_SESS_CACHE_MODE, SSL_SESS_CACHE_SERVER, nil);
   f_SSL_CTX_ctrl(ACtx, SSL_CTRL_SET_SESS_CACHE_SIZE, ACacheSize, nil);
+end;
+
+// #255 item 2 - TLS session-ticket key rotation
+//
+// Classic (non-EVP) SSL_CTX_set_tlsext_ticket_key_cb callback. OpenSSL calls
+// this on every ticket ISSUE (AEnc=1, a fresh full or resumed handshake
+// finishing) and every ticket PRESENT (AEnc=0, a client trying to resume).
+// Contract (stable OpenSSL API, unchanged since ~0.9.8f):
+//   AEnc=1: fill AKeyName[16] + AIV[16], init ACtx (cipher) + AHCtx (HMAC)
+//           for ENCRYPT. Return 1 = ticket issued, 0 = skip issuing a ticket
+//           this time (session still completes, just not resumable), -1 =
+//           abort (never used here - always degrade to 0 instead).
+//   AEnc=0: AKeyName[16] + AIV[16] are already filled in from the presented
+//           ticket; init for DECRYPT. Return 1 = resumed with current key,
+//           2 = resumed with the (still-valid, one rotation of grace)
+//           previous key AND please reissue a fresh ticket now, 0 = ticket
+//           unusable (unknown/expired key name) - safe fallback to a full
+//           handshake, not an error.
+// Every exit path other than a fully successful setup returns 0 - there is
+// no scenario where this callback should abort a connection; worst case is
+// simply "this handshake does not get ticket resumption."
+
+function PoseidonTicketKeyCallback(ASSL: Pointer; AKeyName: PByte; AIV: PByte;
+  ACtx, AHCtx: Pointer; AEnc: Integer): Integer; cdecl;
+var
+  LName:    array[0..CTicketKeyNameLen - 1] of Byte;
+  LAESKey:  array[0..CTicketAESKeyLen - 1] of Byte;
+  LHMACKey: array[0..CTicketHMACKeyLen - 1] of Byte;
+  LUsePrev: Boolean;
+begin
+  Result := 0;
+  try
+    TInterlocked.Increment(TPoseidonSSL.FTicketCallbackCount);
+    TPoseidonSSL.TicketKey_MaybeRotate;
+
+    if AEnc = 1 then
+    begin
+      TPoseidonSSL.FTicketLock.Enter;
+      try
+        Move(TPoseidonSSL.FTicketKeyName[0], LName[0], CTicketKeyNameLen);
+        Move(TPoseidonSSL.FTicketAESKey[0], LAESKey[0], CTicketAESKeyLen);
+        Move(TPoseidonSSL.FTicketHMACKey[0], LHMACKey[0], CTicketHMACKeyLen);
+      finally
+        TPoseidonSSL.FTicketLock.Leave;
+      end;
+
+      if not Assigned(TPoseidonSSL.f_RAND_bytes) or
+         not Assigned(TPoseidonSSL.f_EVP_EncryptInit_ex) or
+         not Assigned(TPoseidonSSL.f_HMAC_Init_ex) then
+        Exit(0);
+
+      Move(LName[0], AKeyName^, CTicketKeyNameLen);
+      if TPoseidonSSL.f_RAND_bytes(AIV, CTicketIVLen) <> 1 then Exit(0);
+      if TPoseidonSSL.f_EVP_EncryptInit_ex(ACtx, TPoseidonSSL.f_EVP_aes_256_cbc(),
+           nil, @LAESKey[0], AIV) <> 1 then Exit(0);
+      if TPoseidonSSL.f_HMAC_Init_ex(AHCtx, @LHMACKey[0], CTicketHMACKeyLen,
+           TPoseidonSSL.f_EVP_sha256(), nil) <> 1 then Exit(0);
+
+      Result := 1;
+    end
+    else
+    begin
+      if not Assigned(TPoseidonSSL.f_EVP_DecryptInit_ex) or
+         not Assigned(TPoseidonSSL.f_HMAC_Init_ex) then
+        Exit(0);
+
+      LUsePrev := False;
+      TPoseidonSSL.FTicketLock.Enter;
+      try
+        if CompareMem(AKeyName, @TPoseidonSSL.FTicketKeyName[0], CTicketKeyNameLen) then
+        begin
+          Move(TPoseidonSSL.FTicketAESKey[0], LAESKey[0], CTicketAESKeyLen);
+          Move(TPoseidonSSL.FTicketHMACKey[0], LHMACKey[0], CTicketHMACKeyLen);
+        end
+        else if TPoseidonSSL.FTicketHasPrevKey and
+          CompareMem(AKeyName, @TPoseidonSSL.FTicketPrevName[0], CTicketKeyNameLen) then
+        begin
+          Move(TPoseidonSSL.FTicketPrevAESKey[0], LAESKey[0], CTicketAESKeyLen);
+          Move(TPoseidonSSL.FTicketPrevHMACKey[0], LHMACKey[0], CTicketHMACKeyLen);
+          LUsePrev := True;
+        end
+        else
+          Exit(0);  // unknown key name - ticket cannot be honored, full handshake
+      finally
+        TPoseidonSSL.FTicketLock.Leave;
+      end;
+
+      if TPoseidonSSL.f_HMAC_Init_ex(AHCtx, @LHMACKey[0], CTicketHMACKeyLen,
+           TPoseidonSSL.f_EVP_sha256(), nil) <> 1 then Exit(0);
+      if TPoseidonSSL.f_EVP_DecryptInit_ex(ACtx, TPoseidonSSL.f_EVP_aes_256_cbc(),
+           nil, @LAESKey[0], AIV) <> 1 then Exit(0);
+
+      if LUsePrev then Result := 2 else Result := 1;
+    end;
+  except
+    // Never let an exception cross back into OpenSSL's C call stack.
+    Result := 0;
+  end;
+end;
+
+class procedure TPoseidonSSL.TicketKey_GenerateInto(AName, AAESKey, AHMACKey: PByte);
+begin
+  if Assigned(f_RAND_bytes) then
+  begin
+    f_RAND_bytes(AName, CTicketKeyNameLen);
+    f_RAND_bytes(AAESKey, CTicketAESKeyLen);
+    f_RAND_bytes(AHMACKey, CTicketHMACKeyLen);
+  end;
+end;
+
+// No lock required from the caller - checks the rotation tick first without
+// the lock (cheap, the common "not due yet" case never blocks), only enters
+// FTicketLock when a rotation actually needs to happen.
+class procedure TPoseidonSSL.TicketKey_MaybeRotate;
+var
+  LNow: UInt64;
+begin
+  if FTicketRotationMs = 0 then Exit;  // rotation not enabled
+  LNow := TThread.GetTickCount64;
+  if LNow - FTicketLastRotationTick < FTicketRotationMs then Exit;
+
+  FTicketLock.Enter;
+  try
+    // Re-check under the lock - another thread may have just rotated.
+    if LNow - FTicketLastRotationTick < FTicketRotationMs then Exit;
+
+    Move(FTicketKeyName[0], FTicketPrevName[0], CTicketKeyNameLen);
+    Move(FTicketAESKey[0], FTicketPrevAESKey[0], CTicketAESKeyLen);
+    Move(FTicketHMACKey[0], FTicketPrevHMACKey[0], CTicketHMACKeyLen);
+    FTicketHasPrevKey := True;
+
+    TicketKey_GenerateInto(@FTicketKeyName[0], @FTicketAESKey[0], @FTicketHMACKey[0]);
+    FTicketLastRotationTick := LNow;
+    TInterlocked.Increment(FTicketRotationCount);
+  finally
+    FTicketLock.Leave;
+  end;
+end;
+
+class procedure TPoseidonSSL.CTX_EnableTicketKeyRotation(ACtx: Pointer;
+  ARotationIntervalMs: UInt64);
+begin
+  EnsureLoaded;
+  if not Assigned(f_RAND_bytes) or not Assigned(f_EVP_aes_256_cbc) or
+     not Assigned(f_EVP_sha256) or not Assigned(f_EVP_EncryptInit_ex) or
+     not Assigned(f_EVP_DecryptInit_ex) or not Assigned(f_HMAC_Init_ex) then
+    Exit;  // best-effort - OpenSSL build missing a required symbol
+
+  FTicketLock.Enter;
+  try
+    TicketKey_GenerateInto(@FTicketKeyName[0], @FTicketAESKey[0], @FTicketHMACKey[0]);
+    FTicketHasPrevKey := False;
+    FTicketLastRotationTick := TThread.GetTickCount64;
+    FTicketRotationMs := ARotationIntervalMs;
+  finally
+    FTicketLock.Leave;
+  end;
+
+  // SSL_CTX_set_tlsext_ticket_key_cb is a macro over SSL_CTX_callback_ctrl.
+  // Returns 0 if the control code is unsupported by this OpenSSL build -
+  // in that case FTicketRotationMs stays set but the callback never fires,
+  // so TicketKeyCallbackCount staying at 0 in a live test is the signal
+  // this did not actually take effect.
+  f_SSL_CTX_callback_ctrl(ACtx, SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB,
+    @PoseidonTicketKeyCallback);
+end;
+
+class function TPoseidonSSL.TicketKeyCallbackCount: Int64;
+begin
+  Result := TInterlocked.Read(FTicketCallbackCount);
+end;
+
+class function TPoseidonSSL.TicketKeyRotationCount: Int64;
+begin
+  Result := TInterlocked.Read(FTicketRotationCount);
 end;
 
 end.

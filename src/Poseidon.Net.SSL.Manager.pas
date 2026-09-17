@@ -126,6 +126,7 @@ begin
   FSSLProvider.SetMinVersion(FSSLCtx, FMinTLSVersion);
   FSSLProvider.SetSecurityOptions(FSSLCtx);
   FSSLProvider.EnableSessionCache(FSSLCtx);
+  FSSLProvider.EnableTicketKeyRotation(FSSLCtx);  // #255 item 2
   // SNI callback - uses Self (TSSLManager) as arg
   FSSLProvider.SetSNICallback(FSSLCtx, @SSLManagerSNICallback, Self);
   if AH2Enabled then

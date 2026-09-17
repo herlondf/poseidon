@@ -54,6 +54,9 @@ type
     procedure SetMinVersion(ACtx: Pointer; AVersion: Integer);
     procedure SetSecurityOptions(ACtx: Pointer);
     procedure EnableSessionCache(ACtx: Pointer);
+    // #255 item 2: registers session-ticket key rotation (best-effort - a
+    // no-op if the OpenSSL build is missing a required symbol).
+    procedure EnableTicketKeyRotation(ACtx: Pointer);
 
     // SNI + ALPN
     procedure SetSNICallback(ACtx: Pointer; ACallback: Pointer; AArg: Pointer);
@@ -134,6 +137,7 @@ type
     procedure SetMinVersion(ACtx: Pointer; AVersion: Integer);
     procedure SetSecurityOptions(ACtx: Pointer);
     procedure EnableSessionCache(ACtx: Pointer);
+    procedure EnableTicketKeyRotation(ACtx: Pointer);
     procedure SetSNICallback(ACtx: Pointer; ACallback: Pointer; AArg: Pointer);
     procedure SetALPN(ACtx: Pointer; AServer: TObject);
     procedure ConfigureMTLS(ACtx: Pointer; const ACAFile: string);
@@ -200,6 +204,11 @@ end;
 procedure TDefaultSSLProvider.EnableSessionCache(ACtx: Pointer);
 begin
   TPoseidonSSL.CTX_EnableSessionCache(ACtx);
+end;
+
+procedure TDefaultSSLProvider.EnableTicketKeyRotation(ACtx: Pointer);
+begin
+  TPoseidonSSL.CTX_EnableTicketKeyRotation(ACtx);
 end;
 
 procedure TDefaultSSLProvider.SetSNICallback(ACtx: Pointer;
