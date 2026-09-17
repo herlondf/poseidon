@@ -27,7 +27,8 @@ implementation
 uses
   System.Classes,
   System.SyncObjs,
-  System.Diagnostics;
+  System.Diagnostics,
+  Poseidon.Middleware.Tracing;
 
 // Escapes a string for embedding inside a JSON string literal. Escapes the
 // characters JSON requires (quote, backslash, control chars) but NOT '/', so
@@ -109,18 +110,35 @@ begin
     var
       LSW: TStopwatch;
       LReqID: string;
+      LTraceParent, LTraceId, LSpanId: string;
+      LTraceFields: string;
     begin
       LSW := TStopwatch.StartNew;
       ANext();
       LSW.Stop;
       LReqID := FindExtraHeader(ACtx, 'X-Request-ID');
+
+      // #236: if TracingMiddleware ran earlier in the chain, it left this
+      // hop's own traceparent as a response header - surface trace_id/
+      // span_id here too, so a structured-log consumer (CloudWatch Insights,
+      // Loki) can correlate a log line with a trace without re-parsing the
+      // header itself. Empty (fields omitted) when tracing is not in use -
+      // this middleware works standalone exactly as before.
+      LTraceFields := '';
+      LTraceParent := FindExtraHeader(ACtx, 'traceparent');
+      if (LTraceParent <> '') and
+         ExtractTraceParentIds(LTraceParent, LTraceId, LSpanId) then
+        LTraceFields := Format(',"trace_id":"%s","span_id":"%s"',
+          [LTraceId, LSpanId]);
+
       // Escape client-controlled values (path, id from X-Request-ID) so they
       // cannot break the line and inject a forged log entry.
       AOutput(Format(
-        '{"ts":"%s","method":"%s","path":"%s","status":%d,"ms":%d,"ip":"%s","id":"%s"}',
+        '{"ts":"%s","method":"%s","path":"%s","status":%d,"ms":%d,"ip":"%s","id":"%s"%s}',
         [FormatDateTime('yyyy-mm-dd"T"hh:nn:ss.zzz', Now),
          JSONEscape(ACtx.Method), JSONEscape(ACtx.Path), ACtx.Status,
-         LSW.ElapsedMilliseconds, JSONEscape(ACtx.RemoteAddr), JSONEscape(LReqID)]));
+         LSW.ElapsedMilliseconds, JSONEscape(ACtx.RemoteAddr), JSONEscape(LReqID),
+         LTraceFields]));
     end;
 end;
 

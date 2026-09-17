@@ -449,6 +449,41 @@ includes the full path and query string. Served responses carry
 
 ---
 
+## 21. Tracing
+
+Propagates [W3C Trace Context](https://www.w3.org/TR/trace-context/): reads
+an incoming `traceparent` header if present and well-formed (reusing its
+trace-id and sampled flag), or originates a new trace if absent/malformed.
+Either way, mints a new span-id for this hop and writes the resulting
+`traceparent` as a response header.
+
+```pascal
+uses Poseidon.Middleware.Tracing;
+
+App.Use(TracingMiddleware);
+```
+
+Register it before `LoggerMiddlewareJSON` (see [Metrics](#10-metrics) note
+below) if you want `trace_id`/`span_id` in the JSON log line -
+`LoggerMiddlewareJSON` reads the `traceparent` this middleware already set,
+the same `ACtx.ExtraHeaders` mechanism `RequestIDMiddleware` uses for
+`X-Request-ID`.
+
+Distinct from `RequestIDMiddleware`: `X-Request-ID` is a simple opaque
+per-request correlation id a client may set; `traceparent` is the
+standardized, structured (trace-id + per-hop span-id) cross-service format.
+Use both if you want either separately, or just Tracing if W3C propagation
+is enough on its own.
+
+**Scope:** propagation and exposure only - this does NOT export spans to
+Tempo/Grafana or any OTLP backend (a real exporter is a separate, larger
+piece of work: an OTLP client, span start/end timing, batching). What this
+gives you is a correctly generated and propagated trace-id/span-id, ready
+for whoever wires up an actual exporter to consume from the `traceparent`
+response header or the JSON log line.
+
+---
+
 ## See also
 
 - [08 — Native API](../08-native-api/README.md) — App.Use, route groups, middleware chain

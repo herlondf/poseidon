@@ -35,6 +35,7 @@ uses
   Poseidon.Tests.Middleware.Security,
   Poseidon.Tests.Middleware.BodyLimit,
   Poseidon.Tests.Middleware.RequestID,
+  Poseidon.Tests.Middleware.Tracing,
   Poseidon.Tests.Middleware.Timeout,
   Poseidon.Tests.Middleware.Guard,
   Poseidon.Tests.Middleware.Logger,

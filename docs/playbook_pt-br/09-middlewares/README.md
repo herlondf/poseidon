@@ -456,6 +456,41 @@ cache carregam `Vary: Accept-Encoding`.
 
 ---
 
+## 21. Tracing
+
+Propaga [W3C Trace Context](https://www.w3.org/TR/trace-context/): lê um
+header `traceparent` de entrada se presente e bem formado (reaproveitando
+seu trace-id e a flag de sampled), ou origina um trace novo se ausente/mal
+formado. De qualquer jeito, gera um novo span-id pra este hop e escreve o
+`traceparent` resultante como header de resposta.
+
+```pascal
+uses Poseidon.Middleware.Tracing;
+
+App.Use(TracingMiddleware);
+```
+
+Registre antes do `LoggerMiddlewareJSON` (veja a nota em [Metrics](#10-metrics)
+acima) se quiser `trace_id`/`span_id` na linha de log JSON — o
+`LoggerMiddlewareJSON` lê o `traceparent` que este middleware já setou, o
+mesmo mecanismo `ACtx.ExtraHeaders` que o `RequestIDMiddleware` usa pro
+`X-Request-ID`.
+
+Diferente do `RequestIDMiddleware`: `X-Request-ID` é um id de correlação
+opaco simples que um cliente pode setar; `traceparent` é o formato
+padronizado e estruturado (trace-id + span-id por hop) pra propagação
+entre serviços. Use os dois se quiser cada um separadamente, ou só o
+Tracing se a propagação W3C já basta sozinha.
+
+**Escopo:** só propagação e exposição — isso NÃO exporta spans pro
+Tempo/Grafana nem pra nenhum backend OTLP (um exportador de verdade é um
+trabalho maior e separado: um client OTLP, timing de início/fim de span,
+batching). O que isso entrega é um trace-id/span-id corretamente gerado e
+propagado, pronto pra quem conectar um exportador de verdade consumir a
+partir do header de resposta `traceparent` ou da linha de log JSON.
+
+---
+
 ## Veja também
 
 - [08 — API Nativa](../08-api-nativa/README.md) — App.Use, grupos de rotas, cadeia de middleware
