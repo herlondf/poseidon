@@ -231,7 +231,18 @@ begin
   Lock := TCriticalSection.Create;
   AccumBuf := TBufferPool.Acquire;
   AccumLen := 0;
-  KeepAlive := False;
+  // #260: NOT the real per-request value - just says "don't force-close this
+  // connection before its first request has even been read". A TLS
+  // connection's handshake-completion send (Finished / session tickets)
+  // reaches OnSendComplete with SSLHandshook already True but before any
+  // request was parsed; OnSendComplete's KeepAlive check used to read this
+  // stale default and close right there, before the client's actual request
+  // ever arrived (reproduced live: any TLS client that completes the
+  // handshake as a step separate from sending the request - nearly all of
+  // them). The real value always gets assigned from the parsed request
+  // (ACtx.Req.KeepAlive) before any response is sent, on every dispatch path
+  // - this initial True is only ever read in that pre-first-request window.
+  KeepAlive := True;
   Closed := 0;
   LastActivityTick := TThread.GetTickCount64;
   ShutdownRequestedTick := 0;
