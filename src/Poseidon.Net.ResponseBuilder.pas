@@ -360,6 +360,65 @@ begin
   end;
 end;
 
+// perf (compete-with-actix, 2026-09-18): zero-copy fragment lookups for
+// BuildHTTPResponseHeaders (the hot path every /plaintext, /json and
+// /json-large response goes through). GetStatusLineBytes/
+// GetContentTypeValueBytes above return an owned CopyBytes-of copy on
+// purpose - #234's comment explains why: assigning a shared global TBytes
+// to a local var bumps a refcount that is NOT atomic across threads, so
+// even a read-only global is unsafe to reference-share that way from
+// concurrent worker threads. A raw PByte is not a managed/refcounted type,
+// so returning one - and reading through it with Move() - never touches
+// that refcount at all; it is exactly as safe as the direct
+// Move(G_CT_PREFIX[0], ...) calls _BuildCore already does below for the
+// other fixed fragments. Result = nil means "not one of the pre-encoded
+// values" - caller falls back to GetStatusLineBytes/
+// GetContentTypeValueBytes's owned-copy resolution, unchanged, for the
+// uncommon/custom case.
+function _StatusLineRef(AStatus: Integer; out ALen: Integer): PByte;
+begin
+  case AStatus of
+    200: begin ALen := Length(G_STATUS_200); Result := PByte(G_STATUS_200); end;
+    201: begin ALen := Length(G_STATUS_201); Result := PByte(G_STATUS_201); end;
+    204: begin ALen := Length(G_STATUS_204); Result := PByte(G_STATUS_204); end;
+    301: begin ALen := Length(G_STATUS_301); Result := PByte(G_STATUS_301); end;
+    302: begin ALen := Length(G_STATUS_302); Result := PByte(G_STATUS_302); end;
+    303: begin ALen := Length(G_STATUS_303); Result := PByte(G_STATUS_303); end;
+    304: begin ALen := Length(G_STATUS_304); Result := PByte(G_STATUS_304); end;
+    400: begin ALen := Length(G_STATUS_400); Result := PByte(G_STATUS_400); end;
+    401: begin ALen := Length(G_STATUS_401); Result := PByte(G_STATUS_401); end;
+    403: begin ALen := Length(G_STATUS_403); Result := PByte(G_STATUS_403); end;
+    404: begin ALen := Length(G_STATUS_404); Result := PByte(G_STATUS_404); end;
+    405: begin ALen := Length(G_STATUS_405); Result := PByte(G_STATUS_405); end;
+    409: begin ALen := Length(G_STATUS_409); Result := PByte(G_STATUS_409); end;
+    413: begin ALen := Length(G_STATUS_413); Result := PByte(G_STATUS_413); end;
+    422: begin ALen := Length(G_STATUS_422); Result := PByte(G_STATUS_422); end;
+    429: begin ALen := Length(G_STATUS_429); Result := PByte(G_STATUS_429); end;
+    500: begin ALen := Length(G_STATUS_500); Result := PByte(G_STATUS_500); end;
+    503: begin ALen := Length(G_STATUS_503); Result := PByte(G_STATUS_503); end;
+  else
+    begin
+      ALen := 0;
+      Result := nil;
+    end;
+  end;
+end;
+
+function _ContentTypeRef(const AContentType: string; out ALen: Integer): PByte;
+begin
+  if      AContentType = 'application/json'         then begin ALen := Length(G_CT_JSON);    Result := PByte(G_CT_JSON); end
+  else if AContentType = 'text/plain'               then begin ALen := Length(G_CT_TEXT);    Result := PByte(G_CT_TEXT); end
+  else if AContentType = 'text/html'                then begin ALen := Length(G_CT_HTML);    Result := PByte(G_CT_HTML); end
+  else if AContentType = 'application/problem+json' then begin ALen := Length(G_CT_PROBLEM); Result := PByte(G_CT_PROBLEM); end
+  else if AContentType = 'application/x-www-form-urlencoded' then begin ALen := Length(G_CT_FORM); Result := PByte(G_CT_FORM); end
+  else if AContentType = 'application/octet-stream' then begin ALen := Length(G_CT_OCTET);   Result := PByte(G_CT_OCTET); end
+  else
+    begin
+      ALen := 0;
+      Result := nil;
+    end;
+end;
+
 // Internal core: writes the response into ABuf starting at offset 0.
 // ABuf must be pre-allocated with Length >= result of the sizing pass.
 // Returns the number of bytes written.
@@ -508,19 +567,45 @@ function BuildHTTPResponseHeaders(AStatus: Integer;
   ASecureHeaders: Boolean; const AServerBanner: string;
   out AHdrActualLen: Integer): TBytes;
 var
-  LStatusBytes: TBytes;
-  LConnBytes: TBytes;
-  LCTValue: TBytes;
+  LStatusRef, LCTRef, LConnRef: PByte;
+  LStatusFallback, LCTFallback: TBytes;  // only populated when the *Ref is nil
   LCTAlloced: Boolean;
+  LStatusLen, LCTValueLen, LConnLen: Integer;
   LExtraStr: string;
   LCLLen, LExtraLen, LCTLen, LCLBlock: Integer;
   LTotal, LPos: Integer;
   LEmitCL: Boolean;
 begin
-  LStatusBytes := GetStatusLineBytes(AStatus);
-  if AKeepAlive then LConnBytes := CopyBytes(G_CONN_KA)
-  else LConnBytes := CopyBytes(G_CONN_CLOSE);
-  LCTValue := GetContentTypeValueBytes(AContentType, LCTAlloced);
+  // perf: zero-copy for the pre-encoded status/content-type/keep-alive
+  // fragments (see _StatusLineRef's comment) - every response this
+  // benchmark's hot path builds (200, application/json or text/plain)
+  // hits these fast branches, so the fallback allocation below never runs
+  // in practice, only for uncommon/custom statuses or content types.
+  LStatusRef := _StatusLineRef(AStatus, LStatusLen);
+  if LStatusRef = nil then
+  begin
+    LStatusFallback := GetStatusLineBytes(AStatus);
+    LStatusLen := Length(LStatusFallback);
+  end;
+
+  if AKeepAlive then
+  begin
+    LConnRef := PByte(G_CONN_KA);
+    LConnLen := Length(G_CONN_KA);
+  end
+  else
+  begin
+    LConnRef := PByte(G_CONN_CLOSE);
+    LConnLen := Length(G_CONN_CLOSE);
+  end;
+
+  LCTRef := _ContentTypeRef(AContentType, LCTValueLen);
+  if (LCTRef = nil) and (AContentType <> '') then
+  begin
+    LCTFallback := GetContentTypeValueBytes(AContentType, LCTAlloced);
+    LCTValueLen := Length(LCTFallback);
+  end;
+
   LEmitCL  := _StatusHasBody(AStatus);
   if not LEmitCL then ABodyLen := 0;
   LCLLen := DigitCount(ABodyLen);
@@ -529,30 +614,37 @@ begin
   LExtraLen := Length(LExtraStr);
 
   if AContentType <> '' then
-    LCTLen := Length(G_CT_PREFIX) + Length(LCTValue) + 2
+    LCTLen := Length(G_CT_PREFIX) + LCTValueLen + 2
   else
     LCTLen := 0;
   if LEmitCL then
     LCLBlock := Length(G_CL_PREFIX) + LCLLen + 2
   else
     LCLBlock := 0;
-  LTotal := Length(LStatusBytes) + LCTLen
+  LTotal := LStatusLen + LCTLen
           + LCLBlock
-          + Length(LConnBytes) + LExtraLen + Length(G_CRLF);
+          + LConnLen + LExtraLen + Length(G_CRLF);
 
   Result := TBufferPool.Acquire(LTotal);
   LPos := 0;
 
-  Move(LStatusBytes[0], Result[LPos], Length(LStatusBytes));
-  Inc(LPos, Length(LStatusBytes));
+  if LStatusRef <> nil then
+    Move(LStatusRef^, Result[LPos], LStatusLen)
+  else
+    Move(LStatusFallback[0], Result[LPos], LStatusLen);
+  Inc(LPos, LStatusLen);
+
   if AContentType <> '' then
   begin
     Move(G_CT_PREFIX[0], Result[LPos], Length(G_CT_PREFIX));
     Inc(LPos, Length(G_CT_PREFIX));
-    if Length(LCTValue) > 0 then
+    if LCTValueLen > 0 then
     begin
-      Move(LCTValue[0], Result[LPos], Length(LCTValue));
-      Inc(LPos, Length(LCTValue));
+      if LCTRef <> nil then
+        Move(LCTRef^, Result[LPos], LCTValueLen)
+      else
+        Move(LCTFallback[0], Result[LPos], LCTValueLen);
+      Inc(LPos, LCTValueLen);
     end;
     Result[LPos] := $0D; Result[LPos + 1] := $0A; Inc(LPos, 2);
   end;
@@ -564,8 +656,8 @@ begin
     Inc(LPos, LCLLen);
     Result[LPos] := $0D; Result[LPos + 1] := $0A; Inc(LPos, 2);
   end;
-  Move(LConnBytes[0], Result[LPos], Length(LConnBytes));
-  Inc(LPos, Length(LConnBytes));
+  Move(LConnRef^, Result[LPos], LConnLen);
+  Inc(LPos, LConnLen);
   if LExtraLen > 0 then
   begin
     _AsciiBytesInto(LExtraStr, 1, LExtraLen, Result, LPos);

@@ -273,9 +273,21 @@ begin
         // LConn.Lock excludes a concurrent recv on this connection's IO thread
         // (#213). InFlightPool is re-checked under the lock because a dispatch
         // can be posted between the fast-path skip above and Lock.Enter.
-        if FShrinkAccumBufEnabled then
+        //
+        // perf (compete-with-actix, 2026-09-18): TryEnter, not Enter. This is
+        // the ONLY place a thread other than a connection's own IO/dispatch
+        // thread ever wants LConn.Lock - i.e. the one cross-thread contention
+        // point standing between Poseidon and being genuinely shared-nothing
+        // per-core on this path (see README's architecture section). A
+        // blocking Enter here forces the request path's own Lock.Enter
+        // (_ProcessRecv/_DispatchAccumBuf, paid on every request) to
+        // occasionally wait on the sweep thread. Shrinking is a pure,
+        // optional memory-reclaim nicety - skipping it for one sweep pass
+        // when the connection happens to be busy right now is free (it is
+        // retried every ~1s, see CSweepIntervalMs), so losing the race is a
+        // fine outcome, never a correctness problem.
+        if FShrinkAccumBufEnabled and LConn.Lock.TryEnter then
         begin
-          LConn.Lock.Enter;
           try
             if (TInterlocked.Add(LConn.InFlightPool, 0) = 0) and
                (LConn.AccumLen = 0) and
