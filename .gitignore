@@ -87,3 +87,8 @@ docs/api/html/
 # Lixo de ferramenta local
 .playwright-mcp/
 taskdef_current.json
+
+# Benchmark: raw wrk logs and build logs are large/machine-specific, but keep
+# the generated RESULTS.md and .gitkeep placeholders.
+benchmark/results/raw/
+benchmark/docker/fpc-trunk/Dockerfile.debug
