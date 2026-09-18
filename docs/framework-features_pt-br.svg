@@ -1,6 +1,6 @@
-<svg viewBox="0 0 980 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ffTitle ffDesc">
-  <title id="ffTitle">Poseidon — comparacao de recursos de protocolo entre 8 frameworks HTTP</title>
-  <desc id="ffDesc">Matriz de recursos comparando Poseidon com Horse, mORMot2, Actix, Go Fiber, Kestrel, nginx e uWebSockets em HTTP/1.1, HTTP/2, HTTP/3, WebSocket nativo, TLS nativo com SNI e binarios nativos autocontidos. Mesmo conjunto de 8 frameworks usado no benchmark de throughput multi-framework.</desc>
+<svg viewBox="0 0 890 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ffTitle ffDesc">
+  <title id="ffTitle">Poseidon — comparacao de recursos de protocolo entre 7 frameworks HTTP</title>
+  <desc id="ffDesc">Matriz de recursos comparando Poseidon com Horse, mORMot2, Actix, Go Fiber, Kestrel e nginx em HTTP/1.1, HTTP/2, HTTP/3, WebSocket nativo, TLS nativo com SNI e binarios nativos autocontidos. Mesmo conjunto de 7 frameworks usado no benchmark de throughput multi-framework.</desc>
 
   <style>
     :root {
@@ -66,17 +66,17 @@
     .note { fill: var(--muted); font-size: 10.5px; }
   </style>
 
-  <rect class="bgrect" x="0" y="0" width="980" height="560"/>
+  <rect class="bgrect" x="0" y="0" width="890" height="560"/>
 
-  <text class="title" x="30" y="34">Recursos de protocolo — Poseidon vs. 7 frameworks</text>
-  <text class="subtitle" x="30" y="53">Mesmo conjunto de 8 frameworks do benchmark multi-framework (throughput no README/playbook) — aqui, superfície de funcionalidades, não velocidade.</text>
+  <text class="title" x="30" y="34">Recursos de protocolo — Poseidon vs. 6 frameworks</text>
+  <text class="subtitle" x="30" y="53">Mesmo conjunto de 7 frameworks do benchmark multi-framework (throughput no README/playbook) — aqui, superfície de funcionalidades, não velocidade.</text>
 
   <!-- Table geometry -->
-  <!-- label col: x=30..230 (200 wide); 8 data cols: x=230..950 (90 each) -->
+  <!-- label col: x=30..230 (200 wide); 7 data cols: x=230..860 (90 each) -->
 
   <g transform="translate(0, 80)">
     <!-- header row background -->
-    <rect class="header-bg" x="30" y="0" width="920" height="40" rx="6"/>
+    <rect class="header-bg" x="30" y="0" width="830" height="40" rx="6"/>
     <rect class="poseidon-col-bg" x="230" y="0" width="90" height="452" rx="0"/>
 
     <!-- column headers -->
@@ -89,12 +89,11 @@
     <text class="col-header" x="635" y="32">Fiber</text>
     <text class="col-header" x="725" y="25">Kestrel</text>
     <text class="col-header" x="815" y="25">nginx</text>
-    <text class="col-header" x="905" y="25">uws</text>
 
     <!-- outer frame -->
-    <rect class="cell-border" x="30" y="0" width="920" height="452" rx="8"/>
+    <rect class="cell-border" x="30" y="0" width="830" height="452" rx="8"/>
     <!-- header/body divider -->
-    <line class="cell-border" x1="30" y1="40" x2="950" y2="40"/>
+    <line class="cell-border" x1="30" y1="40" x2="860" y2="40"/>
     <!-- vertical separators between columns -->
     <line class="cell-border" x1="230" y1="0" x2="230" y2="452"/>
     <line class="cell-border" x1="320" y1="0" x2="320" y2="452"/>
@@ -103,11 +102,10 @@
     <line class="cell-border" x1="590" y1="0" x2="590" y2="452"/>
     <line class="cell-border" x1="680" y1="0" x2="680" y2="452"/>
     <line class="cell-border" x1="770" y1="0" x2="770" y2="452"/>
-    <line class="cell-border" x1="860" y1="0" x2="860" y2="452"/>
 
     <!-- Row template: 6 rows, each 68.6px tall starting at y=40, centers at ~74,143,211,280,348,417 -->
     <!-- row 1: HTTP/1.1 -->
-    <line class="cell-border" x1="30" y1="108" x2="950" y2="108"/>
+    <line class="cell-border" x1="30" y1="108" x2="860" y2="108"/>
     <text class="row-label" x="42" y="79">HTTP/1.1 keep-alive</text>
     <text class="mark-good" x="275" y="80">&#10003;</text>
     <text class="mark-good" x="365" y="80">&#10003;</text>
@@ -116,10 +114,9 @@
     <text class="mark-good" x="635" y="80">&#10003;</text>
     <text class="mark-good" x="725" y="80">&#10003;</text>
     <text class="mark-good" x="815" y="80">&#10003;</text>
-    <text class="mark-good" x="905" y="80">&#10003;</text>
 
     <!-- row 2: HTTP/2 -->
-    <line class="cell-border" x1="30" y1="177" x2="950" y2="177"/>
+    <line class="cell-border" x1="30" y1="177" x2="860" y2="177"/>
     <text class="row-label" x="42" y="148">HTTP/2</text>
     <text class="mark-good" x="275" y="149">&#10003;</text>
     <text class="mark-bad" x="365" y="149">&#10007;</text>
@@ -128,10 +125,9 @@
     <text class="mark-bad" x="635" y="149">&#10007;</text>
     <text class="mark-good" x="725" y="149">&#10003;</text>
     <text class="mark-good" x="815" y="149">&#10003;</text>
-    <text class="mark-bad" x="905" y="149">&#10007;</text>
 
     <!-- row 3: HTTP/3 -->
-    <line class="cell-border" x1="30" y1="245" x2="950" y2="245"/>
+    <line class="cell-border" x1="30" y1="245" x2="860" y2="245"/>
     <text class="row-label" x="42" y="216">HTTP/3 (QUIC)</text>
     <text class="mark-bad" x="275" y="216">&#10007;</text>
     <text class="mark-bad" x="365" y="216">&#10007;</text>
@@ -140,10 +136,9 @@
     <text class="mark-bad" x="635" y="216">&#10007;</text>
     <text class="mark-good" x="725" y="216">&#10003;</text>
     <text class="mark-good" x="815" y="216">&#10003;</text>
-    <text class="mark-bad" x="905" y="216">&#10007;</text>
 
     <!-- row 4: WebSocket -->
-    <line class="cell-border" x1="30" y1="314" x2="950" y2="314"/>
+    <line class="cell-border" x1="30" y1="314" x2="860" y2="314"/>
     <text class="row-label" x="42" y="285">WebSocket nativo</text>
     <text class="mark-good" x="275" y="285">&#10003;</text>
     <text class="mark-bad" x="365" y="285">&#10007;</text>
@@ -152,10 +147,9 @@
     <text class="mark-partial" x="635" y="285">~</text>
     <text class="mark-good" x="725" y="285">&#10003;</text>
     <text class="mark-bad" x="815" y="285">&#10007;</text>
-    <text class="mark-good" x="905" y="285">&#10003;</text>
 
     <!-- row 5: Native TLS -->
-    <line class="cell-border" x1="30" y1="382" x2="950" y2="382"/>
+    <line class="cell-border" x1="30" y1="382" x2="860" y2="382"/>
     <text class="row-label" x="42" y="353">TLS nativo (SNI/mTLS)</text>
     <text class="mark-good" x="275" y="353">&#10003;</text>
     <text class="mark-partial" x="365" y="353">~</text>
@@ -164,7 +158,6 @@
     <text class="mark-good" x="635" y="353">&#10003;</text>
     <text class="mark-good" x="725" y="353">&#10003;</text>
     <text class="mark-good" x="815" y="353">&#10003;</text>
-    <text class="mark-good" x="905" y="353">&#10003;</text>
 
     <!-- row 6: Native self-contained binary -->
     <text class="row-label" x="42" y="422">Binario autocontido</text>
@@ -175,7 +168,6 @@
     <text class="mark-good" x="635" y="422">&#10003;</text>
     <text class="mark-partial" x="725" y="422">~</text>
     <text class="mark-good" x="815" y="422">&#10003;</text>
-    <text class="mark-good" x="905" y="422">&#10003;</text>
   </g>
 
   <!-- Legend -->

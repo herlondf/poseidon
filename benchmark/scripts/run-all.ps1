@@ -4,8 +4,8 @@
 # defaults) for a Docker Desktop host with no WSL2/bash required.
 #
 # Usage:
-#   .\run-all.ps1                       # all 8 contenders, 300s measurement each
-#   .\run-all.ps1 poseidon-v2 uws        # only these two
+#   .\run-all.ps1                       # all 7 contenders, 300s measurement each
+#   .\run-all.ps1 poseidon-v2 actix       # only these two
 #   .\run-all.ps1 -Duration 30           # short smoke-test run
 param(
   [string[]]$Frameworks = @(),
@@ -39,7 +39,7 @@ if ($null -eq $CpusetServer -and $null -eq $CpusetLoadgen -and [Environment]::Pr
 if ($null -eq $CpusetServer) { $CpusetServer = "" }
 if ($null -eq $CpusetLoadgen) { $CpusetLoadgen = "" }
 
-$AllFrameworks = @('uws','actix','poseidon-v2','gofiber','mormot2','nginx','horse-epoll','kestrel')
+$AllFrameworks = @('actix','poseidon-v2','gofiber','mormot2','nginx','horse-epoll','kestrel')
 if ($Frameworks.Count -eq 0) { $Frameworks = $AllFrameworks }
 
 New-Item -ItemType Directory -Force -Path $Raw | Out-Null

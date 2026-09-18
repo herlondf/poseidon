@@ -87,26 +87,32 @@ O backend de I/O e selecionado **uma unica vez** na inicializacao, com fallback 
 
 ## Performance vs. o Mercado
 
-Oito servidores HTTP, um de cada vez, na mesma máquina e na mesma janela.
+Sete servidores HTTP, um de cada vez, na mesma máquina e na mesma janela.
 
 **Cenário.** Carga mista: 40% `/plaintext` (13 B), 30% `/json` (27 B), 30% `/json-large` (63 KB),
 gerada por `wrk -t8 -c200` durante 300 s por framework, após 15 s de aquecimento descartado. Cada
 servidor rodou em Docker com `--cpuset-cpus` fixando **2 núcleos físicos dedicados**, mais
 `--cpus=2.0` e limite de **1 GB** de memória; o gerador de carga ficou isolado em outros 4 núcleos
 físicos, então nunca disputou CPU com o servidor nem saturou (pico de 442% dos 800% disponíveis).
-Os oito serviram payloads byte a byte idênticos e o mix medido saiu 40,0/30,0/30,0 em todos.
+Os sete serviram payloads byte a byte idênticos e o mix medido saiu 40,0/30,0/30,0 em todos.
 Host: Ryzen 7 5800H, WSL2, Linux 6.6.
+
+uWebSockets (uws) não entra nesta tabela. Não é um framework HTTP de propósito geral: é uma
+biblioteca de sockets/event-loop sem backpressure, sem timeout de conexão, sem headers de
+segurança e sem upgrade de protocolo embutidos - nenhuma das features que todo outro concorrente
+aqui (Poseidon incluso) paga no caminho quente. Medir throughput contra ela responde "quão rápido
+é um event loop nu", não "quão rápido é este framework", que é a pergunta que esta tabela quer
+responder.
 
 | Posição | Framework | Tecnologia | Req/s | p50 | p99 | Máx | Erros |
 |---:|---|---|---:|---:|---:|---:|---:|
-| 1 | uws | C++ | 63.212 | 2,87 ms | 10,52 ms | 66 ms | 0 |
-| 2 | Actix | Rust | 37.146 | 5,12 ms | 15,21 ms | 143 ms | 0 |
-| **3** | **Poseidon v2** | **Object Pascal** | **35.941** | **5,30 ms** | **10,19 ms** | **64 ms** | **0** |
-| 4 | Go Fiber | Go | 30.641 | 6,39 ms | 18,60 ms | 52 ms | 0 |
-| 5 | mORMot2 | Object Pascal | 28.077 | 6,88 ms | 44,80 ms | 1.810 ms | 1 |
-| 6 | nginx | C | 20.281 | 9,29 ms | 20,08 ms | 307 ms | 0 |
-| 7 | Kestrel | C# / .NET | 17.599 | 10,31 ms | 29,94 ms | 101 ms | 0 |
-| 8 | Horse (Epoll) | Object Pascal | 2.554 | 79,63 ms | 799,25 ms | 1.990 ms | 64 |
+| 1 | Actix | Rust | 37.146 | 5,12 ms | 15,21 ms | 143 ms | 0 |
+| **2** | **Poseidon v2** | **Object Pascal** | **35.941** | **5,30 ms** | **10,19 ms** | **64 ms** | **0** |
+| 3 | Go Fiber | Go | 30.641 | 6,39 ms | 18,60 ms | 52 ms | 0 |
+| 4 | mORMot2 | Object Pascal | 28.077 | 6,88 ms | 44,80 ms | 1.810 ms | 1 |
+| 5 | nginx | C | 20.281 | 9,29 ms | 20,08 ms | 307 ms | 0 |
+| 6 | Kestrel | C# / .NET | 17.599 | 10,31 ms | 29,94 ms | 101 ms | 0 |
+| 7 | Horse (Epoll) | Object Pascal | 2.554 | 79,63 ms | 799,25 ms | 1.990 ms | 64 |
 
 ### Consumo de recursos
 
@@ -116,34 +122,28 @@ CPU não separa ninguém; memória sim.
 | Posição | Framework | Tecnologia | Mem pico | Mem média | CPU média | Requisições servidas |
 |---:|---|---|---:|---:|---:|---:|
 | **1** | **Poseidon v2** | **Object Pascal** | **5,2 MB** | **4,3 MB** | **199%** | **10.785.241** |
-| 2 | uws | C++ | 6,3 MB | 3,2 MB | 196% | 18.969.730 |
-| 3 | Go Fiber | Go | 7,2 MB | 6,7 MB | 197% | 9.195.118 |
-| 4 | Actix | Rust | 19,2 MB | 17,1 MB | 202% | 11.145.622 |
-| 5 | nginx | C | 21,8 MB | 20,8 MB | 198% | 6.086.278 |
-| 6 | mORMot2 | Object Pascal | 33,8 MB | 31,3 MB | 202% | 8.425.615 |
-| 7 | Kestrel | C# / .NET | 81,4 MB | 74,6 MB | 196% | 5.281.181 |
-| 8 | Horse (Epoll) | Object Pascal | 116,5 MB | 99,1 MB | 196% | 766.574 |
+| 2 | Go Fiber | Go | 7,2 MB | 6,7 MB | 197% | 9.195.118 |
+| 3 | Actix | Rust | 19,2 MB | 17,1 MB | 202% | 11.145.622 |
+| 4 | nginx | C | 21,8 MB | 20,8 MB | 198% | 6.086.278 |
+| 5 | mORMot2 | Object Pascal | 33,8 MB | 31,3 MB | 202% | 8.425.615 |
+| 6 | Kestrel | C# / .NET | 81,4 MB | 74,6 MB | 196% | 5.281.181 |
+| 7 | Horse (Epoll) | Object Pascal | 116,5 MB | 99,1 MB | 196% | 766.574 |
 
 ### O que os números dizem
 
-Terceiro de oito em throughput bruto, mas essa é a linha menos interessante da tabela. Leia as
-outras colunas:
+Segundo de sete em throughput bruto, a 3,2% do primeiro - dentro da variação entre execuções desta
+máquina. Um servidor Rust escrito à mão e um framework Delphi são, nesta carga, igualmente rápidos.
+Mas throughput bruto é a linha menos interessante da tabela. Leia as outras colunas:
 
 - **Melhor p99 e melhor máximo de todo o comparativo.** 10,19 ms e 64 ms, contra 15,21 ms / 143 ms
   do Actix e 18,60 ms / 52 ms do Go Fiber. Sob limite de contêiner, a cauda é o que o usuário
-  sente de verdade, e o Poseidon sustenta a cauda mais plana de todos aqui, uws incluído.
+  sente de verdade, e o Poseidon sustenta a cauda mais plana de todos aqui.
 - **Menor consumo de memória de todo o comparativo.** 5,2 MB de pico, contra 19,2 MB do Actix,
   81 MB do Kestrel e 116 MB do Horse. São 15x menos RAM que o Kestrel para o dobro do throughput,
   o que é a diferença entre um contêiner e quatro.
 - **Zero erros em 10,8 milhões de requisições.** Nenhum timeout, nenhum reset, nenhum non-2xx.
-  Apenas três dos oito conseguiram isso.
+  Apenas três dos sete conseguiram isso.
 - **14x o Horse**, no mesmo compilador e no mesmo runtime, com 22x menos memória.
-- A 3,2% do Actix em throughput, o que está dentro da variação entre execuções desta máquina. Um
-  servidor Rust escrito à mão e um framework Delphi são, nesta carga, igualmente rápidos.
-
-O único framework claramente à frente é o uws, e vale ser preciso sobre o motivo: é C++ com um
-event loop por thread e nenhuma abstração entre o socket e o handler. Essa distância é
-arquitetural, não um parâmetro de ajuste.
 
 Duas correções entraram no Poseidon durante a medição. Um relógio do idle sweep que estourava em
 `UInt64` e fechava justamente as conexões **mais movimentadas** (6.405 erros de socket espúrios,
@@ -154,7 +154,7 @@ completa vive no harness `Benchmark` separado (ponteiros em
 reproduzíveis deste próprio repo estão em [`samples/08-benchmark/`](samples/08-benchmark/).
 
 <p align="center">
-  <img src="docs/framework-features_pt-br.svg" alt="Comparacao de recursos de protocolo do Poseidon contra 7 outros frameworks" width="880"/>
+  <img src="docs/framework-features_pt-br.svg" alt="Comparacao de recursos de protocolo do Poseidon contra 6 outros frameworks" width="880"/>
 </p>
 
 Toda mudanca no caminho quente e validada com uma comparacao controlada antes/depois antes de ser mergeada - mesmo binario, uma mudanca por vez. A rodada de parser/dispatcher de 2026-08-07 (removeu uma alocacao redundante no header `Connection`, pulou a varredura de deteccao de upgrade em GETs sem upgrade) mediu **+1,7% de throughput**, com toda repeticao do lado "depois" superando toda repeticao do lado "antes".

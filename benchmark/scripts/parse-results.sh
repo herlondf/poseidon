@@ -8,11 +8,10 @@ ROOT="$(cd "$HERE/.." && pwd)"
 RAW="$ROOT/results/raw"
 
 FRAMEWORKS=("$@")
-[ ${#FRAMEWORKS[@]} -eq 0 ] && FRAMEWORKS=(uws actix poseidon-v2 gofiber mormot2 nginx horse-epoll kestrel)
+[ ${#FRAMEWORKS[@]} -eq 0 ] && FRAMEWORKS=(actix poseidon-v2 gofiber mormot2 nginx horse-epoll kestrel)
 
 display_name() {
   case "$1" in
-    uws) echo "uws" ;;
     actix) echo "Actix" ;;
     poseidon-v2) echo "Poseidon v2" ;;
     gofiber) echo "Go Fiber" ;;
@@ -26,7 +25,6 @@ display_name() {
 
 display_tech() {
   case "$1" in
-    uws) echo "C++" ;;
     actix) echo "Rust" ;;
     poseidon-v2) echo "Object Pascal" ;;
     gofiber) echo "Go" ;;

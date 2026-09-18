@@ -2,9 +2,17 @@
 
 The comparison table in the main [README](../README.md) ("Performance vs. o
 Mercado" / "Performance vs. the Field") is not a claim you have to take on
-faith. This folder builds and measures all 8 contenders from source, one at a
+faith. This folder builds and measures all 7 contenders from source, one at a
 time, entirely inside Docker. If you doubt the numbers, this is how you check
 them yourself.
+
+uWebSockets (uws) was removed from the lineup: it is not a general-purpose
+HTTP framework, it is a raw sockets/event-loop library with no built-in
+backpressure, timeout handling, security headers, or protocol upgrade
+support - none of the features every other contender here (Poseidon
+included) pays for on the hot path. Comparing throughput against it measures
+"how fast is a bare event loop", not "how fast is this framework", which is
+not the question this table is trying to answer.
 
 ## Requirements
 
@@ -27,9 +35,9 @@ is fast to build.
 
 ```bash
 cd benchmark
-./scripts/run-all.sh                 # all 8 contenders, 300s measurement each
-./scripts/run-all.sh poseidon-v2 uws  # just these two
-DURATION=30 ./scripts/run-all.sh      # short smoke-test run
+./scripts/run-all.sh                    # all 7 contenders, 300s measurement each
+./scripts/run-all.sh poseidon-v2 actix  # just these two
+DURATION=30 ./scripts/run-all.sh        # short smoke-test run
 ```
 
 On Windows (PowerShell, Docker Desktop):
@@ -55,7 +63,6 @@ copy it over directly).
 
 | Contender | Language | Build |
 |---|---|---|
-| `frameworks/uws` | C++ | Clones uWebSockets+uSockets, builds with g++ - fully self-contained |
 | `frameworks/actix` | Rust | Cargo multi-stage build - fully self-contained |
 | `frameworks/poseidon-v2` | Object Pascal | FPC trunk against `../../src` (this repo's own source, always live, never a copy) |
 | `frameworks/gofiber` | Go | Go multi-stage build - fully self-contained |

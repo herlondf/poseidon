@@ -9,7 +9,7 @@
 #
 # Usage:
 #   ./run-all.sh                      # all frameworks, 300s each (default)
-#   ./run-all.sh poseidon-v2 uws      # only these two
+#   ./run-all.sh poseidon-v2 actix    # only these two
 #   DURATION=60 ./run-all.sh          # shorter runs (smoke-test the script)
 #
 # Output: benchmark/results/raw/<framework>.log (full wrk output) and
@@ -49,7 +49,7 @@ fi
 CPUSET_SERVER="${CPUSET_SERVER:-}"
 CPUSET_LOADGEN="${CPUSET_LOADGEN:-}"
 
-ALL_FRAMEWORKS=(uws actix poseidon-v2 gofiber mormot2 nginx horse-epoll kestrel)
+ALL_FRAMEWORKS=(actix poseidon-v2 gofiber mormot2 nginx horse-epoll kestrel)
 FRAMEWORKS=("$@")
 [ ${#FRAMEWORKS[@]} -eq 0 ] && FRAMEWORKS=("${ALL_FRAMEWORKS[@]}")
 
