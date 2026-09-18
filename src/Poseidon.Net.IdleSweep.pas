@@ -22,6 +22,20 @@ uses
   Poseidon.Net.Pool.Buffer,
   Poseidon.Net.IO;
 
+// perf-loop (2026-09-17): TThread.GetTickCount64 was measured live (strace
+// under real load, debian-bench) making a REAL syscall under FPC/Linux -
+// NOT the vDSO fast path some other call sites' comments assume (true for
+// Delphi's RTL, not confirmed for FPC's). ~1-2 calls/request through
+// LConn.LastActivityTick (_ProcessRecv's hot path) showed up as ~160k
+// gettimeofday+clock_gettime syscalls in a 10s/~200k-request window - a
+// real, measurable per-request cost. IdleTimeoutMs/MaxHandlerRunMs/etc. all
+// operate at multi-second granularity, so a tick cached at 1s resolution
+// (this sweep thread's own interval - "rides this thread" like the
+// heartbeat above) is accurate enough: callers that used to pay a syscall
+// per request now do a single unsynchronized Int64 read instead. A stale
+// read by up to one sweep interval is the accepted tradeoff, not a bug.
+function PoseidonCoarseTickMs: Int64;
+
 type
   TIdleSweepManager = class
   private
@@ -91,6 +105,17 @@ const
   // never reaches.
   CForceCloseGraceMs = 5000;
 
+var
+  // Backing store for PoseidonCoarseTickMs (see that function's comment).
+  // Seeded in the initialization section so a reader before the first sweep
+  // tick still gets a real tick, not a stale 0.
+  GCoarseTickMs: Int64;
+
+function PoseidonCoarseTickMs: Int64;
+begin
+  Result := TInterlocked.Read(GCoarseTickMs);
+end;
+
 constructor TIdleSweepManager.Create(AConnManager: TConnectionManager;
   AIOBackend: IIOBackend; AActive: PBoolean);
 begin
@@ -148,10 +173,17 @@ begin
     FStopEvent.WaitFor(CSweepIntervalMs);
     if not FActive^ then Break;
 
+    // One real tick read per sweep pass (~1/s), shared by the heartbeat check,
+    // the connection walk below, and PoseidonCoarseTickMs's cache - see that
+    // function's comment for why hot-path callers read this instead of
+    // calling TThread.GetTickCount64 themselves.
+    LNowTick := TThread.GetTickCount64;
+    TInterlocked.Exchange(GCoarseTickMs, Int64(LNowTick));
+
     if (FHeartbeatMs > 0) and Assigned(FOnHeartbeat) and
-       (TThread.GetTickCount64 - LLastBeat >= UInt64(FHeartbeatMs)) then
+       (LNowTick - LLastBeat >= UInt64(FHeartbeatMs)) then
     begin
-      LLastBeat := TThread.GetTickCount64;
+      LLastBeat := LNowTick;
       // A logging failure must never kill the sweep; it is what stops fds from
       // leaking.
       try FOnHeartbeat(); except on E: Exception do; end;
@@ -161,7 +193,6 @@ begin
        (FHeaderTimeoutMs <= 0) then Continue;
 
     LSnap := FConnManager.Snapshot;
-    LNowTick := TThread.GetTickCount64;
     for I := 0 to High(LSnap) do
     begin
       LConn := TNativeConn(LSnap[I]);
@@ -295,5 +326,8 @@ begin
     end;
   end;
 end;
+
+initialization
+  GCoarseTickMs := TThread.GetTickCount64;
 
 end.

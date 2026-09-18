@@ -15,12 +15,13 @@ uses
   {$IFDEF FPC}
   SysUtils,
   Classes,
-  Generics.Collections;
+  Generics.Collections,
   {$ELSE}
   System.SysUtils,
   System.Classes,
-  System.Generics.Collections;
+  System.Generics.Collections,
   {$ENDIF}
+  Poseidon.Net.IdleSweep;
 
 // Assembles a complete HTTP/1.1 response into a single TBytes:
 //   Status-Line CRLF
@@ -229,7 +230,11 @@ begin
   // #M15: gate on the cheap monotonic tick FIRST - the previous code paid the
   // Now() + TTimeZone.Local.ToUniversalTime conversion on every response before
   // the cache check. Recompute (incl. the timezone conversion) at most once/sec.
-  LNowTick := TThread.GetTickCount64;
+  // perf-loop (2026-09-17): the gate itself used to call TThread.GetTickCount64
+  // on every response - a real syscall under FPC/Linux (see PoseidonCoarseTickMs,
+  // Poseidon.Net.IdleSweep). This cache already tolerates up to 1s of staleness
+  // by design, so PoseidonCoarseTickMs's own ~1s staleness costs nothing extra.
+  LNowTick := PoseidonCoarseTickMs;
   if (GDateCacheStr <> '') and (LNowTick - GDateCacheTick < 1000) then
     Exit(GDateCacheStr);
   LUtc := TTimeZone.Local.ToUniversalTime(Now);

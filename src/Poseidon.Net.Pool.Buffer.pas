@@ -71,6 +71,9 @@ type
     // because BOTH the thread-local cache and the global Tier 2 stack were
     // empty - i.e. a response that should have been pooled, wasn't.
     class function Tier2ExhaustedCount: Int64; static;
+    // Same counters, Tier 0 (8KB) and Tier 1 (64KB).
+    class function Tier0ExhaustedCount: Int64; static;
+    class function Tier1ExhaustedCount: Int64; static;
     // #245: requests for buffers > 512 KB (Tier 2's ceiling) always bypass
     // the pool by design (see the unit header) - this is expected, not a
     // sizing problem, but worth seeing alongside Tier2ExhaustedCount to
@@ -136,8 +139,14 @@ var
   GTier0: TStack<TBytes>;
   GTier1: TStack<TBytes>;
   GTier2: TStack<TBytes>;
-  // #245: TInterlocked-protected, read via TBufferPool.Tier2ExhaustedCount/
+  // #245: TInterlocked-protected, read via TBufferPool.Tier0/1/2ExhaustedCount/
   // OversizedCount - see those methods' comments for what each counts.
+  // Tier0/Tier1 counters added during the perf-tuning loop (2026-09-17
+  // night) to test tier exhaustion hypotheses on payload shapes #245 never
+  // measured (that fix targeted a ~100KB/Tier2 payload; the "Performance vs.
+  // the Field" benchmark's json-large is 62KB/Tier1).
+  GTier0ExhaustedCount: Int64 = 0;
+  GTier1ExhaustedCount: Int64 = 0;
   GTier2ExhaustedCount: Int64 = 0;
   GOversizedCount: Int64 = 0;
 {$IFDEF FPC}
@@ -164,12 +173,14 @@ begin
   end;
   if not LHave then
   begin
-    // #245: only Tier 2's exhaustion is what the issue asks about (16 global
-    // slots shared by every thread, for the tier that matters most - large
-    // responses). ABufSize is one of the three distinct tier size constants,
-    // so this comparison unambiguously identifies which tier missed.
+    // ABufSize is one of the three distinct tier size constants, so this
+    // comparison unambiguously identifies which tier missed.
     if ABufSize = POOL_TIER2_SIZE then
-      TInterlocked.Increment(GTier2ExhaustedCount);
+      TInterlocked.Increment(GTier2ExhaustedCount)
+    else if ABufSize = POOL_TIER1_SIZE then
+      TInterlocked.Increment(GTier1ExhaustedCount)
+    else if ABufSize = POOL_TIER0_SIZE then
+      TInterlocked.Increment(GTier0ExhaustedCount);
     SetLength(Result, ABufSize);
     _HintHugePage(Result);
   end;
@@ -301,6 +312,16 @@ end;
 class function TBufferPool.Tier2ExhaustedCount: Int64;
 begin
   Result := TInterlocked.Read(GTier2ExhaustedCount);
+end;
+
+class function TBufferPool.Tier0ExhaustedCount: Int64;
+begin
+  Result := TInterlocked.Read(GTier0ExhaustedCount);
+end;
+
+class function TBufferPool.Tier1ExhaustedCount: Int64;
+begin
+  Result := TInterlocked.Read(GTier1ExhaustedCount);
 end;
 
 class function TBufferPool.OversizedCount: Int64;

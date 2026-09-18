@@ -1173,6 +1173,9 @@ type
 procedure TFPCDispatchJob.Execute;
 begin
   try
+    // perf-loop (2026-09-17): reverted to a real tick - see the comment on
+    // LConn.LastActivityTick in _ProcessRecv for why the coarse cache is
+    // unsafe for this field.
     TNativeConn(Conn).LastActivityTick := TThread.GetTickCount64;
     TNativeConn(Conn).Lock.Enter;
     try
@@ -1285,6 +1288,9 @@ begin
   // watchdog check for as long as the stuck handler ran.
   if FSyncDispatch then
   begin
+    // perf-loop (2026-09-17): reverted to a real tick - see the comment on
+    // LConn.LastActivityTick in _ProcessRecv for why the coarse cache is
+    // unsafe for this field.
     TNativeConn(AConn).LastActivityTick := TThread.GetTickCount64;
     TInterlocked.Increment(TNativeConn(AConn).InFlightPool);
     // #248-investigation follow-up (found live on debian-bench, 2026-09-16):
@@ -1333,6 +1339,9 @@ begin
     procedure
     begin
       try
+        // perf-loop (2026-09-17): reverted to a real tick - see the comment on
+        // LConn.LastActivityTick in _ProcessRecv for why the coarse cache is
+        // unsafe for this field.
         TNativeConn(AConn).LastActivityTick := TThread.GetTickCount64;  // reset idle-clock at dequeue time
         // #213: serialize the whole dispatch (reads AccumBuf, mutates H2Conn,
         // calls SSL_Write) against the IO thread's _ProcessRecvSSL on this conn.
@@ -1370,7 +1379,16 @@ begin
     LConn.Lock.Enter;
     try
       try
-        LConn.LastActivityTick := TThread.GetTickCount64;  // vDSO on Linux - no syscall
+        // perf-loop (2026-09-17): tried PoseidonCoarseTickMs (1s-resolution
+        // cache) here, reverted - TPoseidonHttpServerIdleTests.IdleTimeout_
+        // ActiveConnection_NotClosed (IdleTimeoutMs=500, i.e. below the sweep's
+        // own 1s refresh) failed live: a request can get stamped with a tick
+        // already up to ~1s stale, so LIdle can exceed a sub-second
+        // IdleTimeoutMs even on a connection with continuous real traffic.
+        // LastActivityTick feeds a user-configurable timeout, so it needs
+        // real per-request precision - unlike the HTTP-date cache gate below,
+        // which was already designed to tolerate 1s staleness on its own.
+        LConn.LastActivityTick := TThread.GetTickCount64;
         LAborted := False;
         if LConn.SSLHandle <> nil then
           _ProcessRecvSSL(AConn, ABuf, ALen, LAborted)
