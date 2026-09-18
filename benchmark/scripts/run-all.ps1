@@ -15,7 +15,13 @@ param(
   [int]$Threads = 4,
   [int]$Conns = 200,
   [int]$WarmupS = 5,
-  [int]$CooldownS = 5
+  [int]$CooldownS = 5,
+  # CPU isolation (see run-all.sh for the full rationale): pin server and
+  # load generator to disjoint cores so neither's scheduler noise touches the
+  # other. $null (default) auto-picks a split on a >=4-core host; pass "" to
+  # force the old unpinned behavior.
+  [string]$CpusetServer = $null,
+  [string]$CpusetLoadgen = $null
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +31,13 @@ $Repo = Resolve-Path (Join-Path $Root '..')
 $Results = Join-Path $Root 'results'
 $Raw = Join-Path $Results 'raw'
 $Net = 'bench-net'
+
+if ($null -eq $CpusetServer -and $null -eq $CpusetLoadgen -and [Environment]::ProcessorCount -ge 4) {
+  $CpusetServer = "0,1"
+  $CpusetLoadgen = "2,3"
+}
+if ($null -eq $CpusetServer) { $CpusetServer = "" }
+if ($null -eq $CpusetLoadgen) { $CpusetLoadgen = "" }
 
 $AllFrameworks = @('uws','actix','poseidon-v2','gofiber','mormot2','nginx','horse-epoll','kestrel')
 if ($Frameworks.Count -eq 0) { $Frameworks = $AllFrameworks }
@@ -80,11 +93,16 @@ function Run-One([string]$Name) {
   $container = 'bench-target'
   docker rm -f $container *> $null
 
-  Log "[$Name] starting container (--cpus=$Cpus --memory=$Memory)"
+  $serverCpusetArgs = @()
+  if ($CpusetServer -ne "") { $serverCpusetArgs = @("--cpuset-cpus=$CpusetServer") }
+  $loadgenCpusetArgs = @()
+  if ($CpusetLoadgen -ne "") { $loadgenCpusetArgs = @("--cpuset-cpus=$CpusetLoadgen") }
+
+  Log "[$Name] starting container (--cpus=$Cpus --memory=$Memory$(if ($CpusetServer -ne '') { " --cpuset-cpus=$CpusetServer" }))"
   # seccomp=unconfined: Docker's default profile blocks io_uring_setup/enter,
   # silently forcing Poseidon down to epoll - applied to every contender
   # uniformly, not just Poseidon (see run-all.sh for the confirmed repro).
-  docker run -d --name $container --network $Net --cpus $Cpus --memory $Memory --security-opt seccomp=unconfined "bench-$Name" | Out-Null
+  docker run -d --name $container --network $Net --cpus $Cpus --memory $Memory @serverCpusetArgs --security-opt seccomp=unconfined "bench-$Name" | Out-Null
   if ($LASTEXITCODE -ne 0) { Log "[$Name] docker run FAILED"; return }
 
   Log "[$Name] waiting for readiness..."
@@ -102,11 +120,11 @@ function Run-One([string]$Name) {
   }
 
   Log "[$Name] warmup ${WarmupS}s..."
-  docker run --rm --network $Net poseidon-bench/loadgen -t $Threads -c $Conns -d "${WarmupS}s" -s /bench.lua "http://${container}:8080" *> $null
+  docker run --rm --network $Net @loadgenCpusetArgs poseidon-bench/loadgen -t $Threads -c $Conns -d "${WarmupS}s" -s /bench.lua "http://${container}:8080" *> $null
 
-  Log "[$Name] measuring for ${Duration}s (t=$Threads c=$Conns)..."
+  Log "[$Name] measuring for ${Duration}s (t=$Threads c=$Conns)...$(if ($CpusetLoadgen -ne '') { " [loadgen pinned to $CpusetLoadgen]" })"
   $log = Join-Path $Raw "$Name.log"
-  docker run --rm --network $Net poseidon-bench/loadgen -t $Threads -c $Conns -d "${Duration}s" --latency -s /bench.lua "http://${container}:8080" *> $log
+  docker run --rm --network $Net @loadgenCpusetArgs poseidon-bench/loadgen -t $Threads -c $Conns -d "${Duration}s" --latency -s /bench.lua "http://${container}:8080" *> $log
 
   Log "[$Name] tearing down"
   docker rm -f $container *> $null

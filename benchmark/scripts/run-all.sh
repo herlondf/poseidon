@@ -30,6 +30,25 @@ CONNS="${CONNS:-200}"
 WARMUP_S="${WARMUP_S:-5}"
 COOLDOWN_S="${COOLDOWN_S:-5}"
 
+# CPU isolation (README's own methodology: server and load generator pinned to
+# disjoint physical cores, so neither's scheduling noise touches the other -
+# see "Performance vs. o Mercado" for the original 2-cores-server /
+# 4-cores-loadgen split on a 16-thread host). Without this, both containers
+# share the same CGroup CPU quota pool with no cpuset, so the kernel scheduler
+# is free to bounce either one's threads across the other's cores - on a small
+# host this dominates run-to-run variance and can hide or fake a real
+# regression. Auto-picks a split on a >=4-core host; leaves unpinned (this
+# script's original behavior) below that, since there is no disjoint split to
+# give. Override with CPUSET_SERVER/CPUSET_LOADGEN (e.g. "0,1") for a
+# different topology, or set both to "" to force the old unpinned behavior.
+NPROC="$(nproc 2>/dev/null || echo 1)"
+if [ -z "${CPUSET_SERVER+x}" ] && [ -z "${CPUSET_LOADGEN+x}" ] && [ "$NPROC" -ge 4 ]; then
+  CPUSET_SERVER="0,1"
+  CPUSET_LOADGEN="2,3"
+fi
+CPUSET_SERVER="${CPUSET_SERVER:-}"
+CPUSET_LOADGEN="${CPUSET_LOADGEN:-}"
+
 ALL_FRAMEWORKS=(uws actix poseidon-v2 gofiber mormot2 nginx horse-epoll kestrel)
 FRAMEWORKS=("$@")
 [ ${#FRAMEWORKS[@]} -eq 0 ] && FRAMEWORKS=("${ALL_FRAMEWORKS[@]}")
@@ -89,7 +108,12 @@ run_one() {
 
   docker rm -f "$container" >/dev/null 2>&1
 
-  log "[$name] starting container (--cpus=$CPUS --memory=$MEMORY)"
+  local server_cpuset_args=()
+  [ -n "$CPUSET_SERVER" ] && server_cpuset_args=(--cpuset-cpus="$CPUSET_SERVER")
+  local loadgen_cpuset_args=()
+  [ -n "$CPUSET_LOADGEN" ] && loadgen_cpuset_args=(--cpuset-cpus="$CPUSET_LOADGEN")
+
+  log "[$name] starting container (--cpus=$CPUS --memory=$MEMORY${CPUSET_SERVER:+ --cpuset-cpus=$CPUSET_SERVER})"
   # seccomp=unconfined: Docker's default seccomp profile blocks the
   # io_uring_setup/io_uring_enter syscalls, silently forcing Poseidon down to
   # its epoll fallback - confirmed live (backend=epoll under the default
@@ -97,7 +121,8 @@ run_one() {
   # contender uniformly, not just Poseidon, so no one gets an asymmetric
   # syscall restriction.
   docker run -d --name "$container" --network "$NET" \
-    --cpus="$CPUS" --memory="$MEMORY" --security-opt seccomp=unconfined \
+    --cpus="$CPUS" --memory="$MEMORY" "${server_cpuset_args[@]}" \
+    --security-opt seccomp=unconfined \
     "bench-$name" >/dev/null \
     || { log "[$name] docker run FAILED"; return 1; }
 
@@ -119,11 +144,11 @@ run_one() {
   fi
 
   log "[$name] warmup ${WARMUP_S}s..."
-  docker run --rm --network "$NET" poseidon-bench/loadgen \
+  docker run --rm --network "$NET" "${loadgen_cpuset_args[@]}" poseidon-bench/loadgen \
     -t"$THREADS" -c"$CONNS" -d"${WARMUP_S}s" -s /bench.lua "http://$container:8080" >/dev/null 2>&1
 
-  log "[$name] measuring for ${DURATION}s (t=$THREADS c=$CONNS)..."
-  docker run --rm --network "$NET" poseidon-bench/loadgen \
+  log "[$name] measuring for ${DURATION}s (t=$THREADS c=$CONNS)...${CPUSET_LOADGEN:+ [loadgen pinned to $CPUSET_LOADGEN]}"
+  docker run --rm --network "$NET" "${loadgen_cpuset_args[@]}" poseidon-bench/loadgen \
     -t"$THREADS" -c"$CONNS" -d"${DURATION}s" --latency -s /bench.lua "http://$container:8080" \
     > "$RAW/$name.log" 2>&1
 
