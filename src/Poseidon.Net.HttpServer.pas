@@ -1288,10 +1288,17 @@ begin
   // watchdog check for as long as the stuck handler ran.
   if FSyncDispatch then
   begin
-    // perf-loop (2026-09-17): reverted to a real tick - see the comment on
-    // LConn.LastActivityTick in _ProcessRecv for why the coarse cache is
-    // unsafe for this field.
-    TNativeConn(AConn).LastActivityTick := TThread.GetTickCount64;
+    // perf (compete-with-actix, 2026-09-18): no LastActivityTick stamp here
+    // anymore. strace comparison against Actix under identical load found
+    // Poseidon spending ~48% of wall time in clock_gettime/gettimeofday
+    // (Actix: zero calls to either) - _DispatchAccumBuf has exactly one
+    // caller, _ProcessRecv, which already stamps LastActivityTick
+    // microseconds earlier in the SAME synchronous call chain (no blocking
+    // operation runs between the two - just in-memory request parsing), so
+    // this second TThread.GetTickCount64 call re-wrote the same field to
+    // essentially the same value on every single request. If a second
+    // caller of this private method is ever added, re-examine whether it
+    // still reaches here immediately after its own fresh stamp.
     TInterlocked.Increment(TNativeConn(AConn).InFlightPool);
     // #248-investigation follow-up (found live on debian-bench, 2026-09-16):
     // FInFlightCount - the server-WIDE counter MaxQueueDepth and
@@ -1379,16 +1386,21 @@ begin
     LConn.Lock.Enter;
     try
       try
-        // perf-loop (2026-09-17): tried PoseidonCoarseTickMs (1s-resolution
-        // cache) here, reverted - TPoseidonHttpServerIdleTests.IdleTimeout_
-        // ActiveConnection_NotClosed (IdleTimeoutMs=500, i.e. below the sweep's
-        // own 1s refresh) failed live: a request can get stamped with a tick
-        // already up to ~1s stale, so LIdle can exceed a sub-second
-        // IdleTimeoutMs even on a connection with continuous real traffic.
-        // LastActivityTick feeds a user-configurable timeout, so it needs
-        // real per-request precision - unlike the HTTP-date cache gate below,
-        // which was already designed to tolerate 1s staleness on its own.
-        LConn.LastActivityTick := TThread.GetTickCount64;
+        // perf (compete-with-actix, 2026-09-18): PoseidonCoarseTickMs (1s
+        // cache) was tried and reverted here for good reason - see
+        // TPoseidonHttpServerIdleTests.IdleTimeout_ActiveConnection_NotClosed
+        // (IdleTimeoutMs=500). PoseidonRequestTick (Poseidon.Net.IdleSweep) is
+        // a different, safer mechanism: a per-thread tick refreshed once per
+        // I/O completion batch (io_uring: right after io_uring_enter returns,
+        // before draining CQEs), not once per second - staleness is bounded
+        // by how long a batch takes to process, which naturally shrinks to
+        // near-zero under the low-frequency traffic that sub-second
+        // IdleTimeoutMs configs care about, and only grows coarse under
+        // heavy load where it does not matter. Falls back to a fresh real
+        // TThread.GetTickCount64 on any thread/backend that never opted in
+        // (see PoseidonRequestTick's comment) - never less correct than
+        // before, only sometimes cheaper.
+        LConn.LastActivityTick := PoseidonRequestTick;
         LAborted := False;
         if LConn.SSLHandle <> nil then
           _ProcessRecvSSL(AConn, ABuf, ALen, LAborted)

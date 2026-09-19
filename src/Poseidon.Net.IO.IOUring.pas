@@ -64,7 +64,8 @@ uses
   {$ENDIF}
   Poseidon.Net.IO,
   Poseidon.Net.Connection,
-  Poseidon.Net.Pool.Buffer;
+  Poseidon.Net.Pool.Buffer,
+  Poseidon.Net.IdleSweep;
 
 type
   TIOUringBackend = class;  // forward - TUringRing holds a back-pointer
@@ -1015,6 +1016,13 @@ begin
       FPendingSQEs := 0;
       FSQLock.Release;
       _io_uring_enter(FRingFd, UInt32(LToSubmit), 1, IORING_ENTER_GETEVENTS);
+
+      // perf (compete-with-actix, 2026-09-18): one real tick per completion
+      // batch, cached for PoseidonRequestTick (Poseidon.Net.IdleSweep) - see
+      // that function's comment. This call just blocked until >=1 completion
+      // was ready, so "now" is accurate for every CQE the loop is about to
+      // drain below.
+      SetPoseidonRequestTick(TThread.GetTickCount64);
 
       // Re-arm multishot accept if a previous drain's re-arm (in _ProcessCQE)
       // found the SQ full and gave up (#224 - silent, permanent loss of

@@ -36,6 +36,37 @@ uses
 // read by up to one sweep interval is the accepted tradeoff, not a bug.
 function PoseidonCoarseTickMs: Int64;
 
+// perf (compete-with-actix, 2026-09-18): PoseidonCoarseTickMs's 1s cache is
+// too coarse for LastActivityTick specifically - IdleTimeout_
+// ActiveConnection_NotClosed (IdleTimeoutMs=500) proved a stale-by-1s read
+// can look idle even on a connection with continuous real traffic. But a
+// direct strace comparison against Actix under identical load found
+// Poseidon spending ~48% of wall time in clock_gettime/gettimeofday where
+// Actix spent none - the per-request TThread.GetTickCount64 in
+// _ProcessRecv is real, measured cost, not a false lead.
+//
+// This is the safe middle ground: a THREAD-LOCAL tick refreshed once per
+// I/O completion BATCH, not once per second. An io_uring completion
+// thread's loop is: io_uring_enter(GETEVENTS) [blocks until >=1 completion
+// is ready] -> drain every ready CQE -> repeat. Stamping the tick right
+// after io_uring_enter returns, before draining, means every request in
+// that batch reads the SAME tick - staleness bounded by how long the batch
+// actually took to process (microseconds under load), not a fixed
+// interval. Under the exact scenario the failing test cared about (one
+// request every 200ms, nothing else happening on that connection),
+// io_uring_enter blocks for the whole gap and returns with exactly one
+// completion, so the tick refreshes essentially every request anyway -
+// this does NOT reproduce the 1s-cache bug.
+//
+// GRequestTickSet defaults False on any thread that never calls
+// SetPoseidonRequestTick (every backend/thread that hasn't opted in - see
+// each call site of SetPoseidonRequestTick for which ones have), so
+// PoseidonRequestTick transparently falls back to a fresh real tick there:
+// this is purely an opt-in fast path, never a behavior change for a caller
+// that doesn't wire it in.
+function PoseidonRequestTick: Int64;
+procedure SetPoseidonRequestTick(ATick: Int64);
+
 type
   TIdleSweepManager = class
   private
@@ -114,6 +145,24 @@ var
 function PoseidonCoarseTickMs: Int64;
 begin
   Result := TInterlocked.Read(GCoarseTickMs);
+end;
+
+threadvar
+  GRequestTickSet: Boolean;
+  GRequestTick: Int64;
+
+function PoseidonRequestTick: Int64;
+begin
+  if GRequestTickSet then
+    Result := GRequestTick
+  else
+    Result := TThread.GetTickCount64;
+end;
+
+procedure SetPoseidonRequestTick(ATick: Int64);
+begin
+  GRequestTick := ATick;
+  GRequestTickSet := True;
 end;
 
 constructor TIdleSweepManager.Create(AConnManager: TConnectionManager;
