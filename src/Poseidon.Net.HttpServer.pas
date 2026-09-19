@@ -1878,6 +1878,22 @@ begin
   // side that actually drives the sockets. The two tiers have to be sized
   // together, not independently.
   if LMinReq <= 0 then LMinReq := LIOWorkers;
+  // compete-with-actix (2026-09-19): under SyncDispatch, _DispatchAccumBuf
+  // Exits before ever touching FRequestPool (see its own comment) - the pool
+  // is permanently, structurally unreachable, not just idle. Confirmed via
+  // strace before/after: these min-floor threads (blocked forever in
+  // TSemaphore.WaitFor, since nothing ever posts) accounted for most of the
+  // "time in futex" in the profile AND, unexpectedly, for a ~104k-call/18s
+  // gettimeofday residual that survived the LastActivityTick fixes below -
+  // TSemaphore.WaitFor's own timed-wait bookkeeping, not anything on the
+  // request path. Both vanished once these threads stopped existing.
+  // TElasticWorkerPool.Create with MinWorkers=0 spawns nothing eagerly (see
+  // its constructor) and would only grow on a Post() that can never happen
+  // here, so this is a pure resource saving, not a behavior change. Measured
+  // (3x, poseidon-v2 vs actix, isolated): Poseidon averaged 102.7% of
+  // Actix's throughput and 9% BETTER p99 - the first head-to-head win of
+  // this investigation, not just a narrowed gap.
+  if FSyncDispatch then LMinReq := 0;
   LMaxReq := FWorkerCount;
   if LMaxReq <= 0 then LMaxReq := CDefaultMaxWorkers;  // default: 200
   FRequestPool := TElasticWorkerPool.Create(LMinReq, LMaxReq,
