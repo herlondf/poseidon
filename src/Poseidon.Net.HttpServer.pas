@@ -1815,6 +1815,7 @@ var
   LMinReq:     Integer;
   LMaxReq:     Integer;
   LAcceptN:    Integer;
+  LLoggedAcceptN: Integer;
   LDispatchMode: string;
   LBuildId: string;
 begin
@@ -1897,10 +1898,26 @@ begin
     LDispatchMode := 'worker-pool';
   LBuildId := TPoseidonDiagnostics.BuildId;
   if LBuildId = '' then LBuildId := '(unknown)';
+  // compete-with-actix investigation (2026-09-18/19): LAcceptN (from
+  // FPerCoreAccept) is what the CALLER asked for, but verified empirically
+  // (/proc/net/tcp showing N distinct SO_REUSEPORT listen sockets on the
+  // same port) and by reading the source that BOTH Linux backends
+  // (Poseidon.Net.IO.Epoll/IOUring) ignore the AAcceptThreads argument
+  // entirely and always shard per-core using AWorkerCount (= LIOWorkers) -
+  // so this log line used to claim "accept_threads=1" while 2+ SO_REUSEPORT
+  // rings were actually running. LLoggedAcceptN is ONLY for this message -
+  // LAcceptN itself is untouched below, still the argument StartListening
+  // receives, in case a backend ever starts honoring it. Windows/IOCP
+  // genuinely uses one shared listen socket regardless of this argument, so
+  // its face keeps reporting the (currently inert everywhere) config value.
+  LLoggedAcceptN := LAcceptN;
+  {$IFNDEF MSWINDOWS}
+  LLoggedAcceptN := LIOWorkers;
+  {$ENDIF}
   _Log(llInfo, Format(
     '[startup] backend=%s io_workers=%d accept_threads=%d ' +
     'req_pool=%d..%d dispatch=%s idle_timeout=%dms crash_handler=%s build=%s',
-    [FBackendName, LIOWorkers, LAcceptN, LMinReq, LMaxReq, LDispatchMode,
+    [FBackendName, LIOWorkers, LLoggedAcceptN, LMinReq, LMaxReq, LDispatchMode,
      FIdleTimeoutMs,
      BoolToStr(TPoseidonDiagnostics.CrashHandlerInstalled, True), LBuildId]));
 
