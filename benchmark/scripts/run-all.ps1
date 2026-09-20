@@ -39,7 +39,7 @@ if ($null -eq $CpusetServer -and $null -eq $CpusetLoadgen -and [Environment]::Pr
 if ($null -eq $CpusetServer) { $CpusetServer = "" }
 if ($null -eq $CpusetLoadgen) { $CpusetLoadgen = "" }
 
-$AllFrameworks = @('actix','poseidon-v2','gofiber','mormot2','nginx','horse-epoll','kestrel')
+$AllFrameworks = @('actix','poseidon-v2','gofiber','mormot2','nginx','horse-epoll','kestrel','express','fastapi','django','rails','laravel','spring-boot')
 if ($Frameworks.Count -eq 0) { $Frameworks = $AllFrameworks }
 
 New-Item -ItemType Directory -Force -Path $Raw | Out-Null

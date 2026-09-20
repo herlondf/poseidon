@@ -49,7 +49,7 @@ fi
 CPUSET_SERVER="${CPUSET_SERVER:-}"
 CPUSET_LOADGEN="${CPUSET_LOADGEN:-}"
 
-ALL_FRAMEWORKS=(actix poseidon-v2 gofiber mormot2 nginx horse-epoll kestrel)
+ALL_FRAMEWORKS=(actix poseidon-v2 gofiber mormot2 nginx horse-epoll kestrel express fastapi django rails laravel spring-boot)
 FRAMEWORKS=("$@")
 [ ${#FRAMEWORKS[@]} -eq 0 ] && FRAMEWORKS=("${ALL_FRAMEWORKS[@]}")
 
@@ -82,8 +82,11 @@ build_one() {
     return 1
   fi
   # The 3 Pascal contenders build from Poseidon's own src/ (repo root as
-  # context); the other 5 are fully self-contained in their own directory
-  # (original upstream design, unchanged) - each needs its OWN dir as context.
+  # context); every other contender is fully self-contained in its own
+  # directory (its actual framework - express/rails/laravel/spring-boot/
+  # fastapi/django/actix/gofiber/nginx/kestrel/horse-epoll's non-Poseidon-src
+  # dependency - is resolved fresh from its own package registry at build
+  # time, never vendored into this repo) - each needs its OWN dir as context.
   local context="$dir"
   case "$name" in
     poseidon-v2|mormot2|horse-epoll) context="$REPO" ;;

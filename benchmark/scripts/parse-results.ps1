@@ -9,16 +9,20 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Resolve-Path (Join-Path $Here '..')
 $Raw = Join-Path $Root 'results\raw'
 
-$AllFrameworks = @('actix','poseidon-v2','gofiber','mormot2','nginx','horse-epoll','kestrel')
+$AllFrameworks = @('actix','poseidon-v2','gofiber','mormot2','nginx','horse-epoll','kestrel','express','fastapi','django','rails','laravel','spring-boot')
 if ($Frameworks.Count -eq 0) { $Frameworks = $AllFrameworks }
 
 $displayName = @{
   actix = 'Actix'; 'poseidon-v2' = 'Poseidon v2'; gofiber = 'Go Fiber'
   mormot2 = 'mORMot2'; nginx = 'nginx'; 'horse-epoll' = 'Horse'; kestrel = 'Kestrel'
+  express = 'Express'; fastapi = 'FastAPI'; django = 'Django'; rails = 'Rails (Puma)'
+  laravel = 'Laravel'; 'spring-boot' = 'Spring Boot'
 }
 $displayTech = @{
   actix = 'Rust'; 'poseidon-v2' = 'Object Pascal'; gofiber = 'Go'
   mormot2 = 'Object Pascal'; nginx = 'C'; 'horse-epoll' = 'Object Pascal'; kestrel = 'C#/.NET'
+  express = 'Node.js'; fastapi = 'Python'; django = 'Python'; rails = 'Ruby'
+  laravel = 'PHP'; 'spring-boot' = 'Java'
 }
 
 $rows = @()

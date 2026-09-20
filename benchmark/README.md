@@ -2,9 +2,9 @@
 
 The comparison table in the main [README](../README.md) ("Performance vs. o
 Mercado" / "Performance vs. the Field") is not a claim you have to take on
-faith. This folder builds and measures all 7 contenders from source, one at a
-time, entirely inside Docker. If you doubt the numbers, this is how you check
-them yourself.
+faith. This folder builds and measures all 13 contenders from source, one at
+a time, entirely inside Docker. If you doubt the numbers, this is how you
+check them yourself.
 
 uWebSockets (uws) was removed from the lineup: it is not a general-purpose
 HTTP framework, it is a raw sockets/event-loop library with no built-in
@@ -35,7 +35,7 @@ is fast to build.
 
 ```bash
 cd benchmark
-./scripts/run-all.sh                    # all 7 contenders, 300s measurement each
+./scripts/run-all.sh                    # all 13 contenders, 300s measurement each
 ./scripts/run-all.sh poseidon-v2 actix  # just these two
 DURATION=30 ./scripts/run-all.sh        # short smoke-test run
 ```
@@ -70,6 +70,21 @@ copy it over directly).
 | `frameworks/nginx` | C | Official nginx image + static config - the "hardware ceiling" reference, not an app framework |
 | `frameworks/horse-epoll` | Object Pascal | FPC trunk, clones the public `HashLoad/horse` upstream fresh (latest commit - the epoll provider may not be in a tagged release yet) |
 | `frameworks/kestrel` | C#/.NET | dotnet SDK multi-stage build - fully self-contained |
+| `frameworks/express` | Node.js | `npm install` resolves express from the registry at build time |
+| `frameworks/fastapi` | Python | `pip install` resolves fastapi+uvicorn from PyPI at build time |
+| `frameworks/django` | Python | `pip install` resolves django+gunicorn from PyPI; `django-admin startproject` generates the skeleton at build time |
+| `frameworks/rails` | Ruby | `gem install rails` + `rails new --api`; served by Puma, Rails' own default app server |
+| `frameworks/laravel` | PHP | `composer create-project laravel/laravel`; served by PHP-FPM + nginx (LEMP) |
+| `frameworks/spring-boot` | Java | Maven multi-stage build against `spring-boot-starter-web` (embedded Tomcat), resolved from Maven Central at build time |
+
+None of these six vendor their framework into this repo - each Dockerfile
+downloads/generates the real framework fresh at build time (`npm install`,
+`pip install`, `gem install`+`rails new`, `composer create-project`, Maven
+dependency resolution) from its own package registry, exactly like Actix's
+`cargo build` and Go Fiber's `go mod download` already did for the original
+seven. Only the handful of small files implementing the three endpoints
+(a route file, a controller, a `main.py` - a few dozen lines each) are
+committed here, copied into the downloaded/generated project structure.
 
 `docker/fpc-trunk/` is the shared FPC 3.3.1 (trunk) base image the three
 Pascal contenders build on top of.
@@ -102,6 +117,22 @@ target, so the benchmark truly needs nothing beyond Docker on the host.
 - All three Pascal contenders compile with the **same** FPC trunk toolchain
   and the **same** optimization flags (`-O2`, Delphi-compatible mode) - the
   point of the shared base image is exactly to keep that tier apples-to-apples.
+- **Express, FastAPI, Django, Rails and Spring Boot run each framework's own
+  standard production server** (Node's own `http` server underneath Express,
+  uvicorn, gunicorn, Puma, embedded Tomcat) - not a raw dev server, and not a
+  hand-tuned production topology either (no clustering/worker-process fan-out
+  beyond what each framework does by default in a single container).
+  **Laravel is the one exception that needs a second process**: PHP-FPM has
+  no built-in HTTP listener, so nginx fronts it in the same container (the
+  standard LEMP pattern) - this is the one contender here that is a
+  framework-plus-web-server pair rather than a single process, by the nature
+  of how PHP itself works, not a choice made to favor or disfavor it.
+- **Rails and Django skip a real database on purpose.** Both are generated
+  with their ORM/session-persistence layers pointed at nothing (Rails:
+  `--skip-active-record`; Django: `SESSION_DRIVER`/`CACHE_STORE` forced to
+  in-memory) since none of the three endpoints touch one - this is a
+  best-case, no-I/O-wait number for both, not what either framework does in
+  a typical app with a real database in the loop.
 
 ## Extending it
 

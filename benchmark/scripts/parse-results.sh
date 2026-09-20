@@ -8,7 +8,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 RAW="$ROOT/results/raw"
 
 FRAMEWORKS=("$@")
-[ ${#FRAMEWORKS[@]} -eq 0 ] && FRAMEWORKS=(actix poseidon-v2 gofiber mormot2 nginx horse-epoll kestrel)
+[ ${#FRAMEWORKS[@]} -eq 0 ] && FRAMEWORKS=(actix poseidon-v2 gofiber mormot2 nginx horse-epoll kestrel express fastapi django rails laravel spring-boot)
 
 display_name() {
   case "$1" in
@@ -19,6 +19,12 @@ display_name() {
     nginx) echo "nginx" ;;
     horse-epoll) echo "Horse" ;;
     kestrel) echo "Kestrel" ;;
+    express) echo "Express" ;;
+    fastapi) echo "FastAPI" ;;
+    django) echo "Django" ;;
+    rails) echo "Rails (Puma)" ;;
+    laravel) echo "Laravel" ;;
+    spring-boot) echo "Spring Boot" ;;
     *) echo "$1" ;;
   esac
 }
@@ -32,6 +38,12 @@ display_tech() {
     nginx) echo "C" ;;
     horse-epoll) echo "Object Pascal" ;;
     kestrel) echo "C#/.NET" ;;
+    express) echo "Node.js" ;;
+    fastapi) echo "Python" ;;
+    django) echo "Python" ;;
+    rails) echo "Ruby" ;;
+    laravel) echo "PHP" ;;
+    spring-boot) echo "Java" ;;
     *) echo "?" ;;
   esac
 }
