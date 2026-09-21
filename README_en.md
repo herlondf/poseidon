@@ -87,15 +87,21 @@ The I/O backend is selected **once** at startup, with automatic fallback: **IOCP
 
 ## Performance vs. the Field
 
-Seven HTTP servers, one at a time, same machine, same window.
+Thirteen HTTP servers, one at a time, same machine, same window - the seven already in this
+comparison plus six classic representatives of other ecosystems (Node.js, Python, Ruby, PHP,
+Java), to answer directly: does an Object Pascal HTTP framework compete on equal footing with the
+best-known names in the industry?
 
 **Scenario.** Mixed workload, 40% `/plaintext` (13 B), 30% `/json` (27 B), 30% `/json-large`
-(63 KB), driven by `wrk -t8 -c200` for 300 s per framework after a discarded 15 s warm-up.
+(63 KB), driven by `wrk -t4 -c200` for 300 s per framework after a discarded 20 s warm-up.
 Every server ran in Docker under `--cpuset-cpus` pinning it to **2 dedicated physical cores**
-plus `--cpus=2.0` and a **1 GB** memory limit; the load generator was isolated on 4 other
-physical cores, so it never competed with the server and never saturated (peak 442% of 800%
-available). All seven served byte-identical payloads and the measured request mix came out
-40.0/30.0/30.0 for each. Host: Ryzen 7 5800H, WSL2, Linux 6.6.
+(`--cpus=2.0`, **1 GB** memory limit); the load generator was isolated on 2 other dedicated
+physical cores, on a dedicated bridge network (not `--network host`, so the same script works on
+Windows+Docker Desktop too - see the full methodology and trade-offs in
+[`benchmark/README.md`](benchmark/README.md)). All thirteen served byte-identical payloads and the
+measured request mix came out 40.0/30.0/30.0 for each. Host: debian-bench (4 physical cores
+total). Reproduce it yourself with `benchmark/scripts/run-all.sh` (or `.ps1` on Windows) - it
+builds and measures all thirteen from each framework's real source, nothing vendored.
 
 uWebSockets (uws) is not in this table. It is not a general-purpose HTTP framework: it is a raw
 sockets/event-loop library with no built-in backpressure, connection timeout handling, security
@@ -106,51 +112,48 @@ answer.
 
 | Rank | Framework | Technology | Req/s | p50 | p99 | Max | Errors |
 |---:|---|---|---:|---:|---:|---:|---:|
-| 1 | Actix | Rust | 37,146 | 5.12 ms | 15.21 ms | 143 ms | 0 |
-| **2** | **Poseidon v2** | **Object Pascal** | **35,941** | **5.30 ms** | **10.19 ms** | **64 ms** | **0** |
-| 3 | Go Fiber | Go | 30,641 | 6.39 ms | 18.60 ms | 52 ms | 0 |
-| 4 | mORMot2 | Object Pascal | 28,077 | 6.88 ms | 44.80 ms | 1,810 ms | 1 |
-| 5 | nginx | C | 20,281 | 9.29 ms | 20.08 ms | 307 ms | 0 |
-| 6 | Kestrel | C# / .NET | 17,599 | 10.31 ms | 29.94 ms | 101 ms | 0 |
-| 7 | Horse (Epoll) | Object Pascal | 2,554 | 79.63 ms | 799.25 ms | 1,990 ms | 64 |
-
-### Resource usage
-
-Same run, sampled every 5 s from the server container. Every framework saturated both CPUs, so
-CPU does not separate them; memory does.
-
-| Rank | Framework | Technology | Mem peak | Mem avg | CPU avg | Requests served |
-|---:|---|---|---:|---:|---:|---:|
-| **1** | **Poseidon v2** | **Object Pascal** | **5.2 MB** | **4.3 MB** | **199%** | **10,785,241** |
-| 2 | Go Fiber | Go | 7.2 MB | 6.7 MB | 197% | 9,195,118 |
-| 3 | Actix | Rust | 19.2 MB | 17.1 MB | 202% | 11,145,622 |
-| 4 | nginx | C | 21.8 MB | 20.8 MB | 198% | 6,086,278 |
-| 5 | mORMot2 | Object Pascal | 33.8 MB | 31.3 MB | 202% | 8,425,615 |
-| 6 | Kestrel | C# / .NET | 81.4 MB | 74.6 MB | 196% | 5,281,181 |
-| 7 | Horse (Epoll) | Object Pascal | 116.5 MB | 99.1 MB | 196% | 766,574 |
+| 1 | Actix | Rust | 27,249 | 4.88 ms | 17.58 ms | 71 ms | 0 |
+| **2** | **Poseidon v2** | **Object Pascal** | **25,289** | **5.39 ms** | **23.37 ms** | **95 ms** | **0** |
+| 3 | Go Fiber | Go | 23,792 | 7.52 ms | 28.17 ms | 106 ms | 0 |
+| 4 | mORMot2 | Object Pascal | 22,634 | 5.67 ms | 30.67 ms | 405 ms | 0 |
+| 5 | nginx | C | 18,241 | 9.63 ms | 29.98 ms | 199 ms | 0 |
+| 6 | Kestrel | C#/.NET | 10,776 | 15.83 ms | 95.92 ms | 1,539 ms | 200 |
+| 7 | Spring Boot | Java | 7,451 | 20.40 ms | 746.93 ms | 1,997 ms | 18 |
+| 8 | Horse (Epoll) | Object Pascal | 4,923 | 35.96 ms | 110.29 ms | 211 ms | 0 |
+| 9 | Express | Node.js | 2,594 | 74.78 ms | 110.25 ms | 1,981 ms | 56 |
+| 10 | FastAPI | Python | 1,501 | 127.39 ms | 188.90 ms | 794 ms | 0 |
+| 11 | Django | Python | 643 | 224.35 ms | 493.30 ms | 965 ms | 0 |
+| 12 | Rails (Puma) | Ruby | 595 | 324.11 ms | 454.24 ms | 563 ms | 0 |
+| 13 | Laravel | PHP | 160 | 1,142.97 ms | 1,787.06 ms | 1,999 ms | 1,414 |
 
 ### What the numbers say
 
-Second of seven on raw throughput, within 3.2% of first - inside the run-to-run variance of this
-machine. A hand-written Rust server and a Delphi framework are, on this workload, the same speed.
-But raw throughput is the least interesting line in the table. Read the other columns:
+Second of thirteen, within 7.2% of first - a hand-written Rust server stays ahead, but by a small
+margin. What this table really shows is the distance to the names most people associate with
+"production web framework":
 
-- **Best p99 and best maximum of the entire field.** 10.19 ms and 64 ms, against 15.21 ms / 143 ms
-  for Actix and 18.60 ms / 52 ms for Go Fiber. Under a container limit, tail latency is what your
-  users actually feel, and Poseidon holds the flattest tail of any server here.
-- **Smallest memory footprint of the entire field.** 5.2 MB peak, against 19.2 MB for Actix,
-  81 MB for Kestrel and 116 MB for Horse. That is 15x less RAM than Kestrel for twice its
-  throughput, which is the difference between one container and four.
-- **Zero errors in 10.8 million requests.** No timeouts, no resets, no non-2xx. Only three of the
-  seven managed that.
-- **14x Horse**, on the same compiler and the same runtime, with 22x less memory.
+- **2.3x Kestrel** (C#/.NET), **3.4x Spring Boot** (Java, the most-used enterprise framework in
+  the Java world) and **5.1x Horse** (the other Object Pascal framework on the list).
+- **9.8x Express** (the single most-used Node.js framework there is), **16.8x FastAPI** (Python),
+  **39x Django** (Python) and **42x Rails on Puma** (Ruby, Rails' own default app server since
+  v5).
+- **158x Laravel** (PHP) - though that mostly reflects default PHP-FPM saturating under sustained
+  load (1,414 errors over 300 s), not a particularly informative comparison on its own.
+- Still ahead of Go Fiber, mORMot2 and nginx - the three closest contenders after Actix.
 
-Two fixes landed in Poseidon while this was measured. An idle-sweep clock that wrapped in `UInt64`
-and closed the *busiest* connections (6,405 spurious socket errors, now zero, and +12% throughput
-as a side effect), and IO-worker sizing that ignored the container CPU budget (p99 down 31% in a
-paired A/B, 67% at 4 CPUs). Full methodology lives in the separate `Benchmark` harness (pointers in
-[`docs/playbook/07-benchmarking`](docs/playbook/07-benchmarking)); this repo's own reproducible
-numbers are in [`samples/08-benchmark/`](samples/08-benchmark/).
+Rails and Django run without a database (none of the three endpoints needs persistence), and
+Express/FastAPI/Spring Boot/Kestrel each run their own framework's default server, with no
+production tuning beyond the default - see the full trade-offs and the reasoning behind each one
+in [`benchmark/README.md`](benchmark/README.md#methodology-notes--honest-caveats).
+
+Two fixes landed in Poseidon during an earlier measurement in this same comparison (on a different,
+16-core host): an idle-sweep clock that wrapped in `UInt64` and closed the *busiest* connections
+(6,405 spurious socket errors, now zero, and +12% throughput as a side effect), and IO-worker
+sizing that ignored the container CPU budget (p99 down 31% in a paired A/B, 67% at 4 CPUs).
+Further methodology detail lives in
+[`docs/playbook/07-benchmarking`](docs/playbook/07-benchmarking); a standalone (no-Docker) Delphi
+benchmark harness lives in [`samples/08-benchmark/`](samples/08-benchmark/) - this table's numbers
+come from the reproducible Docker harness in [`benchmark/`](benchmark/).
 
 <p align="center">
   <img src="docs/framework-features.svg" alt="Poseidon protocol/feature comparison against 6 other frameworks" width="880"/>

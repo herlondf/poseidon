@@ -87,15 +87,21 @@ O backend de I/O e selecionado **uma unica vez** na inicializacao, com fallback 
 
 ## Performance vs. o Mercado
 
-Sete servidores HTTP, um de cada vez, na mesma máquina e na mesma janela.
+Treze servidores HTTP, um de cada vez, na mesma máquina e na mesma janela - sete frameworks
+já conhecidos deste comparativo mais seis representantes clássicos de outros ecossistemas
+(Node.js, Python, Ruby, PHP, Java), pra responder de forma direta: um framework HTTP em Object
+Pascal compete de igual pra igual com os nomes mais conhecidos do mercado?
 
 **Cenário.** Carga mista: 40% `/plaintext` (13 B), 30% `/json` (27 B), 30% `/json-large` (63 KB),
-gerada por `wrk -t8 -c200` durante 300 s por framework, após 15 s de aquecimento descartado. Cada
-servidor rodou em Docker com `--cpuset-cpus` fixando **2 núcleos físicos dedicados**, mais
-`--cpus=2.0` e limite de **1 GB** de memória; o gerador de carga ficou isolado em outros 4 núcleos
-físicos, então nunca disputou CPU com o servidor nem saturou (pico de 442% dos 800% disponíveis).
-Os sete serviram payloads byte a byte idênticos e o mix medido saiu 40,0/30,0/30,0 em todos.
-Host: Ryzen 7 5800H, WSL2, Linux 6.6.
+gerada por `wrk -t4 -c200` durante 300 s por framework, após 20 s de aquecimento descartado. Cada
+servidor rodou em Docker com `--cpuset-cpus` fixando **2 núcleos físicos dedicados** (`--cpus=2.0`,
+limite de **1 GB** de memória); o gerador de carga ficou isolado em outros 2 núcleos físicos
+dedicados, numa rede bridge dedicada (não `--network host`, pra funcionar em Windows+Docker Desktop
+também - ver métodologia completa e as trocas envolvidas em
+[`benchmark/README.md`](benchmark/README.md)). Os treze serviram payloads byte a byte idênticos e
+o mix medido saiu 40,0/30,0/30,0 em todos. Host: debian-bench (4 núcleos físicos totais). Reproduza
+você mesmo com `benchmark/scripts/run-all.sh` (ou `.ps1` no Windows) - constrói e mede todos os
+treze a partir do código-fonte real de cada framework, sem nada vendorizado.
 
 uWebSockets (uws) não entra nesta tabela. Não é um framework HTTP de propósito geral: é uma
 biblioteca de sockets/event-loop sem backpressure, sem timeout de conexão, sem headers de
@@ -106,52 +112,49 @@ responder.
 
 | Posição | Framework | Tecnologia | Req/s | p50 | p99 | Máx | Erros |
 |---:|---|---|---:|---:|---:|---:|---:|
-| 1 | Actix | Rust | 37.146 | 5,12 ms | 15,21 ms | 143 ms | 0 |
-| **2** | **Poseidon v2** | **Object Pascal** | **35.941** | **5,30 ms** | **10,19 ms** | **64 ms** | **0** |
-| 3 | Go Fiber | Go | 30.641 | 6,39 ms | 18,60 ms | 52 ms | 0 |
-| 4 | mORMot2 | Object Pascal | 28.077 | 6,88 ms | 44,80 ms | 1.810 ms | 1 |
-| 5 | nginx | C | 20.281 | 9,29 ms | 20,08 ms | 307 ms | 0 |
-| 6 | Kestrel | C# / .NET | 17.599 | 10,31 ms | 29,94 ms | 101 ms | 0 |
-| 7 | Horse (Epoll) | Object Pascal | 2.554 | 79,63 ms | 799,25 ms | 1.990 ms | 64 |
-
-### Consumo de recursos
-
-Mesma execução, amostrada a cada 5 s no contêiner do servidor. Todos saturaram as duas CPUs, então
-CPU não separa ninguém; memória sim.
-
-| Posição | Framework | Tecnologia | Mem pico | Mem média | CPU média | Requisições servidas |
-|---:|---|---|---:|---:|---:|---:|
-| **1** | **Poseidon v2** | **Object Pascal** | **5,2 MB** | **4,3 MB** | **199%** | **10.785.241** |
-| 2 | Go Fiber | Go | 7,2 MB | 6,7 MB | 197% | 9.195.118 |
-| 3 | Actix | Rust | 19,2 MB | 17,1 MB | 202% | 11.145.622 |
-| 4 | nginx | C | 21,8 MB | 20,8 MB | 198% | 6.086.278 |
-| 5 | mORMot2 | Object Pascal | 33,8 MB | 31,3 MB | 202% | 8.425.615 |
-| 6 | Kestrel | C# / .NET | 81,4 MB | 74,6 MB | 196% | 5.281.181 |
-| 7 | Horse (Epoll) | Object Pascal | 116,5 MB | 99,1 MB | 196% | 766.574 |
+| 1 | Actix | Rust | 27.249 | 4,88 ms | 17,58 ms | 71 ms | 0 |
+| **2** | **Poseidon v2** | **Object Pascal** | **25.289** | **5,39 ms** | **23,37 ms** | **95 ms** | **0** |
+| 3 | Go Fiber | Go | 23.792 | 7,52 ms | 28,17 ms | 106 ms | 0 |
+| 4 | mORMot2 | Object Pascal | 22.634 | 5,67 ms | 30,67 ms | 405 ms | 0 |
+| 5 | nginx | C | 18.241 | 9,63 ms | 29,98 ms | 199 ms | 0 |
+| 6 | Kestrel | C#/.NET | 10.776 | 15,83 ms | 95,92 ms | 1.539 ms | 200 |
+| 7 | Spring Boot | Java | 7.451 | 20,40 ms | 746,93 ms | 1.997 ms | 18 |
+| 8 | Horse (Epoll) | Object Pascal | 4.923 | 35,96 ms | 110,29 ms | 211 ms | 0 |
+| 9 | Express | Node.js | 2.594 | 74,78 ms | 110,25 ms | 1.981 ms | 56 |
+| 10 | FastAPI | Python | 1.501 | 127,39 ms | 188,90 ms | 794 ms | 0 |
+| 11 | Django | Python | 643 | 224,35 ms | 493,30 ms | 965 ms | 0 |
+| 12 | Rails (Puma) | Ruby | 595 | 324,11 ms | 454,24 ms | 563 ms | 0 |
+| 13 | Laravel | PHP | 160 | 1.142,97 ms | 1.787,06 ms | 1.999 ms | 1.414 |
 
 ### O que os números dizem
 
-Segundo de sete em throughput bruto, a 3,2% do primeiro - dentro da variação entre execuções desta
-máquina. Um servidor Rust escrito à mão e um framework Delphi são, nesta carga, igualmente rápidos.
-Mas throughput bruto é a linha menos interessante da tabela. Leia as outras colunas:
+Segundo de treze, a 7,2% do primeiro - um servidor Rust escrito à mão continua na frente, mas por
+uma margem pequena. O que essa tabela realmente mostra é a distância pros nomes que a maioria
+associa a "framework web de produção":
 
-- **Melhor p99 e melhor máximo de todo o comparativo.** 10,19 ms e 64 ms, contra 15,21 ms / 143 ms
-  do Actix e 18,60 ms / 52 ms do Go Fiber. Sob limite de contêiner, a cauda é o que o usuário
-  sente de verdade, e o Poseidon sustenta a cauda mais plana de todos aqui.
-- **Menor consumo de memória de todo o comparativo.** 5,2 MB de pico, contra 19,2 MB do Actix,
-  81 MB do Kestrel e 116 MB do Horse. São 15x menos RAM que o Kestrel para o dobro do throughput,
-  o que é a diferença entre um contêiner e quatro.
-- **Zero erros em 10,8 milhões de requisições.** Nenhum timeout, nenhum reset, nenhum non-2xx.
-  Apenas três dos sete conseguiram isso.
-- **14x o Horse**, no mesmo compilador e no mesmo runtime, com 22x menos memória.
+- **2,3x o Kestrel** (C#/.NET), **3,4x o Spring Boot** (Java, o framework enterprise mais usado do
+  mundo Java) e **5,1x o Horse** (o outro framework Object Pascal da lista).
+- **9,8x o Express** (o framework Node.js mais usado que existe), **16,8x o FastAPI** (Python),
+  **39x o Django** (Python) e **42x o Rails com Puma** (Ruby, o app server padrão do Rails desde a
+  v5).
+- **158x o Laravel** (PHP) - mas isso reflete o PHP-FPM padrão saturando sob carga sustentada
+  (1.414 erros no meio de 300 s), não uma comparação particularmente informativa por si só.
+- Ainda na frente do Go Fiber, mORMot2 e nginx - os três mais próximos depois do Actix.
 
-Duas correções entraram no Poseidon durante a medição. Um relógio do idle sweep que estourava em
-`UInt64` e fechava justamente as conexões **mais movimentadas** (6.405 erros de socket espúrios,
-agora zero, e +12% de throughput de brinde), e o dimensionamento de IO workers que ignorava o
-orçamento de CPU do contêiner (p99 31% menor em A/B pareado, 67% com 4 CPUs). A metodologia
-completa vive no harness `Benchmark` separado (ponteiros em
-[`docs/playbook_pt-br/07-benchmarking`](docs/playbook_pt-br/07-benchmarking)); os números
-reproduzíveis deste próprio repo estão em [`samples/08-benchmark/`](samples/08-benchmark/).
+Rails e Django rodam sem banco de dados (nenhum dos três endpoints precisa de persistência) e
+Express/FastAPI/Spring Boot/Kestrel usam o próprio servidor padrão de cada framework, sem tuning
+de produção além do default - ver as trocas completas e o motivo de cada uma em
+[`benchmark/README.md`](benchmark/README.md#methodology-notes--honest-caveats) (em inglês).
+
+Duas correções entraram no Poseidon durante uma medição anterior neste mesmo comparativo (num host
+diferente, 16 núcleos): um relógio do idle sweep que estourava em `UInt64` e fechava justamente as
+conexões **mais movimentadas** (6.405 erros de socket espúrios, agora zero, e +12% de throughput de
+brinde), e o dimensionamento de IO workers que ignorava o orçamento de CPU do contêiner (p99 31%
+menor em A/B pareado, 67% com 4 CPUs). Detalhes adicionais de metodologia em
+[`docs/playbook_pt-br/07-benchmarking`](docs/playbook_pt-br/07-benchmarking); um harness de
+benchmark em Delphi standalone (sem Docker) está em
+[`samples/08-benchmark/`](samples/08-benchmark/) - os números desta tabela vêm do harness Docker
+reproduzível em [`benchmark/`](benchmark/).
 
 <p align="center">
   <img src="docs/framework-features_pt-br.svg" alt="Comparacao de recursos de protocolo do Poseidon contra 6 outros frameworks" width="880"/>
