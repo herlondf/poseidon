@@ -89,7 +89,9 @@ $dir = 'D:\IA\Projetos\Delphi\Poseidon\actions-runner'
 # subir (janela minimizada) e esperar ficar online
 Start-Process -FilePath "$dir\run.cmd" -WorkingDirectory $dir -WindowStyle Minimized
 gh api repos/herlondf/poseidon/actions/runners --jq '.runners[] | .name + " " + .status'
-# fechar, so depois que o run terminou (gh run list mostra "completed")
+# com o runner aberto, rodar tambem o fuzz (sem agendamento: so sob demanda)
+gh workflow run "Fuzz Nightly" -R herlondf/poseidon
+# fechar, so depois que os runs terminaram (gh run list mostra "completed")
 Get-Process Runner.Listener, Runner.Worker -ErrorAction SilentlyContinue |
   Where-Object { $_.Path -like "$dir\*" } | Stop-Process
 ```

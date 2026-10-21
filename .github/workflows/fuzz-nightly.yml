@@ -3,7 +3,7 @@ name: Fuzz Nightly
 # Continuous fuzzing (issue #217). The per-push CI gate (ci.yml) runs the
 # socket-free fuzz runner ONCE with the deterministic regression corpus — fast,
 # reproducible, blocks merges on any crash/hang. THIS workflow complements it:
-# nightly it re-runs the same runner with a large FUZZ_SCALE and a fresh
+# on demand it re-runs the same runner with a large FUZZ_SCALE and a fresh
 # per-run FUZZ_SEED, so HTTP/1, HPACK and WebSocket parsing get exercised over a
 # much wider, ever-changing input space than a single push can afford.
 #
@@ -16,9 +16,9 @@ name: Fuzz Nightly
 #
 # Self-hosted Windows runner only — Poseidon needs RAD Studio (dcc64); see ci.yml.
 
+# Sob demanda (sem agendamento): o runner self-hosted só fica aberto quando há build ou release,
+# e quem abre o runner dispara este workflow junto (gh workflow run "Fuzz Nightly").
 on:
-  schedule:
-    - cron: '0 4 * * *'   # 04:00 UTC daily
   workflow_dispatch:
     inputs:
       scale:
