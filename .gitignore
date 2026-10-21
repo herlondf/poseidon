@@ -92,3 +92,5 @@ taskdef_current.json
 # the generated RESULTS.md and .gitkeep placeholders.
 benchmark/results/raw/
 benchmark/docker/fpc-trunk/Dockerfile.debug
+# Runner self-hosted do CI (instalação local; sobe só quando precisa, ver ci/README.md)
+actions-runner/

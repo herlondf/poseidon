@@ -64,7 +64,7 @@ de desenvolvimento: RAD Studio 22.0 com toolchain Linux64, WSL2 e as distros
 
 ```powershell
 # 1. baixar e extrair (versao atual: 2.337.0)
-$dir = 'D:ctions-runner'
+$dir = 'D:\IA\Projetos\Delphi\Poseidon\actions-runner'
 New-Item -ItemType Directory -Force $dir | Out-Null
 # baixe actions-runner-win-x64-<versao>.zip das releases de actions/runner
 # e extraia em $dir
@@ -76,34 +76,26 @@ $tok = gh api -X POST repos/herlondf/poseidon/actions/runners/registration-token
   --work "_work" --unattended --replace
 ```
 
-### Por que tarefa agendada e nao servico
+### Subir so quando precisar (sem inicializacao automatica)
 
-`svc.cmd install` exige elevacao, e aqui o servico seria pior: os jobs de
-conformance usam WSL e Docker Desktop, que dependem da sessao interativa do
-usuario. Um servico rodando como SYSTEM nao enxerga essa sessao. A tarefa
-agendada roda no logon, na sessao certa, e sobrevive a reboot.
-
-```powershell
-$name = 'GitHubActionsRunner-Poseidon'
-$act = New-ScheduledTaskAction -Execute "$dir\run.cmd" -WorkingDirectory $dir
-$trg = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName $name -Action $act -Trigger $trg -Settings $set
-Start-ScheduledTask -TaskName $name
-```
-
-### Operacao
+O runner nao sobe no logon nem roda como servico: e aberto a mao quando um push,
+PR ou release precisa do CI, e fechado quando o run termina. Roda na sessao do
+usuario logado (os jobs de conformance usam WSL e Docker Desktop, que um servico
+como SYSTEM nao enxerga). A pasta `actions-runner/` fica na raiz do repo e esta
+no `.gitignore`.
 
 ```powershell
-Get-ScheduledTask -TaskName 'GitHubActionsRunner-Poseidon'   # estado
-Stop-ScheduledTask  -TaskName 'GitHubActionsRunner-Poseidon' # pausar (maquina ocupada)
-Start-ScheduledTask -TaskName 'GitHubActionsRunner-Poseidon' # retomar
+$dir = 'D:\IA\Projetos\Delphi\Poseidon\actions-runner'
+# subir (janela minimizada) e esperar ficar online
+Start-Process -FilePath "$dir\run.cmd" -WorkingDirectory $dir -WindowStyle Minimized
+gh api repos/herlondf/poseidon/actions/runners --jq '.runners[] | .name + " " + .status'
+# fechar, so depois que o run terminou (gh run list mostra "completed")
+Get-Process Runner.Listener, Runner.Worker -ErrorAction SilentlyContinue |
+  Where-Object { $_.Path -like "$dir\*" } | Stop-Process
 ```
 
-O runner ocupa a maquina em cada push e PR na master, e a suite Win64 sobe
-servidores reais em portas locais. Em maquina de trabalho, `Stop-ScheduledTask`
-antes de uma sessao pesada evita disputa por CPU e porta.
+O runner ocupa a maquina durante o run, e a suite Win64 sobe servidores reais em
+portas locais: por isso ele fica fechado fora dos momentos em que o CI e preciso.
 
 ## Linux conformance — one-time WSL provisioning
 
